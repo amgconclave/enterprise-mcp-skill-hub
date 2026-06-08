@@ -10,7 +10,6 @@ import yaml
 from app.bootstrap import create_state
 from app.models import SkillManifest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "sample_data" / "manifests"
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from app.models import JsonDict
 
@@ -57,10 +56,12 @@ async def translate_text(payload: JsonDict) -> JsonDict:
 
 async def classify_request(payload: JsonDict) -> JsonDict:
     request = payload["request"].lower()
-    if any(term in request for term in ["outage", "down", "blocked", "security"]):
+    if any(term in request for term in ["outage", "down"]):
         category, priority, confidence = "incident", "high", 0.91
     elif any(term in request for term in ["rfp", "proposal", "procurement"]):
         category, priority, confidence = "sales", "medium", 0.86
+    elif any(term in request for term in ["blocked", "security"]):
+        category, priority, confidence = "incident", "high", 0.91
     elif any(term in request for term in ["refund", "support", "ticket"]):
         category, priority, confidence = "support", "medium", 0.82
     else:
@@ -77,7 +78,7 @@ async def generate_action_items(payload: JsonDict) -> JsonDict:
     text = payload["text"]
     lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
     tasks = []
-    for index, line in enumerate(lines[:8], start=1):
+    for line in lines[:8]:
         if re.search("follow|owner|todo|action|next|by ", line, re.I):
             owner_match = re.search(r"\b([A-Z][a-z]+)\b", line)
             due_match = re.search(r"\b(?:by|due)\s+([A-Za-z]+\s+\d{1,2}|\d{4}-\d{2}-\d{2})", line, re.I)

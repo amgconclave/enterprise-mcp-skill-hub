@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-
 JsonDict = dict[str, Any]
 SkillStatus = Literal["enabled", "disabled"]
 InvocationStatus = Literal["succeeded", "failed"]

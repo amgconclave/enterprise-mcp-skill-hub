@@ -6,7 +6,6 @@ from pydantic import ValidationError
 
 from app.models import JsonDict, SkillManifest, ValidationResult
 
-
 TYPE_MAP = {
     "string": str,
     "integer": int,
@@ -30,6 +29,9 @@ class SkillValidator:
 
     def validate_invocation(self, manifest: SkillManifest, payload: JsonDict) -> list[str]:
         return self._validate_payload(manifest.input_schema, payload)
+
+    def validate_output(self, manifest: SkillManifest, payload: JsonDict) -> list[str]:
+        return self._validate_payload(manifest.output_schema, payload)
 
     def _validate_schema(self, schema: JsonDict, label: str) -> list[str]:
         errors: list[str] = []

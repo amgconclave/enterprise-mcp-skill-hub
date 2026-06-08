@@ -2,141 +2,89 @@ Enterprise teams duplicate AI automations because reusable skills are hard to go
 
 Enterprise MCP Skill Hub is a locally runnable FastAPI and MCP-compatible skill layer where approved AI capabilities are registered by manifest, discovered dynamically, invoked with schema validation, and monitored with audit and usage telemetry.
 
-## 30-Second Demo
+# Enterprise MCP Skill Hub
 
-```bash
+Enterprise MCP Skill Hub (`enterprise-mcp-skill-hub` / `emcp-hub`) is a locally runnable reference implementation of a governed reusable skill layer for enterprise agents. It exposes approved skills through FastAPI and an MCP-compatible adapter with tools, resources, and prompts.
+
+The default mode is deterministic mock LLM execution, so a fresh clone works without paid API keys. OpenAI and Azure OpenAI providers are available behind the `BaseLLMProvider` interface for teams that want to wire in hosted models later.
+
+## What It Includes
+
+- FastAPI admin API for skill registration, validation, enable/disable, invocation, versions, agent runs, audit, metrics, and health.
+- MCP-compatible discovery and invocation for tools, resources, and prompts.
+- Six built-in skills: `summarize_document`, `extract_entities`, `translate_text`, `classify_request`, `generate_action_items`, and `search_knowledge_base`.
+- Manifest-first governance with JSON-schema-shaped input/output schemas.
+- Disabled skills are excluded from MCP tool discovery and blocked during invocation.
+- Trace IDs, audit events, invocation history, latency/token/cost metrics, and API-key auth.
+- Streamlit admin console for catalog, validation, invocation, demo agent, MCP inspector, metrics, and audit.
+- Sample policy/product resources, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
+
+## Quick Start
+
+```powershell
+cd C:\Users\Devan\Documents\emcp-hub
 python -m pip install -r requirements-dev.txt
-python -m app.demo
+python -m pytest
 python -m app.evals.run_eval
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-In another terminal:
+Get a demo token:
 
-```bash
+```powershell
 curl -X POST http://localhost:8000/auth/demo-token
-curl -H "X-API-Key: dev-local-token" http://localhost:8000/mcp/tools
 ```
 
-Dashboard:
+Use the returned `X-API-Key` value for protected endpoints.
 
-```bash
+Run the local demo agent:
+
+```powershell
+python -m app.demo
+```
+
+Run the dashboard:
+
+```powershell
 python -m streamlit run dashboard/streamlit_app.py
 ```
 
-Windows PowerShell equivalents work with the same `python -m ...` commands. If `make` is available, use:
+Run both API and dashboard:
 
-```bash
-make install
-make test
-make dev
-make mcp
-make dashboard
-make demo
-make validate-skills
-make eval
+```powershell
+docker compose up --build
 ```
 
-## Architecture
+## MCP-Compatible Inspector
 
-```mermaid
-flowchart LR
-    Agent["Demo Agent / MCP Client"] --> MCP["McpToolAdapter"]
-    API["FastAPI Admin API"] --> Registry["SkillRegistry"]
-    UI["Streamlit Console"] --> Registry
-    MCP --> Registry
-    MCP --> Invoke["SkillInvocationService"]
-    Registry --> Validator["SkillValidator"]
-    Invoke --> Provider["Mock / OpenAI / Azure Provider"]
-    Invoke --> Audit["AuditService"]
-    Invoke --> Metrics["MetricsService"]
-    MCP --> Resources["ResourceRegistry"]
-    MCP --> Prompts["PromptRegistry"]
+```powershell
+python -m app.mcp_server tools
+python -m app.mcp_server resources
+python -m app.mcp_server prompts
+python -m app.mcp_server call --name summarize_document --arguments "{\"text\":\"Atlas Labs needs governed AI skills.\"}"
 ```
 
-## What This Demonstrates
-
-- Model Context Protocol concepts: tools, resources, prompts, discovery, and invocation.
-- Reusable agent skills with YAML manifests, input/output schemas, versioning, and enabled status.
-- Dynamic tool discovery where disabled skills disappear from MCP tool listings.
-- FastAPI reference APIs for registration, validation, invocation, metrics, and audit logs.
-- Prompt and context engineering through reusable prompt templates and governed resource exposure.
-- Token usage, latency, cost estimates, trace IDs, structured audit events, and failure metrics.
-- Provider adapters for deterministic mock mode plus optional OpenAI and Azure OpenAI paths.
-- Enterprise handoff docs for full-stack and DevOps teams.
-
-## Built-In Skills
-
-- `summarize_document`
-- `extract_entities`
-- `translate_text`
-- `classify_request`
-- `generate_action_items`
-- `search_knowledge_base`
-
-Each built-in skill has a manifest under `sample_data/manifests/`, deterministic mock behavior, and tests.
-
-## Screenshots
-
-Run the dashboard and capture these views for portfolio use:
-
-1. Skill Catalog
-2. Invoke Skill
-3. Demo Agent
-4. MCP Inspector
-5. Metrics
-6. Audit Events
-
-The first screen is the usable admin console, not a marketing page.
-
-## Local API
-
-The API uses simple demo API-key auth. Get the token:
-
-```bash
-curl -X POST http://localhost:8000/auth/demo-token
-```
-
-Invoke a skill:
-
-```bash
-curl -X POST http://localhost:8000/skills/classify_request/invoke \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: dev-local-token" \
-  -d "{\"input\":{\"request\":\"Security review is blocking the RFP.\"}}"
-```
+The adapter intentionally uses protocol-shaped payloads even when the official MCP SDK is not installed. See [docs/mcp.md](docs/mcp.md).
 
 ## Project Layout
 
-```text
-app/                 FastAPI app, services, MCP adapter, providers, evals
-dashboard/           Streamlit admin console
-docs/                Architecture, API, MCP, manifest, evaluation, Azure notes
-sample_data/         Fake manifests, policies, product docs, and demo inputs
-tests/               Pytest coverage for governance, MCP, metrics, auth
-typescript-bridge/   Optional Zod-to-MCP-compatible JSON schema example
-```
+- `app/` - FastAPI app, domain models, registries, validators, providers, MCP adapter, demo, evals.
+- `dashboard/` - Streamlit admin console.
+- `sample_data/` - sample resources, tickets, meeting notes, expected outputs, and YAML skill manifests.
+- `tests/` - pytest coverage for acceptance criteria.
+- `docs/` - architecture, API, MCP, manifests, evaluation, and Azure notes.
+- `typescript-bridge/` - optional Zod-to-MCP JSON schema concept.
 
-## Provider Modes
+## Environment
 
-Default local mode is deterministic and free:
+Copy `.env.example` to `.env` if you want to override defaults. Local mode needs no external key.
 
-```bash
+```env
+API_KEY=dev-local-token
 LLM_PROVIDER=mock
 ```
 
-Optional providers are configured through `.env`:
+Optional provider modes:
 
-```bash
-LLM_PROVIDER=openai
-OPENAI_API_KEY=...
-```
-
-```bash
-LLM_PROVIDER=azure_openai
-AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_ENDPOINT=...
-AZURE_OPENAI_DEPLOYMENT=...
-```
-
-Mock mode remains the expected path for interviews, CI, and fresh clones.
+- `LLM_PROVIDER=openai` with `OPENAI_API_KEY`.
+- `LLM_PROVIDER=azure_openai` with `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`.

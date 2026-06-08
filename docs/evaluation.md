@@ -1,30 +1,26 @@
 # Evaluation
 
-Run deterministic local validation:
+The eval command is a local acceptance smoke test for the hub:
 
-```bash
+```powershell
 python -m app.evals.run_eval
+python -m app.evals.run_eval --validate-only
 ```
 
-Or:
+It checks:
 
-```bash
-make eval
-make validate-skills
+- Built-in manifests validate.
+- An invalid manifest is rejected.
+- Disabled skills are excluded from MCP tool listing.
+- Built-in skills invoke successfully in mock mode.
+- The demo agent selects at least two governed skills.
+- Metrics include token and latency records.
+
+The pytest suite provides deeper endpoint and service coverage:
+
+```powershell
+python -m pytest
 ```
 
-The eval prints:
+Covered behavior includes auth, health, registration, validation, invocation, disabled skill blocking, MCP tools/resources/prompts, agent routing, metrics, audit, and invocation history.
 
-- number of manifests checked
-- valid manifest count
-- invalid manifest rejection count
-- enabled MCP tool count
-- disabled skill exclusion result
-- built-in skill invocation success count
-- demo agent selected-skill count
-- average invocation latency
-- token usage
-- estimated cost
-- pass/fail summary
-
-Mock mode is deterministic so CI and interviews produce stable results without paid API keys.

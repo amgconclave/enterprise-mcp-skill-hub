@@ -1,20 +1,14 @@
 # Azure Deployment Notes
 
-The local project defaults to `MockLLMProvider`. To test Azure OpenAI, set:
+The project runs locally in mock mode by default. To adapt it for Azure:
 
-```bash
-LLM_PROVIDER=azure_openai
-AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-AZURE_OPENAI_DEPLOYMENT=your-deployment
-```
+1. Containerize with the included `Dockerfile`.
+2. Store secrets in Azure Key Vault or managed environment variables.
+3. Set `LLM_PROVIDER=azure_openai`.
+4. Set `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`.
+5. Put the API behind an authenticated ingress such as Azure API Management or App Service authentication.
+6. Persist audit, invocation, and metrics streams to Azure Monitor, Log Analytics, or a database.
+7. Keep `API_KEY` rotation separate from model provider credentials.
 
-Operational recommendations:
+The Azure provider is intentionally optional. The acceptance path should continue to pass without Azure credentials.
 
-- keep provider credentials outside the repo
-- separate local, staging, and production deployments
-- record provider, model, token usage, latency, and trace ID for each invocation
-- require security review before enabling skills that call external models
-- use disabled status to hide tools from MCP discovery before rollback or deprecation
-
-The provider adapter boundary is intentionally small, so teams can add enterprise policy checks, content filters, network controls, or customer-specific routing without changing the skill manifest contract.

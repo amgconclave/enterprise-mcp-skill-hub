@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
 
 from app.models import (
     AgentRun,
@@ -150,12 +150,19 @@ class SkillInvocationService:
         errors = self.validator.validate_invocation(manifest, payload)
         if errors:
             return self._record_failure(manifest, payload, trace_id, actor, "; ".join(errors), 0.0)
-        handler = BUILTIN_HANDLERS.get(skill_id)
-        if not handler:
-            return self._record_failure(manifest, payload, trace_id, actor, "No handler registered.", 0.0)
-
         with Timer() as timer:
-            output = await handler(payload)
+            handler = BUILTIN_HANDLERS.get(skill_id)
+            output = await handler(payload) if handler else await self._invoke_manifest_backed_skill(manifest, payload)
+        output_errors = self.validator.validate_output(manifest, output)
+        if output_errors:
+            return self._record_failure(
+                manifest,
+                payload,
+                trace_id,
+                actor,
+                f"Output schema validation failed: {'; '.join(output_errors)}",
+                round(timer.elapsed_ms, 2),
+            )
         usage = TokenUsage(
             input_tokens=sum(len(str(value).split()) for value in payload.values()),
             output_tokens=sum(len(str(value).split()) for value in output.values()),
@@ -189,6 +196,28 @@ class SkillInvocationService:
             )
         )
         return invocation
+
+    async def _invoke_manifest_backed_skill(self, manifest: SkillManifest, payload: JsonDict) -> JsonDict:
+        response, _usage = await self.provider.complete(
+            f"Run governed skill {manifest.id}: {manifest.description}",
+            {"input": payload, "schema": manifest.output_schema},
+        )
+        output: JsonDict = {}
+        for field_name, definition in manifest.output_schema.get("properties", {}).items():
+            schema_type = definition.get("type")
+            if schema_type == "string":
+                output[field_name] = response
+            elif schema_type == "integer":
+                output[field_name] = 0
+            elif schema_type == "number":
+                output[field_name] = 0.0
+            elif schema_type == "boolean":
+                output[field_name] = True
+            elif schema_type == "array":
+                output[field_name] = []
+            elif schema_type == "object":
+                output[field_name] = {}
+        return output
 
     def _record_failure(
         self,
@@ -273,6 +302,7 @@ class PromptRegistry:
 class ResourceRegistry:
     def __init__(self, registry: SkillRegistry) -> None:
         self.registry = registry
+        self.root = Path(__file__).resolve().parents[1]
         self.resources = [
             ResourcePayload(
                 definition=ResourceDefinition(
@@ -282,7 +312,7 @@ class ResourceRegistry:
                     content_ref="sample_data/policy_ai_governance.md",
                     annotations={"kind": "policy"},
                 ),
-                content="AI skills must be approved, schema validated, traceable, and reviewed before production use.",
+                content="",
             ),
             ResourcePayload(
                 definition=ResourceDefinition(
@@ -292,7 +322,17 @@ class ResourceRegistry:
                     content_ref="sample_data/product_skill_hub.md",
                     annotations={"kind": "product"},
                 ),
-                content="Enterprise MCP Skill Hub exposes reusable, governed AI capabilities to agents and apps.",
+                content="",
+            ),
+            ResourcePayload(
+                definition=ResourceDefinition(
+                    uri="resource://policy/vendor-risk",
+                    name="Vendor Risk Policy",
+                    description="Fake vendor risk policy for third-party LLM and tool provider reviews.",
+                    content_ref="sample_data/vendor_risk_policy.md",
+                    annotations={"kind": "policy"},
+                ),
+                content="",
             ),
         ]
 
@@ -315,8 +355,16 @@ class ResourceRegistry:
             )
         for resource in self.resources:
             if resource.definition.uri == uri:
-                return resource
+                return resource.model_copy(update={"content": self._load_content(resource)})
         raise KeyError(f"Unknown resource: {uri}")
+
+    def _load_content(self, resource: ResourcePayload) -> str:
+        if resource.content:
+            return resource.content
+        path = self.root / resource.definition.content_ref
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return f"Resource file not found: {resource.definition.content_ref}"
 
 
 class McpToolAdapter:
@@ -373,7 +421,6 @@ class AgentRunner:
                 result = await self.mcp.call_tool(skill_id, payload, actor)
                 trace.append({"skill": skill_id, "reason": self._reason(skill_id), "result": result})
                 if result.get("status") == "succeeded":
-                    metadata = result["result"].get("metadata", {})
                     usage.input_tokens += len(str(payload).split())
                     usage.output_tokens += len(str(result["result"]).split())
         final_output = self._compose_final(prompt, trace)
@@ -389,19 +436,30 @@ class AgentRunner:
 
     def _select_skills(self, prompt: str) -> list[tuple[str, JsonDict]]:
         lower = prompt.lower()
+        available = {tool.name for tool in self.mcp.list_tools()}
         selected: list[tuple[str, JsonDict]] = []
-        selected.append(("classify_request", {"request": prompt}))
+        self._append_if_available(selected, available, "classify_request", {"request": prompt})
         if any(term in lower for term in ["summarize", "meeting", "document", "notes"]):
-            selected.append(("summarize_document", {"text": prompt}))
+            self._append_if_available(selected, available, "summarize_document", {"text": prompt})
         if any(term in lower for term in ["action", "owner", "next step", "meeting"]):
-            selected.append(("generate_action_items", {"text": prompt}))
+            self._append_if_available(selected, available, "generate_action_items", {"text": prompt})
         if any(term in lower for term in ["policy", "rfp", "knowledge", "approved"]):
-            selected.append(("search_knowledge_base", {"query": prompt, "limit": 3}))
+            self._append_if_available(selected, available, "search_knowledge_base", {"query": prompt, "limit": 3})
         if any(term in lower for term in ["entity", "extract", "people", "company"]):
-            selected.append(("extract_entities", {"text": prompt}))
+            self._append_if_available(selected, available, "extract_entities", {"text": prompt})
         if len(selected) < 2:
-            selected.append(("search_knowledge_base", {"query": prompt, "limit": 2}))
+            self._append_if_available(selected, available, "search_knowledge_base", {"query": prompt, "limit": 2})
         return selected
+
+    def _append_if_available(
+        self,
+        selected: list[tuple[str, JsonDict]],
+        available: set[str],
+        skill_id: str,
+        payload: JsonDict,
+    ) -> None:
+        if skill_id in available and skill_id not in {name for name, _ in selected}:
+            selected.append((skill_id, payload))
 
     def _reason(self, skill_id: str) -> str:
         reasons = {

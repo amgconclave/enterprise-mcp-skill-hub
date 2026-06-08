@@ -1,35 +1,39 @@
 # API
 
-All protected endpoints require:
+Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth/demo-token` is intentionally unauthenticated for local demos.
 
-```text
-X-API-Key: dev-local-token
-```
+## Required Endpoints
 
-## Endpoints
+- `POST /auth/demo-token` - returns the local demo token and header name.
+- `GET /health` - returns service health, provider mode, MCP mode, and version.
+- `GET /skills` - lists registered skills.
+- `POST /skills/register` - registers a `SkillManifest`.
+- `POST /skills/validate` - validates a raw manifest payload without registration.
+- `POST /skills/{skill_id}/invoke` - invokes an enabled skill with schema validation.
+- `PATCH /skills/{skill_id}/status` - enables or disables a skill.
+- `GET /skills/{skill_id}/versions` - returns registration history for a skill.
+- `POST /agents/run` - runs the demo agent against dynamically discovered skills.
+- `GET /audit/events` - returns governance audit events.
+- `GET /metrics/usage` - returns usage summary.
+- `GET /invocations` - returns invocation history.
 
-- `POST /auth/demo-token`: returns the local demo token.
-- `GET /health`: returns status, provider mode, MCP mode, and version.
-- `GET /skills`: lists registered skills.
-- `POST /skills/register`: registers a `SkillManifest`.
-- `POST /skills/validate`: validates a manifest without registering it.
-- `POST /skills/{skill_id}/invoke`: invokes an enabled skill.
-- `PATCH /skills/{skill_id}/status`: enables or disables a skill.
-- `GET /skills/{skill_id}/versions`: lists skill version history.
-- `POST /agents/run`: runs the demo agent.
-- `GET /audit/events`: returns audit events.
-- `GET /metrics/usage`: returns usage summary.
-- `GET /mcp/tools`: lists enabled MCP-compatible tools.
-- `POST /mcp/tools/{tool_name}/call`: invokes a tool through the MCP adapter.
-- `GET /mcp/resources`: lists MCP-compatible resources.
-- `GET /mcp/resources/read?uri=...`: reads a resource.
-- `GET /mcp/prompts`: lists prompt templates.
+## MCP Utility Endpoints
+
+- `GET /mcp/tools`
+- `POST /mcp/tools/{tool_name}/call`
+- `GET /mcp/resources`
+- `GET /mcp/resources/read?uri=...`
+- `GET /mcp/prompts`
 
 ## Example
 
-```bash
-curl -X POST http://localhost:8000/agents/run \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: dev-local-token" \
-  -d "{\"prompt\":\"Summarize this RFP request, search policy context, and create action items.\"}"
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/skills -Headers $headers
+Invoke-RestMethod http://localhost:8000/skills/summarize_document/invoke `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"input":{"text":"Atlas Labs needs approved MCP tools and audit logs."}}'
 ```
+

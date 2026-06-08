@@ -1,32 +1,40 @@
 # Architecture
 
-Enterprise MCP Skill Hub is organized around governed service boundaries instead of route-level business logic.
+Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call arbitrary prompts directly; they discover approved skills, inspect schemas, and invoke only enabled capabilities.
 
-## Core Services
+## Components
 
-- `SkillRegistry`: stores current skill manifests, enabled status, and version history.
-- `SkillValidator`: validates manifests and invocation payloads against the supported JSON schema subset.
-- `SkillInvocationService`: invokes built-in skill handlers, blocks disabled skills, records trace IDs, audit events, metrics, and token usage.
-- `McpToolAdapter`: maps enabled skills into MCP-compatible tool definitions and handles tool calls.
-- `PromptRegistry`: exposes reusable prompt definitions for support replies, RFP answers, and meeting summaries.
-- `ResourceRegistry`: exposes fake policy docs, product docs, and a dynamic skill catalog resource.
-- `AgentRunner`: discovers available skills and invokes multiple tools for compound tasks.
-- `AuditService`: records registration, validation, status changes, and invocations.
-- `MetricsService`: aggregates latency, tokens, estimated cost, provider, and failure counts.
+- `SkillRegistry` stores current manifests and version history.
+- `SkillValidator` validates manifests plus invocation input and output payloads.
+- `SkillInvocationService` enforces enabled status, calls built-in or manifest-backed skill handlers, records audit and metrics, and returns traceable invocation records.
+- `McpToolAdapter` exposes enabled skills as MCP-shaped tools and provides resources/prompts.
+- `PromptRegistry` stores reusable prompt templates for support replies, RFP answers, and meeting summaries.
+- `ResourceRegistry` exposes file-backed policy/product resources and a dynamic skill catalog.
+- `AgentRunner` dynamically discovers MCP tools and selects multiple skills for compound tasks.
+- `AuditService` records governance events.
+- `MetricsService` aggregates invocation count, failures, latency, tokens, cost, and per-skill usage.
+- `BaseLLMProvider`, `MockLLMProvider`, `OpenAIProvider`, and `AzureOpenAIProvider` isolate LLM execution.
 
-## Runtime Flow
+## Request Flow
 
-1. A skill is defined by YAML or JSON manifest.
-2. The registry stores the manifest and version metadata.
-3. The MCP adapter exposes only enabled skills as tools.
-4. Invocation payloads are validated before handlers run.
-5. Results include trace metadata and are captured in audit and metrics services.
-6. The demo agent uses discovery to select multiple skills for a compound task.
+1. A client authenticates with `X-API-Key`.
+2. The API or MCP adapter receives an invocation request.
+3. `SkillRegistry` resolves the manifest.
+4. Disabled skills fail before execution.
+5. `SkillValidator` checks input schema.
+6. A built-in handler or manifest-backed mock provider executes.
+7. `SkillValidator` checks output schema.
+8. `AuditService` and `MetricsService` record the outcome with a trace ID.
+9. The API returns a structured invocation record.
 
-## Persistence
+## Governance Model
 
-The current implementation uses in-process local state to keep the demo lightweight and deterministic. Models are persistence-friendly and can be backed by SQLite, Postgres, or a JSON store without changing the API contracts.
+The project keeps governance close to the skill runtime:
 
-## Provider Boundary
+- Manifests define name, description, version, provider, enabled status, tags, input schema, and output schema.
+- Version history records each registration hash.
+- Status changes create audit events.
+- Tool discovery excludes disabled skills.
+- Invocation history is available at `GET /invocations`.
+- Metrics are available at `GET /metrics/usage`.
 
-`BaseLLMProvider` isolates model access. `MockLLMProvider` is the default. `OpenAIProvider` and `AzureOpenAIProvider` are optional and only require credentials when selected.

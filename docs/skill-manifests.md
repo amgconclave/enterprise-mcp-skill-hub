@@ -1,27 +1,23 @@
 # Skill Manifests
 
-Skills are registered with YAML or JSON manifests.
+Skill manifests are YAML or JSON documents that describe reusable governed capabilities.
 
-Required fields:
+## Required Fields
 
-- `id`
-- `name`
-- `version`
-- `description`
-- `input_schema`
-- `output_schema`
-- `provider`
-- `enabled`
-- `tags`
+- `id` - lowercase snake_case identifier.
+- `name` - human-readable name.
+- `version` - semantic version string.
+- `description` - business purpose and boundaries.
+- `input_schema` - JSON-schema-shaped object schema.
+- `output_schema` - JSON-schema-shaped object schema.
 
-Schemas use a focused JSON schema subset:
+## Optional Fields
 
-- root `type` must be `object`
-- `properties` must be an object
-- supported field types are `string`, `integer`, `number`, `boolean`, `array`, and `object`
-- `required` is optional but must be a list when present
+- `provider` - defaults to `mock`.
+- `enabled` - defaults to `true`.
+- `tags` - discovery and governance tags.
 
-Example:
+## Example
 
 ```yaml
 id: classify_request
@@ -46,5 +42,12 @@ output_schema:
       type: string
     confidence:
       type: number
+    rationale:
+      type: string
   required: [category, priority, confidence]
 ```
+
+Sample manifests live in `sample_data/manifests/`. They can be pasted into the dashboard or posted to `POST /skills/register`.
+
+Validation rules currently enforce object schemas, declared properties, supported primitive types, required fields, and input/output payload type checks.
+

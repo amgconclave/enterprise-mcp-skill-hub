@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException
+import logging
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from app import __version__
 from app.bootstrap import create_state
@@ -25,13 +27,32 @@ from app.models import (
     ValidationResult,
 )
 from app.security import require_api_key
+from app.utils import configure_logging, new_trace_id
 
+settings = get_settings()
+configure_logging(settings.log_level)
+logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Enterprise MCP Skill Hub",
     description="Governed reusable AI skills exposed through FastAPI and MCP-compatible adapters.",
     version=__version__,
 )
 state = create_state()
+
+
+@app.middleware("http")
+async def trace_requests(request: Request, call_next):
+    trace_id = request.headers.get("X-Trace-ID", new_trace_id())
+    response = await call_next(request)
+    response.headers["X-Trace-ID"] = trace_id
+    logger.info(
+        "request completed method=%s path=%s status=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        extra={"trace_id": trace_id},
+    )
+    return response
 
 
 @app.post("/auth/demo-token")
@@ -117,6 +138,11 @@ def audit_events(_: str = Depends(require_api_key)) -> list[AuditEvent]:
 @app.get("/metrics/usage", response_model=UsageSummary)
 def usage(_: str = Depends(require_api_key)) -> UsageSummary:
     return state.metrics.summary()
+
+
+@app.get("/invocations", response_model=list[SkillInvocation])
+def invocations(_: str = Depends(require_api_key)) -> list[SkillInvocation]:
+    return state.invocation_service.invocations
 
 
 @app.get("/mcp/tools", response_model=list[McpToolDefinition])

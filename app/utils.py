@@ -27,7 +27,7 @@ def manifest_hash(payload: dict[str, Any]) -> str:
 
 
 class Timer:
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Timer:
         self.started = time.perf_counter()
         self.elapsed_ms = 0.0
         return self
@@ -37,9 +37,20 @@ class Timer:
 
 
 def configure_logging(level: str) -> None:
+    class TraceFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            if not hasattr(record, "trace_id"):
+                record.trace_id = "none"
+            return super().format(record)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(TraceFormatter("%(asctime)s %(levelname)s trace_id=%(trace_id)s %(message)s"))
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level)
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s trace_id=%(trace_id)s %(message)s",
+        handlers=[handler],
     )
 
 

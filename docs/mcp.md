@@ -1,40 +1,48 @@
-# MCP Behavior
+# MCP Compatibility
 
-The project implements MCP-compatible concepts directly in Python:
+This repo is designed to run locally even when the official MCP Python SDK is unavailable. The `McpToolAdapter` implements a clean MCP-compatible layer with protocol-shaped discovery and invocation payloads.
 
-- Tools are generated from enabled skill manifests.
-- Disabled skills are excluded from discovery.
-- Tool calls validate arguments before invocation.
-- Tool results include trace IDs and metadata.
-- Resources are discoverable and readable.
-- Prompts are discoverable and retrievable.
+## Tools
 
-## CLI Inspector
+Enabled skill manifests are exposed as tools:
 
-```bash
-python -m app.mcp_server tools
-python -m app.mcp_server resources
-python -m app.mcp_server prompts
-python -m app.mcp_server call --name classify_request --arguments "{\"request\":\"RFP security review\"}"
+```json
+{
+  "name": "summarize_document",
+  "description": "Summarize document text or a resource URI into a concise summary and key points.",
+  "input_schema": {"type": "object", "properties": {}},
+  "output_schema": {"type": "object", "properties": {}},
+  "annotations": {"version": "1.0.0", "tags": ["summarization"], "provider": "mock"}
+}
 ```
 
-## Required Tools
+Disabled skills do not appear in `list_tools()` and fail if called directly.
 
-- `summarize_document`
-- `extract_entities`
-- `translate_text`
-- `classify_request`
-- `generate_action_items`
-- `search_knowledge_base`
+## Resources
 
-## Required Resources
+Resources include file-backed sample policy/product docs plus a dynamic skill catalog:
 
 - `resource://policy/ai-governance`
+- `resource://policy/vendor-risk`
 - `resource://product/skill-hub`
 - `resource://skill-catalog`
 
-## Required Prompts
+## Prompts
+
+Reusable governed prompts:
 
 - `support_reply`
 - `rfp_answer`
 - `meeting_summary`
+
+## CLI Inspector
+
+```powershell
+python -m app.mcp_server tools
+python -m app.mcp_server resources
+python -m app.mcp_server prompts
+python -m app.mcp_server call --name search_knowledge_base --arguments "{\"query\":\"governance audit policy\",\"limit\":2}"
+```
+
+The HTTP endpoints under `/mcp/*` expose the same adapter behavior for dashboard and integration testing.
+
