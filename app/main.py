@@ -11,8 +11,10 @@ from app.models import (
     AgentRun,
     AgentRunRequest,
     AuditEvent,
+    GovernanceReport,
     HealthResponse,
     InvokeSkillRequest,
+    LocalSnapshot,
     McpToolDefinition,
     PromptDefinition,
     RegisterSkillRequest,
@@ -143,6 +145,21 @@ def usage(_: str = Depends(require_api_key)) -> UsageSummary:
 @app.get("/invocations", response_model=list[SkillInvocation])
 def invocations(_: str = Depends(require_api_key)) -> list[SkillInvocation]:
     return state.invocation_service.invocations
+
+
+@app.get("/governance/report", response_model=GovernanceReport)
+def governance_report(_: str = Depends(require_api_key)) -> GovernanceReport:
+    return state.governance.generate()
+
+
+@app.post("/snapshots/local", response_model=LocalSnapshot)
+def save_local_snapshot(_: str = Depends(require_api_key)) -> LocalSnapshot:
+    return state.persistence.save(state)
+
+
+@app.get("/snapshots/local")
+def read_local_snapshot(_: str = Depends(require_api_key)) -> dict:
+    return state.persistence.load()
 
 
 @app.get("/mcp/tools", response_model=list[McpToolDefinition])

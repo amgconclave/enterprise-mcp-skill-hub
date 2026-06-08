@@ -173,3 +173,33 @@ class UsageSummary(BaseModel):
     output_tokens: int
     estimated_cost: float
     by_skill: dict[str, int]
+
+
+class GovernanceCheck(BaseModel):
+    name: str
+    status: Literal["pass", "warn", "fail"]
+    detail: str
+
+
+class GovernanceReport(BaseModel):
+    generated_at: datetime
+    status: Literal["pass", "warn", "fail"]
+    skills_registered: int
+    enabled_tools: int
+    disabled_skills: list[str]
+    resource_count: int
+    prompt_count: int
+    invocation_count: int
+    failure_count: int
+    average_latency_ms: float
+    estimated_cost: float
+    checks: list[GovernanceCheck]
+
+
+class LocalSnapshot(BaseModel):
+    path: str
+    saved_at: datetime
+    skills: int
+    invocations: int
+    audit_events: int
+    metrics: int

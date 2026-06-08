@@ -36,6 +36,7 @@ view = st.sidebar.radio(
         "Invoke Skill",
         "Demo Agent",
         "MCP Inspector",
+        "Governance Report",
         "Metrics",
         "Audit Events",
     ],
@@ -128,6 +129,26 @@ elif view == "MCP Inspector":
         st.json(state.mcp.read_resource(uri).model_dump(mode="json"))
     with tab_prompts:
         st.json([prompt.model_dump(mode="json") for prompt in state.mcp.list_prompts()])
+
+elif view == "Governance Report":
+    st.subheader("Governance Report")
+    report = state.governance.generate()
+    col_status, col_skills, col_tools, col_cost = st.columns(4)
+    col_status.metric("Status", report.status.upper())
+    col_skills.metric("Registered skills", report.skills_registered)
+    col_tools.metric("Enabled MCP tools", report.enabled_tools)
+    col_cost.metric("Estimated cost", f"${report.estimated_cost:.4f}")
+    st.dataframe(
+        [check.model_dump(mode="json") for check in report.checks],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.json(report.model_dump(mode="json"))
+    col_save, col_load = st.columns(2)
+    if col_save.button("Save Local Snapshot", use_container_width=True):
+        st.json(state.persistence.save(state).model_dump(mode="json"))
+    if col_load.button("Read Local Snapshot", use_container_width=True):
+        st.json(state.persistence.load())
 
 elif view == "Metrics":
     st.subheader("Metrics")

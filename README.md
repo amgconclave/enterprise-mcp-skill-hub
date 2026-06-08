@@ -15,8 +15,8 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Six built-in skills: `summarize_document`, `extract_entities`, `translate_text`, `classify_request`, `generate_action_items`, and `search_knowledge_base`.
 - Manifest-first governance with JSON-schema-shaped input/output schemas.
 - Disabled skills are excluded from MCP tool discovery and blocked during invocation.
-- Trace IDs, audit events, invocation history, latency/token/cost metrics, and API-key auth.
-- Streamlit admin console for catalog, validation, invocation, demo agent, MCP inspector, metrics, and audit.
+- Trace IDs, audit events, invocation history, latency/token/cost metrics, governance readiness reports, local JSON snapshots, and API-key auth.
+- Streamlit admin console for catalog, validation, invocation, demo agent, MCP inspector, governance reports, metrics, and audit.
 - Sample policy/product resources, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
 ## Quick Start
@@ -74,6 +74,16 @@ The adapter intentionally uses protocol-shaped payloads even when the official M
 - `tests/` - pytest coverage for acceptance criteria.
 - `docs/` - architecture, API, MCP, manifests, evaluation, and Azure notes.
 - `typescript-bridge/` - optional Zod-to-MCP JSON schema concept.
+
+## Governance Snapshot
+
+Generate an interviewer-friendly readiness report and save a local JSON snapshot of skills, versions, invocations, metrics, audit events, and the report:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/governance/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/snapshots/local -Method POST -Headers $headers
+```
 
 ## Environment
 

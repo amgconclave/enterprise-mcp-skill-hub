@@ -13,6 +13,8 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `AgentRunner` dynamically discovers MCP tools and selects multiple skills for compound tasks.
 - `AuditService` records governance events.
 - `MetricsService` aggregates invocation count, failures, latency, tokens, cost, and per-skill usage.
+- `GovernanceReportService` produces readiness checks across manifest coverage, MCP discovery, resources, prompts, audit trail, and failure rate.
+- `PersistenceService` saves a local JSON snapshot for demo handoff and audit inspection.
 - `BaseLLMProvider`, `MockLLMProvider`, `OpenAIProvider`, and `AzureOpenAIProvider` isolate LLM execution.
 
 ## Request Flow
@@ -25,7 +27,8 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 6. A built-in handler or manifest-backed mock provider executes.
 7. `SkillValidator` checks output schema.
 8. `AuditService` and `MetricsService` record the outcome with a trace ID.
-9. The API returns a structured invocation record.
+9. Governance reports and local snapshots can export the current runtime posture.
+10. The API returns a structured invocation record.
 
 ## Governance Model
 
@@ -37,4 +40,5 @@ The project keeps governance close to the skill runtime:
 - Tool discovery excludes disabled skills.
 - Invocation history is available at `GET /invocations`.
 - Metrics are available at `GET /metrics/usage`.
-
+- Governance readiness is available at `GET /governance/report`.
+- Local snapshots are saved with `POST /snapshots/local`.

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.models import (
     AgentRun,
     AuditEvent,
+    GovernanceCheck,
+    GovernanceReport,
     JsonDict,
+    LocalSnapshot,
     McpToolDefinition,
     PromptArgument,
     PromptDefinition,
@@ -476,6 +480,105 @@ class AgentRunner:
         return f"Processed compound task with {len(trace)} governed skills: {skill_names}. Original task: {prompt[:160]}"
 
 
+class GovernanceReportService:
+    def __init__(self, app_state: AppState) -> None:
+        self.app_state = app_state
+
+    def generate(self) -> GovernanceReport:
+        registry = self.app_state.registry
+        metrics = self.app_state.metrics.summary()
+        enabled_tools = self.app_state.mcp.list_tools()
+        disabled_skills = [skill.id for skill in registry.list() if not skill.enabled]
+        checks = [
+            GovernanceCheck(
+                name="Manifest coverage",
+                status="pass" if len(registry.list()) >= 6 else "fail",
+                detail=f"{len(registry.list())} registered skills found.",
+            ),
+            GovernanceCheck(
+                name="MCP discovery",
+                status="pass" if len(enabled_tools) == len(registry.enabled()) else "fail",
+                detail=f"{len(enabled_tools)} enabled tools exposed through the MCP adapter.",
+            ),
+            GovernanceCheck(
+                name="Resources and prompts",
+                status="pass"
+                if self.app_state.resources.list() and self.app_state.prompts.list()
+                else "fail",
+                detail=(
+                    f"{len(self.app_state.resources.list())} resources and "
+                    f"{len(self.app_state.prompts.list())} prompts available."
+                ),
+            ),
+            GovernanceCheck(
+                name="Audit trail",
+                status="pass" if self.app_state.audit.events else "warn",
+                detail=f"{len(self.app_state.audit.events)} audit events recorded.",
+            ),
+            GovernanceCheck(
+                name="Failure rate",
+                status="pass" if metrics.failure_count == 0 else "warn",
+                detail=f"{metrics.failure_count} failed invocations out of {metrics.invocation_count}.",
+            ),
+        ]
+        if any(check.status == "fail" for check in checks):
+            status = "fail"
+        elif any(check.status == "warn" for check in checks):
+            status = "warn"
+        else:
+            status = "pass"
+        return GovernanceReport(
+            generated_at=utc_now(),
+            status=status,
+            skills_registered=len(registry.list()),
+            enabled_tools=len(enabled_tools),
+            disabled_skills=disabled_skills,
+            resource_count=len(self.app_state.resources.list()),
+            prompt_count=len(self.app_state.prompts.list()),
+            invocation_count=metrics.invocation_count,
+            failure_count=metrics.failure_count,
+            average_latency_ms=metrics.average_latency_ms,
+            estimated_cost=metrics.estimated_cost,
+            checks=checks,
+        )
+
+
+class PersistenceService:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or Path(".local") / "skill_hub_snapshot.json"
+
+    def save(self, app_state: AppState) -> LocalSnapshot:
+        payload = {
+            "saved_at": utc_now().isoformat(),
+            "skills": [skill.model_dump(mode="json") for skill in app_state.registry.list()],
+            "versions": {
+                skill.id: [version.model_dump(mode="json") for version in app_state.registry.versions(skill.id)]
+                for skill in app_state.registry.list()
+            },
+            "invocations": [
+                invocation.model_dump(mode="json") for invocation in app_state.invocation_service.invocations
+            ],
+            "audit_events": [event.model_dump(mode="json") for event in app_state.audit.events],
+            "metrics": [metric.model_dump(mode="json") for metric in app_state.metrics.metrics],
+            "governance_report": app_state.governance.generate().model_dump(mode="json"),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return LocalSnapshot(
+            path=str(self.path),
+            saved_at=utc_now(),
+            skills=len(payload["skills"]),
+            invocations=len(payload["invocations"]),
+            audit_events=len(payload["audit_events"]),
+            metrics=len(payload["metrics"]),
+        )
+
+    def load(self) -> JsonDict:
+        if not self.path.exists():
+            return {"path": str(self.path), "exists": False}
+        return {"path": str(self.path), "exists": True, "snapshot": json.loads(self.path.read_text(encoding="utf-8"))}
+
+
 @dataclass
 class AppState:
     validator: SkillValidator
@@ -488,6 +591,8 @@ class AppState:
     resources: ResourceRegistry = field(init=False)
     mcp: McpToolAdapter = field(init=False)
     agent: AgentRunner = field(init=False)
+    governance: GovernanceReportService = field(init=False)
+    persistence: PersistenceService = field(init=False)
 
     def __post_init__(self) -> None:
         self.registry = SkillRegistry(self.audit)
@@ -498,3 +603,5 @@ class AppState:
         self.resources = ResourceRegistry(self.registry)
         self.mcp = McpToolAdapter(self.registry, self.invocation_service, self.resources, self.prompts)
         self.agent = AgentRunner(self.mcp)
+        self.governance = GovernanceReportService(self)
+        self.persistence = PersistenceService()

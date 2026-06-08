@@ -16,6 +16,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /audit/events` - returns governance audit events.
 - `GET /metrics/usage` - returns usage summary.
 - `GET /invocations` - returns invocation history.
+- `GET /governance/report` - returns readiness checks across manifests, MCP exposure, resources, prompts, audit, and failures.
+- `POST /snapshots/local` - saves a local JSON snapshot under `.local/`.
+- `GET /snapshots/local` - reads the latest local JSON snapshot metadata and payload.
 
 ## MCP Utility Endpoints
 
@@ -36,4 +39,3 @@ Invoke-RestMethod http://localhost:8000/skills/summarize_document/invoke `
   -ContentType "application/json" `
   -Body '{"input":{"text":"Atlas Labs needs approved MCP tools and audit logs."}}'
 ```
-
