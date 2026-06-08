@@ -1,0 +1,12 @@
+{
+  "summarize_document": {
+    "contains": ["summary", "key_points", "trace_id"]
+  },
+  "extract_entities": {
+    "people": ["Priya Shah"],
+    "organizations": ["Atlas Labs"]
+  },
+  "agent": {
+    "minimum_selected_skills": 2
+  }
+}

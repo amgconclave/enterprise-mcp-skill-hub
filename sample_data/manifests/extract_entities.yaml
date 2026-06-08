@@ -1,0 +1,29 @@
+id: extract_entities
+name: Entity Extraction
+version: 1.0.0
+description: Extract people, organizations, products, dates, risks, and action items from text.
+provider: mock
+enabled: true
+tags: [extraction, nlp, governance]
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required: [text]
+output_schema:
+  type: object
+  properties:
+    people:
+      type: array
+    organizations:
+      type: array
+    products:
+      type: array
+    dates:
+      type: array
+    risks:
+      type: array
+    action_items:
+      type: array
+  required: [people, organizations]

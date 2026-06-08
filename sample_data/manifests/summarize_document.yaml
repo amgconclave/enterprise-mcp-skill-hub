@@ -1,0 +1,29 @@
+id: summarize_document
+name: Document Summarization
+version: 1.0.0
+description: Summarize document text or a resource URI into a concise summary and key points.
+provider: mock
+enabled: true
+tags: [summarization, documents, prompt-engineering]
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+      description: Document text to summarize.
+    resource_uri:
+      type: string
+      description: Optional MCP resource URI.
+  required: []
+output_schema:
+  type: object
+  properties:
+    summary:
+      type: string
+    key_points:
+      type: array
+    word_count:
+      type: integer
+    mode:
+      type: string
+  required: [summary, key_points]

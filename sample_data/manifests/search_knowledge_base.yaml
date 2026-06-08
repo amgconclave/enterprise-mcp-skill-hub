@@ -1,0 +1,23 @@
+id: search_knowledge_base
+name: Knowledge Base Search
+version: 1.0.0
+description: Search fake internal policy and product resources and return ranked snippets.
+provider: mock
+enabled: true
+tags: [retrieval, resources, rag]
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+    limit:
+      type: integer
+  required: [query]
+output_schema:
+  type: object
+  properties:
+    query:
+      type: string
+    results:
+      type: array
+  required: [query, results]

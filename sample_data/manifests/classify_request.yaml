@@ -1,0 +1,25 @@
+id: classify_request
+name: Request Classification
+version: 1.0.0
+description: Classify a business request into category, priority, confidence, and rationale.
+provider: mock
+enabled: true
+tags: [classification, routing, agent-tools]
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+  required: [request]
+output_schema:
+  type: object
+  properties:
+    category:
+      type: string
+    priority:
+      type: string
+    confidence:
+      type: number
+    rationale:
+      type: string
+  required: [category, priority, confidence]

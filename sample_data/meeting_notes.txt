@@ -1,0 +1,4 @@
+Priya Shah from Atlas Labs asked for a summary of the AI Governance Policy.
+Risk: procurement needs proof that disabled skills do not appear in tool discovery.
+Action: Devan to provide the demo trace by 2026-06-15.
+Next: Follow up with product docs and a short RFP answer.

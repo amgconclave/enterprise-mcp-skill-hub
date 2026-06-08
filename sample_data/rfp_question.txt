@@ -1,0 +1,1 @@
+How does Enterprise MCP Skill Hub govern reusable AI skills, validate schemas, audit tool usage, and support optional Azure OpenAI deployment?

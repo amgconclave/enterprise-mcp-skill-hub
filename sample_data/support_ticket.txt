@@ -1,0 +1,5 @@
+Customer: Atlas Labs
+Contact: Priya Shah
+Request: Security review is blocking an RFP response.
+Context: The customer wants confirmation that MCP tools are versioned, audited, and disabled skills cannot be invoked.
+Action: Devan to send approved governance summary by 2026-06-15.

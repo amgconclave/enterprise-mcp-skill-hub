@@ -1,0 +1,21 @@
+id: generate_action_items
+name: Action Item Generator
+version: 1.0.0
+description: Generate owner, task, due date, and priority action items from notes or support text.
+provider: mock
+enabled: true
+tags: [meetings, handoff, automation]
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required: [text]
+output_schema:
+  type: object
+  properties:
+    action_items:
+      type: array
+    count:
+      type: integer
+  required: [action_items]
