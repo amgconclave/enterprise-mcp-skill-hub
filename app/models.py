@@ -3,11 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 JsonDict = dict[str, Any]
-SkillStatus = Literal["enabled", "disabled"]
+SkillLifecycleStatus = Literal["draft", "validated", "promoted", "disabled"]
 InvocationStatus = Literal["succeeded", "failed"]
+PolicyRole = Literal["admin", "reviewer", "agent", "viewer"]
+DataSensitivity = Literal["public", "internal", "confidential"]
+PolicyDecisionValue = Literal["allow", "deny"]
 
 
 class TokenUsage(BaseModel):
@@ -25,6 +28,7 @@ class SkillManifest(BaseModel):
     output_schema: JsonDict
     provider: str = "mock"
     enabled: bool = True
+    status: SkillLifecycleStatus = "draft"
     tags: list[str] = Field(default_factory=list)
 
     @field_validator("input_schema", "output_schema")
@@ -36,13 +40,22 @@ class SkillManifest(BaseModel):
             raise ValueError("schema must define properties")
         return value
 
+    @model_validator(mode="after")
+    def sync_lifecycle_with_enabled_flag(self) -> SkillManifest:
+        if self.status == "disabled" or not self.enabled:
+            self.status = "disabled"
+            self.enabled = False
+        elif self.status == "promoted":
+            self.enabled = True
+        return self
+
 
 class SkillVersion(BaseModel):
     skill_id: str
     version: str
     manifest_hash: str
     created_at: datetime
-    status: SkillStatus
+    status: SkillLifecycleStatus
 
 
 class SkillInvocation(BaseModel):
@@ -140,10 +153,15 @@ class ValidateSkillRequest(BaseModel):
 class InvokeSkillRequest(BaseModel):
     input: JsonDict
     actor: str = "demo-user"
+    policy_context: PolicyInvocationContext | None = None
 
 
 class SkillStatusRequest(BaseModel):
     enabled: bool
+    actor: str = "demo-user"
+
+
+class PromoteSkillRequest(BaseModel):
     actor: str = "demo-user"
 
 
@@ -156,6 +174,33 @@ class ValidationResult(BaseModel):
     valid: bool
     errors: list[str] = Field(default_factory=list)
     manifest_id: str | None = None
+
+
+class PolicyInvocationContext(BaseModel):
+    role: PolicyRole = "agent"
+    environment: str = "local"
+    data_sensitivity: DataSensitivity = "internal"
+    requested_action: str = "invoke"
+    enforce: bool = False
+
+
+class PolicySimulationRequest(BaseModel):
+    skill_id: str
+    role: PolicyRole
+    environment: str = "local"
+    data_sensitivity: DataSensitivity = "internal"
+    requested_action: str = "invoke"
+
+
+class PolicySimulationResult(BaseModel):
+    skill_id: str
+    role: PolicyRole
+    environment: str
+    data_sensitivity: DataSensitivity
+    requested_action: str
+    decision: PolicyDecisionValue
+    reasons: list[str]
+    matched_rules: list[str]
 
 
 class HealthResponse(BaseModel):
@@ -181,6 +226,24 @@ class GovernanceCheck(BaseModel):
     detail: str
 
 
+class SkillGovernanceRecord(BaseModel):
+    skill_id: str
+    version: str
+    enabled: bool
+    status: SkillLifecycleStatus
+    schema_valid: bool
+    schema_errors: list[str] = Field(default_factory=list)
+    last_invocation: datetime | None = None
+    invocation_count: int
+    failure_count: int
+    provider: str
+    tags: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    policy_access: dict[str, list[DataSensitivity]] = Field(default_factory=dict)
+    mcp_exposed: bool
+    mcp_exposure_status: Literal["exposed", "not_exposed"]
+
+
 class GovernanceReport(BaseModel):
     generated_at: datetime
     status: Literal["pass", "warn", "fail"]
@@ -194,6 +257,8 @@ class GovernanceReport(BaseModel):
     average_latency_ms: float
     estimated_cost: float
     checks: list[GovernanceCheck]
+    lifecycle_counts: dict[str, int]
+    skills: list[SkillGovernanceRecord]
 
 
 class LocalSnapshot(BaseModel):
@@ -203,3 +268,39 @@ class LocalSnapshot(BaseModel):
     invocations: int
     audit_events: int
     metrics: int
+
+
+class GoldenExpectation(BaseModel):
+    path: str
+    operator: Literal["equals", "contains", "min_length", "exists"]
+    value: Any | None = None
+
+
+class GoldenEvalCase(BaseModel):
+    id: str
+    skill_id: str
+    description: str
+    input: JsonDict
+    expectations: list[GoldenExpectation]
+    tags: list[str] = Field(default_factory=list)
+
+
+class GoldenEvalCaseResult(BaseModel):
+    case_id: str
+    skill_id: str
+    status: Literal["pass", "fail"]
+    score: float
+    trace_id: str | None = None
+    latency_ms: float
+    failed_expectations: list[str] = Field(default_factory=list)
+
+
+class GoldenEvalSuiteResult(BaseModel):
+    run_id: str
+    generated_at: datetime
+    total_cases: int
+    passed_cases: int
+    failed_cases: int
+    score: float
+    average_latency_ms: float
+    results: list[GoldenEvalCaseResult]

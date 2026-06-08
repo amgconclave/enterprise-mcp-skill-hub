@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "id": "classify_security_rfp",
+      "skill_id": "classify_request",
+      "description": "Security review RFPs should route to sales unless outage language dominates.",
+      "input": {
+        "request": "Atlas Labs has an RFP question about security review and audit controls."
+      },
+      "expectations": [
+        { "path": "category", "operator": "equals", "value": "sales" },
+        { "path": "priority", "operator": "equals", "value": "medium" },
+        { "path": "metadata.trace_id", "operator": "exists" }
+      ],
+      "tags": ["classification", "rfp"]
+    },
+    {
+      "id": "extract_people_orgs",
+      "skill_id": "extract_entities",
+      "description": "Entity extraction should capture people and organizations from support context.",
+      "input": {
+        "text": "Priya Shah from Atlas Labs asked Devan Kumar to review MCP governance by 2026-06-15."
+      },
+      "expectations": [
+        { "path": "people", "operator": "contains", "value": "Priya Shah" },
+        { "path": "organizations", "operator": "contains", "value": "Atlas Labs" },
+        { "path": "dates", "operator": "contains", "value": "2026-06-15" }
+      ],
+      "tags": ["extraction", "entities"]
+    },
+    {
+      "id": "search_policy_context",
+      "skill_id": "search_knowledge_base",
+      "description": "Knowledge search should return ranked policy snippets for governance questions.",
+      "input": {
+        "query": "AI governance audit policy disabled skills",
+        "limit": 3
+      },
+      "expectations": [
+        { "path": "results", "operator": "min_length", "value": 2 },
+        { "path": "results.0.uri", "operator": "contains", "value": "policy" }
+      ],
+      "tags": ["retrieval", "governance"]
+    },
+    {
+      "id": "action_items_due_date",
+      "skill_id": "generate_action_items",
+      "description": "Action item generation should preserve owner and due date signals.",
+      "input": {
+        "text": "Action: Priya to follow up by 2026-06-15.\nNext: Devan to send the governance report."
+      },
+      "expectations": [
+        { "path": "action_items", "operator": "min_length", "value": 1 },
+        { "path": "action_items.0.due_date", "operator": "equals", "value": "2026-06-15" }
+      ],
+      "tags": ["meetings", "handoff"]
+    }
+  ]
+}

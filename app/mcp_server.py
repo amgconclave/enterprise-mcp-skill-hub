@@ -5,6 +5,7 @@ import asyncio
 import json
 
 from app.bootstrap import create_state
+from app.models import PolicyInvocationContext
 
 
 async def main() -> None:
@@ -12,6 +13,15 @@ async def main() -> None:
     parser.add_argument("command", choices=["tools", "resources", "prompts", "call"])
     parser.add_argument("--name", help="Tool name for call.")
     parser.add_argument("--arguments", default="{}", help="JSON arguments for call.")
+    parser.add_argument("--role", choices=["admin", "reviewer", "agent", "viewer"], help="Policy role for call.")
+    parser.add_argument("--environment", default="local", help="Policy environment for call.")
+    parser.add_argument(
+        "--data-sensitivity",
+        choices=["public", "internal", "confidential"],
+        default="internal",
+        help="Policy data sensitivity for call.",
+    )
+    parser.add_argument("--enforce-policy", action="store_true", help="Enforce local policy before calling a tool.")
     args = parser.parse_args()
 
     state = create_state()
@@ -24,7 +34,21 @@ async def main() -> None:
     else:
         if not args.name:
             raise SystemExit("--name is required for call")
-        payload = await state.mcp.call_tool(args.name, json.loads(args.arguments), "cli-mcp-client")
+        policy_context = None
+        if args.enforce_policy or args.role:
+            policy_context = PolicyInvocationContext(
+                role=args.role or "agent",
+                environment=args.environment,
+                data_sensitivity=args.data_sensitivity,
+                requested_action="invoke",
+                enforce=args.enforce_policy,
+            )
+        payload = await state.mcp.call_tool(
+            args.name,
+            json.loads(args.arguments),
+            "cli-mcp-client",
+            policy_context,
+        )
     print(json.dumps(payload, indent=2))
 
 

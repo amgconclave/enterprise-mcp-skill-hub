@@ -10,13 +10,15 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 
 ## What It Includes
 
-- FastAPI admin API for skill registration, validation, enable/disable, invocation, versions, agent runs, audit, metrics, and health.
+- FastAPI admin API for skill registration, validation, promotion, enable/disable, invocation, versions, agent runs, audit, metrics, and health.
 - MCP-compatible discovery and invocation for tools, resources, and prompts.
 - Six built-in skills: `summarize_document`, `extract_entities`, `translate_text`, `classify_request`, `generate_action_items`, and `search_knowledge_base`.
-- Manifest-first governance with JSON-schema-shaped input/output schemas.
-- Disabled skills are excluded from MCP tool discovery and blocked during invocation.
-- Trace IDs, audit events, invocation history, latency/token/cost metrics, governance readiness reports, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, invocation, demo agent, MCP inspector, governance reports, metrics, and audit.
+- Manifest-first governance with JSON-schema-shaped input/output schemas and a `draft -> validated -> promoted -> disabled` lifecycle.
+- Draft, disabled, and schema-invalid skills are excluded from MCP tool discovery; the demo agent only selects promoted/enabled tools.
+- Local policy simulator for role, environment, data sensitivity, skill tags/provider, and allow/deny invocation decisions.
+- Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
+- Trace IDs, audit events, invocation history, latency/token/cost metrics, policy simulation, golden eval scorecards, per-skill governance reports, local JSON snapshots, and API-key auth.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, demo agent, eval lab, MCP inspector, governance reports, metrics, and audit.
 - Sample policy/product resources, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
 ## Quick Start
@@ -62,6 +64,7 @@ python -m app.mcp_server tools
 python -m app.mcp_server resources
 python -m app.mcp_server prompts
 python -m app.mcp_server call --name summarize_document --arguments "{\"text\":\"Atlas Labs needs governed AI skills.\"}"
+python -m app.mcp_server call --name search_knowledge_base --arguments "{\"query\":\"confidential policy\",\"limit\":2}" --role agent --data-sensitivity confidential --enforce-policy
 ```
 
 The adapter intentionally uses protocol-shaped payloads even when the official MCP SDK is not installed. See [docs/mcp.md](docs/mcp.md).
@@ -83,6 +86,54 @@ Generate an interviewer-friendly readiness report and save a local JSON snapshot
 $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/governance/report -Headers $headers
 Invoke-RestMethod http://localhost:8000/snapshots/local -Method POST -Headers $headers
+```
+
+The governance report includes one row per skill with id, version, enabled flag, lifecycle status, schema validity, last invocation, invocation/failure counts, provider, tags, risk flags, MCP exposure status, and policy access by role.
+
+## Policy Simulator
+
+Use the simulator to explain why a role can or cannot invoke a skill:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/policy/simulate `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"search_knowledge_base","role":"agent","environment":"local","data_sensitivity":"confidential","requested_action":"invoke"}'
+```
+
+Policy enforcement is opt-in for local compatibility. Add `policy_context.enforce=true` in the request body or send headers such as `X-Policy-Enforce: true`, `X-Policy-Role: reviewer`, and `X-Data-Sensitivity: confidential`.
+
+## Promotion Workflow
+
+New manifests can be registered as draft or validated skills for local review. Promote a valid skill before MCP clients or the demo agent can discover it:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/skills/draft_support_summary/promote `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-admin"}'
+```
+
+Promotion validates the manifest, sets `status=promoted`, keeps `enabled=true`, exposes the skill as an MCP tool, and records `skill.promoted` in the audit log.
+
+## Evaluation And Policy Lab
+
+The project now includes two reviewer-friendly controls:
+
+- Golden evals: scored behavior checks from `sample_data/evals/golden_cases.json`.
+- Policy simulation: role, environment, sensitivity, and action rules that can block enforced invocations.
+
+```powershell
+Invoke-RestMethod http://localhost:8000/evals/golden -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/policy/simulate `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"classify_request","role":"viewer","environment":"local","data_sensitivity":"confidential","requested_action":"invoke"}'
 ```
 
 ## Environment

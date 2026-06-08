@@ -8,7 +8,8 @@ import streamlit as st
 import yaml
 
 from app.bootstrap import create_state
-from app.models import SkillManifest
+from app.evals.golden import GoldenEvalRunner, load_cases
+from app.models import PolicyInvocationContext, PolicySimulationRequest, SkillManifest
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "sample_data" / "manifests"
@@ -33,8 +34,11 @@ view = st.sidebar.radio(
     [
         "Skill Catalog",
         "Register / Validate Skill",
+        "Promote Skill",
         "Invoke Skill",
+        "Policy Simulator",
         "Demo Agent",
+        "Evaluation Lab",
         "MCP Inspector",
         "Governance Report",
         "Metrics",
@@ -50,7 +54,9 @@ if view == "Skill Catalog":
             "id": skill.id,
             "name": skill.name,
             "version": skill.version,
+            "status": skill.status,
             "enabled": skill.enabled,
+            "mcp_exposed": state.registry.is_mcp_exposed(skill),
             "provider": skill.provider,
             "tags": ", ".join(skill.tags),
             "description": skill.description,
@@ -86,12 +92,39 @@ elif view == "Register / Validate Skill":
             st.error(result.errors)
         else:
             manifest = SkillManifest.model_validate(payload)
+            if "status" not in payload and manifest.status == "draft":
+                manifest = manifest.model_copy(update={"status": "validated"})
             st.json(state.registry.register(manifest, "streamlit-admin").model_dump(mode="json"))
+
+elif view == "Promote Skill":
+    st.subheader("Promote Skill")
+    rows = [
+        {
+            "id": skill.id,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "schema_valid": state.validator.validate_manifest(skill.model_dump(mode="json")).valid,
+            "mcp_exposed": state.registry.is_mcp_exposed(skill),
+        }
+        for skill in state.registry.list()
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    selected = st.selectbox("Promotion candidate", [skill.id for skill in state.registry.list()])
+    candidate = state.registry.get(selected)
+    validation = state.validator.validate_manifest(candidate.model_dump(mode="json"))
+    st.json(validation.model_dump(mode="json"))
+    if st.button("Promote for MCP Exposure", use_container_width=True):
+        if not validation.valid:
+            st.error(validation.errors)
+        else:
+            st.json(state.registry.promote(selected, "streamlit-admin").model_dump(mode="json"))
+            st.rerun()
 
 elif view == "Invoke Skill":
     st.subheader("Invoke Skill")
-    enabled = state.registry.enabled()
-    skill = state.registry.get(st.selectbox("Enabled skill", [item.id for item in enabled]))
+    exposed = state.registry.mcp_exposed()
+    skill = state.registry.get(st.selectbox("Promoted MCP skill", [item.id for item in exposed]))
     st.caption(skill.description)
     example = {
         "summarize_document": {"text": (ROOT / "sample_data" / "meeting_notes.txt").read_text(encoding="utf-8")},
@@ -102,9 +135,61 @@ elif view == "Invoke Skill":
         "search_knowledge_base": {"query": "AI governance policy audit disabled skills", "limit": 3},
     }.get(skill.id, {})
     payload_text = st.text_area("Input JSON", value=json.dumps(example, indent=2), height=260)
+    with st.expander("Policy enforcement"):
+        enforce_policy = st.checkbox("Enforce policy for this invocation")
+        col_role, col_environment, col_sensitivity = st.columns(3)
+        policy_role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+        policy_environment = col_environment.text_input("Environment", value="local", key="invoke_policy_env")
+        policy_sensitivity = col_sensitivity.selectbox(
+            "Data sensitivity",
+            ["public", "internal", "confidential"],
+            index=1,
+            key="invoke_policy_sensitivity",
+        )
     if st.button("Invoke", use_container_width=True):
-        invocation = run_async(state.invocation_service.invoke(skill.id, json.loads(payload_text), "streamlit-admin"))
+        invocation = run_async(
+            state.invocation_service.invoke(
+                skill.id,
+                json.loads(payload_text),
+                "streamlit-admin",
+                PolicyInvocationContext(
+                    role=policy_role,
+                    environment=policy_environment,
+                    data_sensitivity=policy_sensitivity,
+                    requested_action="invoke",
+                    enforce=enforce_policy,
+                ),
+            )
+        )
         st.json(invocation.model_dump(mode="json"))
+
+elif view == "Policy Simulator":
+    st.subheader("Policy Simulator")
+    selected = st.selectbox("Skill", [skill.id for skill in state.registry.list()])
+    col_role, col_sensitivity = st.columns(2)
+    role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+    sensitivity = col_sensitivity.selectbox("Data sensitivity", ["public", "internal", "confidential"], index=1)
+    col_env, col_action = st.columns(2)
+    environment = col_env.selectbox("Environment", ["local", "staging", "production"])
+    action = col_action.selectbox("Requested action", ["invoke", "register", "promote"])
+    request = PolicySimulationRequest(
+        skill_id=selected,
+        role=role,
+        environment=environment,
+        data_sensitivity=sensitivity,
+        requested_action=action,
+    )
+    result = state.policy.simulate(state.registry.get(selected), request)
+    st.metric("Decision", result.decision.upper())
+    st.json(result.model_dump(mode="json"))
+    st.dataframe(
+        [
+            {"role": role_name, "allowed_data_sensitivity": ", ".join(values)}
+            for role_name, values in state.policy.access_summary(state.registry.get(selected), environment).items()
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 elif view == "Demo Agent":
     st.subheader("Demo Agent")
@@ -116,6 +201,36 @@ elif view == "Demo Agent":
     if st.button("Run Agent", use_container_width=True):
         run = run_async(state.agent.run(prompt, "streamlit-admin"))
         st.json(run.model_dump(mode="json"))
+
+elif view == "Evaluation Lab":
+    st.subheader("Evaluation Lab")
+    cases = load_cases()
+    st.dataframe(
+        [
+            {
+                "id": case.id,
+                "skill_id": case.skill_id,
+                "expectations": len(case.expectations),
+                "tags": ", ".join(case.tags),
+                "description": case.description,
+            }
+            for case in cases
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    if st.button("Run Golden Eval Suite", use_container_width=True):
+        result = run_async(GoldenEvalRunner(state).run(cases))
+        col_score, col_passed, col_failed = st.columns(3)
+        col_score.metric("Score", f"{result.score:.3f}")
+        col_passed.metric("Passed", result.passed_cases)
+        col_failed.metric("Failed", result.failed_cases)
+        st.dataframe(
+            [case_result.model_dump(mode="json") for case_result in result.results],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(result.model_dump(mode="json"))
 
 elif view == "MCP Inspector":
     st.subheader("MCP Inspector")
@@ -138,6 +253,11 @@ elif view == "Governance Report":
     col_skills.metric("Registered skills", report.skills_registered)
     col_tools.metric("Enabled MCP tools", report.enabled_tools)
     col_cost.metric("Estimated cost", f"${report.estimated_cost:.4f}")
+    st.dataframe(
+        [skill.model_dump(mode="json") for skill in report.skills],
+        use_container_width=True,
+        hide_index=True,
+    )
     st.dataframe(
         [check.model_dump(mode="json") for check in report.checks],
         use_container_width=True,

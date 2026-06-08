@@ -12,10 +12,12 @@ from app.models import (
     JsonDict,
     LocalSnapshot,
     McpToolDefinition,
+    PolicyInvocationContext,
     PromptArgument,
     PromptDefinition,
     ResourceDefinition,
     ResourcePayload,
+    SkillGovernanceRecord,
     SkillInvocation,
     SkillManifest,
     SkillVersion,
@@ -23,6 +25,7 @@ from app.models import (
     UsageMetric,
     UsageSummary,
 )
+from app.policy import PolicyService
 from app.providers import BaseLLMProvider
 from app.skills import BUILTIN_HANDLERS
 from app.utils import Timer, manifest_hash, new_id, new_trace_id, utc_now
@@ -89,17 +92,24 @@ class SkillRegistry:
         self._versions: dict[str, list[SkillVersion]] = {}
 
     def register(self, manifest: SkillManifest, actor: str = "system") -> SkillManifest:
-        status = "enabled" if manifest.enabled else "disabled"
+        manifest = self._normalize_manifest(manifest)
         version = SkillVersion(
             skill_id=manifest.id,
             version=manifest.version,
             manifest_hash=manifest_hash(manifest.model_dump(mode="json")),
             created_at=utc_now(),
-            status=status,
+            status=manifest.status,
         )
         self._skills[manifest.id] = manifest
         self._versions.setdefault(manifest.id, []).append(version)
-        self.audit.record("skill.registered", "skill", manifest.id, new_trace_id(), actor, {"version": manifest.version})
+        self.audit.record(
+            "skill.registered",
+            "skill",
+            manifest.id,
+            new_trace_id(),
+            actor,
+            {"version": manifest.version, "status": manifest.status, "enabled": manifest.enabled},
+        )
         return manifest
 
     def list(self) -> list[SkillManifest]:
@@ -108,26 +118,61 @@ class SkillRegistry:
     def enabled(self) -> list[SkillManifest]:
         return [skill for skill in self.list() if skill.enabled]
 
+    def mcp_exposed(self) -> list[SkillManifest]:
+        return [skill for skill in self.list() if self.is_mcp_exposed(skill)]
+
+    def is_mcp_exposed(self, skill: SkillManifest) -> bool:
+        return skill.enabled and skill.status == "promoted"
+
     def get(self, skill_id: str) -> SkillManifest:
         if skill_id not in self._skills:
             raise KeyError(f"Unknown skill: {skill_id}")
         return self._skills[skill_id]
 
     def set_status(self, skill_id: str, enabled: bool, actor: str = "system") -> SkillManifest:
-        manifest = self.get(skill_id).model_copy(update={"enabled": enabled})
+        status = "promoted" if enabled else "disabled"
+        manifest = self.get(skill_id).model_copy(update={"enabled": enabled, "status": status})
         self._skills[skill_id] = manifest
+        self._update_latest_version_status(skill_id, manifest.status)
         self.audit.record(
             "skill.enabled" if enabled else "skill.disabled",
             "skill",
             skill_id,
             new_trace_id(),
             actor,
+            {"status": manifest.status},
+        )
+        return manifest
+
+    def promote(self, skill_id: str, actor: str = "system") -> SkillManifest:
+        manifest = self.get(skill_id).model_copy(update={"enabled": True, "status": "promoted"})
+        self._skills[skill_id] = manifest
+        self._update_latest_version_status(skill_id, manifest.status)
+        self.audit.record(
+            "skill.promoted",
+            "skill",
+            skill_id,
+            new_trace_id(),
+            actor,
+            {"version": manifest.version, "status": manifest.status, "enabled": manifest.enabled},
         )
         return manifest
 
     def versions(self, skill_id: str) -> list[SkillVersion]:
         self.get(skill_id)
         return self._versions.get(skill_id, [])
+
+    def _normalize_manifest(self, manifest: SkillManifest) -> SkillManifest:
+        if not manifest.enabled or manifest.status == "disabled":
+            return manifest.model_copy(update={"enabled": False, "status": "disabled"})
+        if manifest.status == "promoted":
+            return manifest.model_copy(update={"enabled": True})
+        return manifest
+
+    def _update_latest_version_status(self, skill_id: str, status: str) -> None:
+        versions = self._versions.get(skill_id, [])
+        if versions:
+            versions[-1] = versions[-1].model_copy(update={"status": status})
 
 
 class SkillInvocationService:
@@ -138,17 +183,41 @@ class SkillInvocationService:
         audit: AuditService,
         metrics: MetricsService,
         provider: BaseLLMProvider,
+        policy: PolicyService,
     ) -> None:
         self.registry = registry
         self.validator = validator
         self.audit = audit
         self.metrics = metrics
         self.provider = provider
+        self.policy = policy
         self.invocations: list[SkillInvocation] = []
 
-    async def invoke(self, skill_id: str, payload: JsonDict, actor: str = "demo-user") -> SkillInvocation:
+    async def invoke(
+        self,
+        skill_id: str,
+        payload: JsonDict,
+        actor: str = "demo-user",
+        policy_context: PolicyInvocationContext | None = None,
+    ) -> SkillInvocation:
         trace_id = new_trace_id()
         manifest = self.registry.get(skill_id)
+        if policy_context and policy_context.enforce:
+            decision = self.policy.simulate(manifest, policy_context)
+            if decision.decision == "deny":
+                return self._record_failure(
+                    manifest,
+                    payload,
+                    trace_id,
+                    actor,
+                    f"Policy denied invocation: {'; '.join(decision.reasons)}",
+                    0.0,
+                    audit_action="policy.denied",
+                    metadata={
+                        "status": "failed",
+                        "policy_decision": decision.model_dump(mode="json"),
+                    },
+                )
         if not manifest.enabled:
             return self._record_failure(manifest, payload, trace_id, actor, "Skill is disabled.", 0.0)
         errors = self.validator.validate_invocation(manifest, payload)
@@ -231,6 +300,8 @@ class SkillInvocationService:
         actor: str,
         error: str,
         latency_ms: float,
+        audit_action: str = "skill.invoked",
+        metadata: JsonDict | None = None,
     ) -> SkillInvocation:
         usage = TokenUsage()
         invocation = SkillInvocation(
@@ -247,7 +318,14 @@ class SkillInvocationService:
             error=error,
         )
         self.invocations.append(invocation)
-        self.audit.record("skill.invoked", "skill", manifest.id, trace_id, actor, {"status": "failed", "error": error})
+        self.audit.record(
+            audit_action,
+            "skill",
+            manifest.id,
+            trace_id,
+            actor,
+            metadata or {"status": "failed", "error": error},
+        )
         self.metrics.record(
             UsageMetric(
                 trace_id=trace_id,
@@ -355,7 +433,11 @@ class ResourceRegistry:
         if uri == "resource://skill-catalog":
             return ResourcePayload(
                 definition=self.list()[-1],
-                content="\n".join(f"{skill.id} v{skill.version} enabled={skill.enabled}" for skill in self.registry.list()),
+                content="\n".join(
+                    f"{skill.id} v{skill.version} status={skill.status} enabled={skill.enabled} "
+                    f"mcp_exposed={self.registry.is_mcp_exposed(skill)}"
+                    for skill in self.registry.list()
+                ),
             )
         for resource in self.resources:
             if resource.definition.uri == uri:
@@ -378,11 +460,13 @@ class McpToolAdapter:
         invocation_service: SkillInvocationService,
         resources: ResourceRegistry,
         prompts: PromptRegistry,
+        validator: SkillValidator,
     ) -> None:
         self.registry = registry
         self.invocation_service = invocation_service
         self.resources = resources
         self.prompts = prompts
+        self.validator = validator
 
     def list_tools(self) -> list[McpToolDefinition]:
         return [
@@ -391,13 +475,36 @@ class McpToolAdapter:
                 description=skill.description,
                 input_schema=skill.input_schema,
                 output_schema=skill.output_schema,
-                annotations={"version": skill.version, "tags": skill.tags, "provider": skill.provider},
+                annotations={
+                    "version": skill.version,
+                    "tags": skill.tags,
+                    "provider": skill.provider,
+                    "status": skill.status,
+                },
             )
-            for skill in self.registry.enabled()
+            for skill in self.registry.mcp_exposed()
+            if self.validator.validate_manifest(skill.model_dump(mode="json")).valid
         ]
 
-    async def call_tool(self, name: str, arguments: JsonDict, actor: str = "mcp-client") -> JsonDict:
-        invocation = await self.invocation_service.invoke(name, arguments, actor)
+    async def call_tool(
+        self,
+        name: str,
+        arguments: JsonDict,
+        actor: str = "mcp-client",
+        policy_context: PolicyInvocationContext | None = None,
+    ) -> JsonDict:
+        try:
+            manifest = self.registry.get(name)
+        except KeyError:
+            return {"status": "failed", "trace_id": new_trace_id(), "error": f"Unknown tool: {name}"}
+        schema_valid = self.validator.validate_manifest(manifest.model_dump(mode="json")).valid
+        if not self.registry.is_mcp_exposed(manifest) or not schema_valid:
+            return {
+                "status": "failed",
+                "trace_id": new_trace_id(),
+                "error": "Skill is not promoted and enabled for MCP exposure.",
+            }
+        invocation = await self.invocation_service.invoke(name, arguments, actor, policy_context)
         if invocation.status == "failed":
             return {"status": "failed", "trace_id": invocation.trace_id, "error": invocation.error}
         return {"status": "succeeded", "trace_id": invocation.trace_id, "result": invocation.output}
@@ -489,6 +596,16 @@ class GovernanceReportService:
         metrics = self.app_state.metrics.summary()
         enabled_tools = self.app_state.mcp.list_tools()
         disabled_skills = [skill.id for skill in registry.list() if not skill.enabled]
+        skill_records = [self._skill_record(skill) for skill in registry.list()]
+        lifecycle_counts = {status: 0 for status in ["draft", "validated", "promoted", "disabled"]}
+        for skill in registry.list():
+            lifecycle_counts[skill.status] = lifecycle_counts.get(skill.status, 0) + 1
+        mcp_exposed_count = sum(record.mcp_exposed for record in skill_records)
+        unpromoted_enabled = [
+            record.skill_id
+            for record in skill_records
+            if record.enabled and record.status != "promoted"
+        ]
         checks = [
             GovernanceCheck(
                 name="Manifest coverage",
@@ -497,8 +614,22 @@ class GovernanceReportService:
             ),
             GovernanceCheck(
                 name="MCP discovery",
-                status="pass" if len(enabled_tools) == len(registry.enabled()) else "fail",
-                detail=f"{len(enabled_tools)} enabled tools exposed through the MCP adapter.",
+                status="pass" if len(enabled_tools) == mcp_exposed_count else "fail",
+                detail=f"{len(enabled_tools)} promoted and enabled tools exposed through the MCP adapter.",
+            ),
+            GovernanceCheck(
+                name="Promotion lifecycle",
+                status="pass" if not unpromoted_enabled else "warn",
+                detail=(
+                    "All enabled skills are promoted for agent use."
+                    if not unpromoted_enabled
+                    else f"{len(unpromoted_enabled)} enabled skills are not promoted: {', '.join(unpromoted_enabled)}."
+                ),
+            ),
+            GovernanceCheck(
+                name="Schema validity",
+                status="pass" if all(record.schema_valid for record in skill_records) else "fail",
+                detail=f"{sum(record.schema_valid for record in skill_records)} of {len(skill_records)} manifests are valid.",
             ),
             GovernanceCheck(
                 name="Resources and prompts",
@@ -514,6 +645,11 @@ class GovernanceReportService:
                 name="Audit trail",
                 status="pass" if self.app_state.audit.events else "warn",
                 detail=f"{len(self.app_state.audit.events)} audit events recorded.",
+            ),
+            GovernanceCheck(
+                name="Policy access control",
+                status="pass",
+                detail="Local policy simulator covers admin, reviewer, agent, and viewer invocation decisions.",
             ),
             GovernanceCheck(
                 name="Failure rate",
@@ -540,7 +676,62 @@ class GovernanceReportService:
             average_latency_ms=metrics.average_latency_ms,
             estimated_cost=metrics.estimated_cost,
             checks=checks,
+            lifecycle_counts=lifecycle_counts,
+            skills=skill_records,
         )
+
+    def _skill_record(self, skill: SkillManifest) -> SkillGovernanceRecord:
+        validation = self.app_state.validator.validate_manifest(skill.model_dump(mode="json"))
+        invocations = [
+            invocation
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.skill_id == skill.id
+        ]
+        failure_count = sum(1 for invocation in invocations if invocation.status == "failed")
+        mcp_exposed = self.app_state.registry.is_mcp_exposed(skill) and validation.valid
+        risk_flags = self._risk_flags(skill, validation.valid, failure_count, mcp_exposed)
+        return SkillGovernanceRecord(
+            skill_id=skill.id,
+            version=skill.version,
+            enabled=skill.enabled,
+            status=skill.status,
+            schema_valid=validation.valid,
+            schema_errors=validation.errors,
+            last_invocation=max((invocation.created_at for invocation in invocations), default=None),
+            invocation_count=len(invocations),
+            failure_count=failure_count,
+            provider=skill.provider,
+            tags=skill.tags,
+            risk_flags=risk_flags,
+            policy_access=self.app_state.policy.access_summary(skill),
+            mcp_exposed=mcp_exposed,
+            mcp_exposure_status="exposed" if mcp_exposed else "not_exposed",
+        )
+
+    def _risk_flags(
+        self,
+        skill: SkillManifest,
+        schema_valid: bool,
+        failure_count: int,
+        mcp_exposed: bool,
+    ) -> list[str]:
+        flags: list[str] = []
+        if not schema_valid:
+            flags.append("schema_invalid")
+        if skill.status == "disabled" or not skill.enabled:
+            flags.append("disabled")
+        elif skill.status != "promoted":
+            flags.append("not_promoted")
+        if not mcp_exposed:
+            flags.append("not_exposed")
+        if not skill.tags:
+            flags.append("untagged")
+        if skill.provider != "mock":
+            flags.append("external_provider")
+        if failure_count:
+            flags.append("invocation_failures")
+        flags.extend(self.app_state.policy.risk_flags(skill))
+        return flags
 
 
 class PersistenceService:
@@ -585,6 +776,7 @@ class AppState:
     audit: AuditService
     metrics: MetricsService
     provider: BaseLLMProvider
+    policy: PolicyService = field(default_factory=PolicyService)
     registry: SkillRegistry = field(init=False)
     invocation_service: SkillInvocationService = field(init=False)
     prompts: PromptRegistry = field(init=False)
@@ -597,11 +789,17 @@ class AppState:
     def __post_init__(self) -> None:
         self.registry = SkillRegistry(self.audit)
         self.invocation_service = SkillInvocationService(
-            self.registry, self.validator, self.audit, self.metrics, self.provider
+            self.registry, self.validator, self.audit, self.metrics, self.provider, self.policy
         )
         self.prompts = PromptRegistry()
         self.resources = ResourceRegistry(self.registry)
-        self.mcp = McpToolAdapter(self.registry, self.invocation_service, self.resources, self.prompts)
+        self.mcp = McpToolAdapter(
+            self.registry,
+            self.invocation_service,
+            self.resources,
+            self.prompts,
+            self.validator,
+        )
         self.agent = AgentRunner(self.mcp)
         self.governance = GovernanceReportService(self)
         self.persistence = PersistenceService()

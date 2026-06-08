@@ -7,15 +7,21 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from app import __version__
 from app.bootstrap import create_state
 from app.config import get_settings
+from app.evals.golden import GoldenEvalRunner
 from app.models import (
     AgentRun,
     AgentRunRequest,
     AuditEvent,
+    GoldenEvalSuiteResult,
     GovernanceReport,
     HealthResponse,
     InvokeSkillRequest,
     LocalSnapshot,
     McpToolDefinition,
+    PolicyInvocationContext,
+    PolicySimulationRequest,
+    PolicySimulationResult,
+    PromoteSkillRequest,
     PromptDefinition,
     RegisterSkillRequest,
     ResourceDefinition,
@@ -84,25 +90,65 @@ def validate_skill(request: ValidateSkillRequest, _: str = Depends(require_api_k
     return result
 
 
+@app.post("/policy/simulate", response_model=PolicySimulationResult)
+def simulate_policy(
+    request: PolicySimulationRequest,
+    _: str = Depends(require_api_key),
+) -> PolicySimulationResult:
+    try:
+        manifest = state.registry.get(request.skill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return state.policy.simulate(manifest, request)
+
+
 @app.post("/skills/register", response_model=SkillManifest)
 def register_skill(request: RegisterSkillRequest, _: str = Depends(require_api_key)) -> SkillManifest:
     result = state.validator.validate_manifest(request.manifest.model_dump(mode="json"))
     if not result.valid:
         raise HTTPException(status_code=422, detail=result.errors)
-    return state.registry.register(request.manifest, actor="api-user")
+    manifest = request.manifest
+    if "status" not in manifest.model_fields_set and manifest.status == "draft":
+        manifest = manifest.model_copy(update={"status": "validated"})
+    return state.registry.register(manifest, actor="api-user")
+
+
+@app.post("/skills/{skill_id}/promote", response_model=SkillManifest)
+def promote_skill(
+    skill_id: str,
+    request: PromoteSkillRequest,
+    _: str = Depends(require_api_key),
+) -> SkillManifest:
+    try:
+        manifest = state.registry.get(skill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    result = state.validator.validate_manifest(manifest.model_dump(mode="json"))
+    state.audit.record("skill.validated", "skill", skill_id, new_trace_id(), request.actor)
+    if not result.valid:
+        raise HTTPException(status_code=422, detail=result.errors)
+    return state.registry.promote(skill_id, request.actor)
 
 
 @app.post("/skills/{skill_id}/invoke", response_model=SkillInvocation)
 async def invoke_skill(
     skill_id: str,
     request: InvokeSkillRequest,
+    http_request: Request,
     _: str = Depends(require_api_key),
 ) -> SkillInvocation:
     try:
-        invocation = await state.invocation_service.invoke(skill_id, request.input, request.actor)
+        invocation = await state.invocation_service.invoke(
+            skill_id,
+            request.input,
+            request.actor,
+            _policy_context_from_request(http_request, request),
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if invocation.status == "failed":
+        if invocation.error and invocation.error.startswith("Policy denied"):
+            raise HTTPException(status_code=403, detail=invocation.error)
         raise HTTPException(status_code=422, detail=invocation.error)
     return invocation
 
@@ -152,6 +198,11 @@ def governance_report(_: str = Depends(require_api_key)) -> GovernanceReport:
     return state.governance.generate()
 
 
+@app.post("/evals/golden", response_model=GoldenEvalSuiteResult)
+async def run_golden_evals(_: str = Depends(require_api_key)) -> GoldenEvalSuiteResult:
+    return await GoldenEvalRunner(state).run()
+
+
 @app.post("/snapshots/local", response_model=LocalSnapshot)
 def save_local_snapshot(_: str = Depends(require_api_key)) -> LocalSnapshot:
     return state.persistence.save(state)
@@ -171,9 +222,15 @@ def mcp_tools(_: str = Depends(require_api_key)) -> list[McpToolDefinition]:
 async def mcp_call_tool(
     tool_name: str,
     request: InvokeSkillRequest,
+    http_request: Request,
     _: str = Depends(require_api_key),
 ) -> dict:
-    return await state.mcp.call_tool(tool_name, request.input, request.actor)
+    return await state.mcp.call_tool(
+        tool_name,
+        request.input,
+        request.actor,
+        _policy_context_from_request(http_request, request),
+    )
 
 
 @app.get("/mcp/resources", response_model=list[ResourceDefinition])
@@ -192,3 +249,29 @@ def mcp_read_resource(uri: str, _: str = Depends(require_api_key)) -> ResourcePa
 @app.get("/mcp/prompts", response_model=list[PromptDefinition])
 def mcp_prompts(_: str = Depends(require_api_key)) -> list[PromptDefinition]:
     return state.mcp.list_prompts()
+
+
+def _policy_context_from_request(
+    http_request: Request,
+    request: InvokeSkillRequest,
+) -> PolicyInvocationContext | None:
+    header_map = {
+        "role": "x-policy-role",
+        "environment": "x-policy-environment",
+        "data_sensitivity": "x-data-sensitivity",
+        "requested_action": "x-requested-action",
+        "enforce": "x-policy-enforce",
+    }
+    header_values = {
+        field: http_request.headers.get(header)
+        for field, header in header_map.items()
+        if http_request.headers.get(header) is not None
+    }
+    if not header_values:
+        return request.policy_context
+
+    data = request.policy_context.model_dump() if request.policy_context else {}
+    if "enforce" in header_values:
+        header_values["enforce"] = header_values["enforce"].lower() in {"1", "true", "yes", "on"}
+    data.update(header_values)
+    return PolicyInvocationContext.model_validate(data)

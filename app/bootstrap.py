@@ -17,6 +17,7 @@ BUILTIN_MANIFESTS = [
         name="Document Summarization",
         version="1.0.0",
         description="Summarize document text or a resource URI into a concise summary and key points.",
+        status="promoted",
         input_schema=schema(
             {
                 "text": {"type": "string", "description": "Document text to summarize."},
@@ -40,6 +41,7 @@ BUILTIN_MANIFESTS = [
         name="Entity Extraction",
         version="1.0.0",
         description="Extract people, organizations, products, dates, risks, and action items from text.",
+        status="promoted",
         input_schema=schema({"text": {"type": "string"}}, ["text"]),
         output_schema=schema(
             {
@@ -59,6 +61,7 @@ BUILTIN_MANIFESTS = [
         name="Translation Stub",
         version="1.0.0",
         description="Return a deterministic placeholder translation with language metadata.",
+        status="promoted",
         input_schema=schema(
             {
                 "text": {"type": "string"},
@@ -83,6 +86,7 @@ BUILTIN_MANIFESTS = [
         name="Request Classification",
         version="1.0.0",
         description="Classify a business request into category, priority, confidence, and rationale.",
+        status="promoted",
         input_schema=schema({"request": {"type": "string"}}, ["request"]),
         output_schema=schema(
             {
@@ -100,6 +104,7 @@ BUILTIN_MANIFESTS = [
         name="Action Item Generator",
         version="1.0.0",
         description="Generate owner, task, due date, and priority action items from notes or support text.",
+        status="promoted",
         input_schema=schema({"text": {"type": "string"}}, ["text"]),
         output_schema=schema({"action_items": {"type": "array"}, "count": {"type": "integer"}}, ["action_items"]),
         tags=["meetings", "handoff", "automation"],
@@ -109,6 +114,7 @@ BUILTIN_MANIFESTS = [
         name="Knowledge Base Search",
         version="1.0.0",
         description="Search fake internal policy and product resources and return ranked snippets.",
+        status="promoted",
         input_schema=schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
         output_schema=schema({"query": {"type": "string"}, "results": {"type": "array"}}, ["query", "results"]),
         tags=["retrieval", "resources", "rag"],

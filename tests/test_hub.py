@@ -60,6 +60,7 @@ def test_manifest_validation_registration_and_custom_invocation(
         "description": "Mock manifest-backed skill for governed support summaries.",
         "provider": "mock",
         "enabled": True,
+        "status": "draft",
         "tags": ["support", "custom"],
         "input_schema": {
             "type": "object",
@@ -77,17 +78,42 @@ def test_manifest_validation_registration_and_custom_invocation(
     )
     assert registered.status_code == 200
     assert registered.json()["id"] == "draft_support_summary"
+    assert registered.json()["status"] == "draft"
+
+    tools = client.get("/mcp/tools", headers=auth_headers).json()
+    assert "draft_support_summary" not in {tool["name"] for tool in tools}
+
+    blocked_mcp_call = client.post(
+        "/mcp/tools/draft_support_summary/call",
+        json={"input": {"ticket": "Customer needs a governed support reply."}},
+        headers=auth_headers,
+    )
+    assert blocked_mcp_call.status_code == 200
+    assert blocked_mcp_call.json()["status"] == "failed"
+
+    promoted = client.post(
+        "/skills/draft_support_summary/promote",
+        json={"actor": "test-admin"},
+        headers=auth_headers,
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["status"] == "promoted"
+    assert promoted.json()["enabled"] is True
 
     tools = client.get("/mcp/tools", headers=auth_headers).json()
     assert "draft_support_summary" in {tool["name"] for tool in tools}
 
     invocation = client.post(
-        "/skills/draft_support_summary/invoke",
+        "/mcp/tools/draft_support_summary/call",
         json={"input": {"ticket": "Customer needs a governed support reply."}},
         headers=auth_headers,
     )
     assert invocation.status_code == 200
-    assert invocation.json()["output"]["draft"]
+    assert invocation.json()["status"] == "succeeded"
+    assert invocation.json()["result"]["draft"]
+
+    audit = client.get("/audit/events", headers=auth_headers).json()
+    assert any(event["action"] == "skill.promoted" for event in audit)
 
 
 @pytest.mark.parametrize(

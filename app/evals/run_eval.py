@@ -6,11 +6,13 @@ import json
 import time
 
 from app.bootstrap import BUILTIN_MANIFESTS, create_state
+from app.evals.golden import GoldenEvalRunner
+from app.models import SkillManifest
 
 
 async def run(validate_only: bool = False) -> dict:
     state = create_state()
-    checked = len(BUILTIN_MANIFESTS) + 1
+    checked = len(BUILTIN_MANIFESTS) + 2
     valid = sum(
         1 for manifest in BUILTIN_MANIFESTS if state.validator.validate_manifest(manifest.model_dump(mode="json")).valid
     )
@@ -21,6 +23,39 @@ async def run(validate_only: bool = False) -> dict:
     enabled_tool_names = [tool.name for tool in state.mcp.list_tools()]
     disabled_excluded = disabled.id not in enabled_tool_names
     state.registry.set_status("translate_text", True, "eval")
+    draft_manifest = SkillManifest(
+        id="draft_support_summary",
+        name="Draft Support Summary",
+        version="1.0.0",
+        description="Draft manifest used to validate promotion governance.",
+        provider="mock",
+        enabled=True,
+        tags=["support", "governance"],
+        input_schema={
+            "type": "object",
+            "properties": {"ticket": {"type": "string"}},
+            "required": ["ticket"],
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"draft": {"type": "string"}, "confidence": {"type": "number"}},
+            "required": ["draft", "confidence"],
+        },
+    )
+    draft_validation = state.validator.validate_manifest(draft_manifest.model_dump(mode="json"))
+    state.registry.register(draft_manifest, "eval")
+    draft_excluded = draft_manifest.id not in {tool.name for tool in state.mcp.list_tools()}
+    draft_mcp_call = await state.mcp.call_tool(
+        draft_manifest.id,
+        {"ticket": "Customer needs a governed support reply."},
+        "eval",
+    )
+    promoted = state.registry.promote(draft_manifest.id, "eval")
+    promoted_included = promoted.id in {tool.name for tool in state.mcp.list_tools()}
+    promotion_audited = any(
+        event.action == "skill.promoted" and event.resource_id == draft_manifest.id
+        for event in state.audit.events
+    )
 
     success_count = 0
     started = time.perf_counter()
@@ -41,11 +76,20 @@ async def run(validate_only: bool = False) -> dict:
         agent_run = await state.agent.run("Summarize the RFP policy context and create action items.")
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     summary = state.metrics.summary()
+    governance_report = state.governance.generate()
+    golden_result = await GoldenEvalRunner(state).run()
     passed = (
         valid == len(BUILTIN_MANIFESTS)
         and not invalid_result.valid
         and len(enabled_tool_names) == len(BUILTIN_MANIFESTS) - 1
         and disabled_excluded
+        and draft_validation.valid
+        and draft_excluded
+        and draft_mcp_call["status"] == "failed"
+        and promoted_included
+        and promotion_audited
+        and governance_report.status == "pass"
+        and golden_result.failed_cases == 0
         and len(agent_run.selected_skills) >= 2
         and (validate_only or success_count == len(BUILTIN_MANIFESTS))
     )
@@ -55,6 +99,15 @@ async def run(validate_only: bool = False) -> dict:
         "invalid_manifest_rejection_count": 0 if invalid_result.valid else 1,
         "enabled_mcp_tool_count": len(enabled_tool_names),
         "disabled_skill_exclusion_result": disabled_excluded,
+        "draft_manifest_validation_result": draft_validation.valid,
+        "draft_skill_exclusion_result": draft_excluded and draft_mcp_call["status"] == "failed",
+        "promotion_inclusion_result": promoted_included,
+        "promotion_audit_event_result": promotion_audited,
+        "governance_report_status": governance_report.status,
+        "governance_report_skill_count": len(governance_report.skills),
+        "golden_eval_score": golden_result.score,
+        "golden_eval_passed_cases": golden_result.passed_cases,
+        "golden_eval_failed_cases": golden_result.failed_cases,
         "built_in_skill_invocation_success_count": success_count,
         "demo_agent_selected_skill_count": len(agent_run.selected_skills),
         "average_invocation_latency": summary.average_latency_ms or elapsed_ms,

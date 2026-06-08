@@ -62,3 +62,24 @@ async def test_agent_selects_multiple_skills_for_compound_task() -> None:
     assert len(run.selected_skills) >= 2
     assert "classify_request" in run.selected_skills
     assert "generate_action_items" in run.selected_skills
+
+
+@pytest.mark.asyncio
+async def test_draft_skill_is_not_available_to_mcp_or_agent_until_promoted() -> None:
+    state = create_state()
+    draft_manifest = state.registry.get("classify_request").model_copy(update={"status": "draft"})
+    state.registry.register(draft_manifest, actor="pytest")
+
+    draft_tool_names = {tool.name for tool in state.mcp.list_tools()}
+    draft_run = await state.agent.run("Classify this RFP request before routing.", "pytest")
+
+    assert "classify_request" not in draft_tool_names
+    assert "classify_request" not in draft_run.selected_skills
+
+    state.registry.promote("classify_request", "pytest")
+
+    promoted_tool_names = {tool.name for tool in state.mcp.list_tools()}
+    promoted_run = await state.agent.run("Classify this RFP request before routing.", "pytest")
+
+    assert "classify_request" in promoted_tool_names
+    assert "classify_request" in promoted_run.selected_skills
