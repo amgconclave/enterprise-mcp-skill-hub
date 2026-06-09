@@ -37,6 +37,7 @@ It checks:
 - The demo prints tenant sandbox readiness plus the exported tenant sandbox path.
 - Skill Marketplace tests cover `GET /marketplace/catalog`, `POST /marketplace/rollout-pack`, deterministic Tenant Rollout scenarios, blocked and review-required rollouts, disabled-skill rollout/invocation blocks, usage/version/MCP exposure signals, artifact contents under `data/marketplace_packs/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
 - Skill Usage Analytics tests cover `GET /usage/analytics`, `POST /usage/chargeback-pack`, deterministic usage fixtures across four tenant/environments and all built-in skills, chargeback calculations, token/cost estimates, high-latency anomaly, budget warning, disabled-skill blocked event, generated artifacts under `data/usage_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
+- Privacy Retention tests cover `GET /privacy/retention-report`, `POST /privacy/redact`, `POST /privacy/retention-pack`, deterministic PII-like fixture findings, redacted previews, retention policy actions, generated artifacts under `data/privacy_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Enterprise readiness tests cover `GET /enterprise/readiness-scorecard`, `POST /enterprise/portfolio-demo-pack`, category aggregation, MCP capability counts, verification commands, generated artifacts under `data/portfolio_demo/`, endpoint behavior, and portfolio/interviewer talking points.
 - Portfolio Pack tests cover `GET /portfolio/evidence-index`, `POST /portfolio/interview-pack`, JD coverage, proof matrix rows, evidence score, generated artifacts under `data/portfolio_packs/`, technical talking points, local verification commands, and resume/GitHub README bullets.
 - API smoke and launch checklist tests cover `GET /ops/smoke-matrix`, `POST /ops/launch-checklist`, expected endpoint matrix coverage, generated artifacts under `data/launch_checklists/`, endpoint behavior, JD skills demonstrated, and five interviewer talking points.
@@ -55,6 +56,7 @@ It checks:
 - The demo prints API Contract audit status/route count and the exported Reviewer Collection path.
 - The demo prints Skill Marketplace readiness, catalog listing count, and the exported Tenant Rollout approval pack path.
 - The demo prints Skill Usage Analytics readiness, Cost Chargeback estimated cost, and the exported chargeback pack path.
+- The demo prints Privacy Retention readiness, finding count, and the exported Privacy Retention Pack path.
 - The demo prints final audit status/score and the exported Final Handoff Pack path.
 
 The pytest suite provides deeper endpoint and service coverage:
@@ -74,6 +76,7 @@ Dependency tests cover deterministic graph shape, high-centrality skill detectio
 Incident tests cover deterministic skill incident drill scenarios, recovery runbook export contents, endpoint behavior, MCP capabilities affected, and exclusion of disabled/draft skills from active incident impact.
 Tenant sandbox tests cover healthcare, fintech, public sector, and internal demo policy differences; allowed, blocked, and review-required skill/workflow decisions; endpoint behavior; export artifacts; MCP impact; and disabled/draft skill exclusion.
 Skill Usage Analytics tests cover usage grouping, deterministic token/cost chargeback, latency bands, budget/anomaly flags, disabled-skill blocked events, generated `data/usage_packs/` artifacts, dashboard/API contract wiring, and smoke matrix coverage.
+Privacy Retention tests cover deterministic local PII-like scanning across fixtures and live invocation/audit payloads, ad hoc JSON redaction, generated `data/privacy_packs/` artifacts, dashboard/API contract wiring, and smoke matrix coverage.
 Enterprise readiness tests cover the executive scorecard, portfolio demo pack, endpoint behavior, artifact contents, MCP capability counts, verification commands, JD skills demonstrated, and five interviewer talking points.
 Release Candidate tests cover the quality gate, Publish Pack export, endpoint behavior, artifact contents, verification commands, endpoint inventory, MCP capability inventory, GitHub checklist, recruiter review notes, and known limitations.
 CI Doctor tests cover the local publish-safety audit, Audit Pack export, endpoint behavior, dependency inventory, secret scan summary, generated artifact ignore coverage, local verification commands, remediation notes, and recruiter/interviewer explanation.

@@ -19,6 +19,7 @@ from app.models import (
     MarketplaceRolloutPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
+    PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
@@ -172,6 +173,10 @@ async def main() -> None:
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
         PromptGovernancePackRequest(actor="demo-prompt-security")
+    )
+    privacy_retention_report = state.privacy_retention.report(actor="demo-privacy-reviewer")
+    privacy_retention_pack = state.privacy_retention.pack(
+        PrivacyRetentionPackRequest(actor="demo-privacy-reviewer")
     )
     enterprise_scorecard = await state.enterprise.scorecard()
     portfolio_demo_pack = await state.enterprise.portfolio_demo_pack(
@@ -335,6 +340,12 @@ async def main() -> None:
                 ],
                 "prompt governance pack path": prompt_governance_pack.markdown_path,
                 "prompt_governance_pack_path": prompt_governance_pack.markdown_path,
+                "privacy retention readiness": privacy_retention_report.readiness_status,
+                "privacy_retention_readiness": privacy_retention_report.readiness_status,
+                "privacy retention findings": privacy_retention_report.summary["finding_count"],
+                "privacy_retention_findings": privacy_retention_report.summary["finding_count"],
+                "privacy retention pack path": privacy_retention_pack.markdown_path,
+                "privacy_retention_pack_path": privacy_retention_pack.markdown_path,
                 "enterprise readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness_score": enterprise_scorecard.overall_score,

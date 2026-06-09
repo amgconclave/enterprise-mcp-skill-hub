@@ -30,6 +30,8 @@ from app.models import (
     PolicyInvocationContext,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
+    PrivacyRedactionRequest,
+    PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
     PromptGovernanceValidationRequest,
     ReleasePublishPackRequest,
@@ -81,6 +83,7 @@ view = st.sidebar.radio(
         "Skill Usage Analytics",
         "Skill Reliability",
         "Prompt Governance",
+        "Privacy Retention",
         "Enterprise Readiness",
         "Portfolio Pack",
         "Reviewer Quickstart",
@@ -684,6 +687,81 @@ elif view == "Prompt Governance":
         if st.button("Export Prompt Governance Pack", use_container_width=True):
             export = state.prompt_governance.pack(PromptGovernancePackRequest(actor=actor))
             st.success("Prompt Governance Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
+
+elif view == "Privacy Retention":
+    st.subheader("Privacy Retention")
+    st.caption("Local PII redaction, retention recommendations, and reviewer artifacts for invocation/audit evidence.")
+    report = state.privacy_retention.report(actor="streamlit-privacy-reviewer")
+    col_ready, col_sources, col_findings, col_candidates = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_sources.metric("Sources", report.summary["source_count"])
+    col_findings.metric("Findings", report.summary["finding_count"])
+    col_candidates.metric("Retention actions", report.summary["deletion_candidate_count"])
+
+    tab_records, tab_findings, tab_redact, tab_export, tab_json = st.tabs(
+        ["Records", "High Risk", "Redaction Preview", "Privacy Pack", "JSON"]
+    )
+    with tab_records:
+        st.dataframe(
+            [
+                {
+                    "source_type": record.source_type,
+                    "source_id": record.source_id,
+                    "skill_id": record.skill_id,
+                    "max_severity": record.max_severity,
+                    "finding_count": record.finding_count,
+                    "retention": record.recommended_retention,
+                    "categories": ", ".join(record.categories),
+                }
+                for record in report.records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(report.deletion_candidates, use_container_width=True, hide_index=True)
+    with tab_findings:
+        st.dataframe(
+            [finding.model_dump(mode="json") for finding in report.high_risk_findings],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(report.retention_policy)
+    with tab_redact:
+        source_id = st.text_input("Privacy source id", value="ad_hoc_privacy_payload")
+        payload_text = st.text_area(
+            "JSON payload",
+            value=json.dumps(
+                {
+                    "requester": "Priya Shah",
+                    "email": "priya.shah@atlas.example",
+                    "notes": "Patient diagnosis needs follow-up.",
+                },
+                indent=2,
+            ),
+            height=160,
+        )
+        if st.button("Preview Redaction", use_container_width=True):
+            try:
+                payload = json.loads(payload_text)
+                result = state.privacy_retention.redact(
+                    PrivacyRedactionRequest(
+                        source_id=source_id,
+                        payload=payload,
+                        actor="streamlit-privacy-reviewer",
+                    )
+                )
+                st.json(result.model_dump(mode="json"))
+            except json.JSONDecodeError as exc:
+                st.error(f"Invalid JSON payload: {exc}")
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/privacy_packs/.")
+        actor = st.text_input("Privacy pack actor", value="streamlit-privacy-reviewer")
+        if st.button("Export Privacy Retention Pack", use_container_width=True):
+            export = state.privacy_retention.pack(PrivacyRetentionPackRequest(actor=actor))
+            st.success("Privacy Retention Pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))

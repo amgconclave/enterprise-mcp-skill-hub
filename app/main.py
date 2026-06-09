@@ -67,6 +67,11 @@ from app.models import (
     PortfolioEvidenceIndexResult,
     PortfolioInterviewPackRequest,
     PortfolioInterviewPackResult,
+    PrivacyRedactionRequest,
+    PrivacyRedactionResult,
+    PrivacyRetentionPackRequest,
+    PrivacyRetentionPackResult,
+    PrivacyRetentionReport,
     PromoteSkillRequest,
     PromptDefinition,
     PromptGovernancePackRequest,
@@ -301,6 +306,27 @@ def prompt_governance_pack(
     _: str = Depends(require_api_key),
 ) -> PromptGovernancePackResult:
     return state.prompt_governance.pack(request or PromptGovernancePackRequest())
+
+
+@app.get("/privacy/retention-report", response_model=PrivacyRetentionReport)
+def privacy_retention_report(_: str = Depends(require_api_key)) -> PrivacyRetentionReport:
+    return state.privacy_retention.report()
+
+
+@app.post("/privacy/redact", response_model=PrivacyRedactionResult)
+def privacy_redact(
+    request: PrivacyRedactionRequest,
+    _: str = Depends(require_api_key),
+) -> PrivacyRedactionResult:
+    return state.privacy_retention.redact(request)
+
+
+@app.post("/privacy/retention-pack", response_model=PrivacyRetentionPackResult)
+def privacy_retention_pack(
+    request: PrivacyRetentionPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> PrivacyRetentionPackResult:
+    return state.privacy_retention.pack(request or PrivacyRetentionPackRequest())
 
 
 @app.get("/enterprise/readiness-scorecard", response_model=EnterpriseReadinessScorecard)

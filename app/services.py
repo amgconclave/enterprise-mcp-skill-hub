@@ -81,6 +81,15 @@ from app.models import (
     PortfolioEvidenceIndexResult,
     PortfolioInterviewPackRequest,
     PortfolioInterviewPackResult,
+    PrivacyRedactionRequest,
+    PrivacyRedactionResult,
+    PrivacyRetentionFinding,
+    PrivacyRetentionPackRequest,
+    PrivacyRetentionPackResult,
+    PrivacyRetentionRecord,
+    PrivacyRetentionReport,
+    PrivacyRetentionSeverity,
+    PrivacyRetentionSourceType,
     PromptArgument,
     PromptDefinition,
     PromptGovernanceFinding,
@@ -8576,6 +8585,523 @@ class PromptGovernanceService:
         return "\n".join(lines)
 
 
+class PrivacyRetentionService:
+    PACK_ID = "privacy_retention_pack_latest"
+    SEVERITY_RANK: dict[str, int] = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    PATTERNS: list[JsonDict] = [
+        {
+            "category": "ssn",
+            "severity": "critical",
+            "pattern": r"\b\d{3}-\d{2}-\d{4}\b",
+            "replacement": "[REDACTED_SSN]",
+            "recommended_action": "Remove or tokenize before storing outside the local audit sandbox.",
+            "retention_action": "delete_or_redact_within_7_days",
+            "control": "regulated-identifier-redaction",
+        },
+        {
+            "category": "credential_like",
+            "severity": "critical",
+            "pattern": r"\b(api[_ -]?key|bearer token|secret|password)\b\s*[:=]\s*[A-Za-z0-9_./+=-]{8,}",
+            "replacement": "[REDACTED_SECRET]",
+            "recommended_action": "Redact immediately and rotate if this was a real credential.",
+            "retention_action": "delete_or_redact_immediately",
+            "control": "credential-redaction",
+        },
+        {
+            "category": "email",
+            "severity": "high",
+            "pattern": r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            "replacement": "[REDACTED_EMAIL]",
+            "recommended_action": "Replace with a stable pseudonym before exporting reviewer artifacts.",
+            "retention_action": "retain_30_days_redacted",
+            "control": "contact-pseudonymization",
+        },
+        {
+            "category": "phone",
+            "severity": "medium",
+            "pattern": r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\w)",
+            "replacement": "[REDACTED_PHONE]",
+            "recommended_action": "Mask phone numbers in local demo payloads and audit exports.",
+            "retention_action": "retain_60_days_redacted",
+            "control": "contact-redaction",
+        },
+        {
+            "category": "health_context",
+            "severity": "high",
+            "pattern": r"\b(patient|diagnosis|medication|treatment|PHI)\b.{0,80}",
+            "replacement": "[REDACTED_HEALTH_CONTEXT]",
+            "recommended_action": "Route through healthcare tenant review before keeping raw payloads.",
+            "retention_action": "retain_30_days_redacted_with_owner_review",
+            "control": "phi-minimization",
+        },
+        {
+            "category": "sample_person_name",
+            "severity": "medium",
+            "pattern": r"\b(Priya Shah|Devan)\b",
+            "replacement": "[REDACTED_PERSON]",
+            "recommended_action": "Use synthetic names in public portfolio artifacts.",
+            "retention_action": "retain_90_days_redacted",
+            "control": "portfolio-data-minimization",
+        },
+    ]
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "privacy_packs"
+
+    def report(self, actor: str = "privacy-retention-scanner") -> PrivacyRetentionReport:
+        records = [
+            self._scan_source(source_type, source_id, skill_id, trace_id, created_at, payload)
+            for source_type, source_id, skill_id, trace_id, created_at, payload in self._inventory_sources()
+        ]
+        high_risk = [
+            finding
+            for record in records
+            for finding in record.findings
+            if self.SEVERITY_RANK[finding.severity] >= self.SEVERITY_RANK["high"]
+        ]
+        deletion_candidates = self._deletion_candidates(records)
+        redaction_samples = [
+            {
+                "source_type": record.source_type,
+                "source_id": record.source_id,
+                "finding_count": record.finding_count,
+                "redacted_preview": record.redacted_preview,
+            }
+            for record in records
+            if record.finding_count
+        ][:5]
+        summary = {
+            "source_count": len(records),
+            "invocation_source_count": sum(
+                1 for record in records if record.source_type in {"invocation_input", "invocation_output"}
+            ),
+            "audit_source_count": sum(1 for record in records if record.source_type == "audit_metadata"),
+            "finding_count": sum(record.finding_count for record in records),
+            "high_risk_finding_count": len(high_risk),
+            "deletion_candidate_count": len(deletion_candidates),
+            "redaction_sample_count": len(redaction_samples),
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+        }
+        readiness: SecurityReadinessStatus = "ready"
+        if any(finding.severity == "critical" for finding in high_risk):
+            readiness = "blocked"
+        elif high_risk:
+            readiness = "needs_review"
+        report = PrivacyRetentionReport(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            records=records,
+            high_risk_findings=high_risk,
+            deletion_candidates=deletion_candidates,
+            redaction_samples=redaction_samples,
+            retention_policy=self._retention_policy(),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "privacy_retention.report_run",
+            "privacy_retention",
+            "invocation_audit_inventory",
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness,
+                "source_count": summary["source_count"],
+                "finding_count": summary["finding_count"],
+                "high_risk_finding_count": summary["high_risk_finding_count"],
+            },
+        )
+        return report
+
+    def redact(self, request: PrivacyRedactionRequest) -> PrivacyRedactionResult:
+        record = self._scan_source(
+            "text",
+            request.source_id,
+            None,
+            None,
+            None,
+            request.payload,
+        )
+        readiness: SecurityReadinessStatus = "ready"
+        if any(finding.severity == "critical" for finding in record.findings):
+            readiness = "blocked"
+        elif record.findings:
+            readiness = "needs_review"
+        self.app_state.audit.record(
+            "privacy_retention.content_redacted",
+            "privacy_payload",
+            request.source_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness,
+                "finding_count": record.finding_count,
+                "categories": record.categories,
+            },
+        )
+        return PrivacyRedactionResult(
+            source_id=request.source_id,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            redacted_payload=record.redacted_preview,
+            findings=record.findings,
+            summary={
+                "finding_count": record.finding_count,
+                "max_severity": record.max_severity,
+                "categories": record.categories,
+            },
+        )
+
+    def pack(self, request: PrivacyRetentionPackRequest | None = None) -> PrivacyRetentionPackResult:
+        request = request or PrivacyRetentionPackRequest()
+        report = self.report(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "privacy_retention_report": report.model_dump(mode="json"),
+            "retention_policy": report.retention_policy,
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "audit_events": [
+                event.model_dump(mode="json")
+                for event in self.app_state.audit.events
+                if event.action.startswith("privacy_retention.")
+            ],
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        bundle["summary"] = {
+            **report.summary,
+            "readiness_status": report.readiness_status,
+            "audit_event_count": len(bundle["audit_events"]),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "privacy_retention.pack_exported",
+            "privacy_retention_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "finding_count": report.summary["finding_count"],
+            },
+        )
+        return PrivacyRetentionPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _inventory_sources(
+        self,
+    ) -> list[
+        tuple[
+            PrivacyRetentionSourceType,
+            str,
+            str | None,
+            str | None,
+            datetime | None,
+            JsonDict,
+        ]
+    ]:
+        sources: list[
+            tuple[PrivacyRetentionSourceType, str, str | None, str | None, datetime | None, JsonDict]
+        ] = []
+        for invocation in self.app_state.invocation_service.invocations:
+            sources.append(
+                (
+                    "invocation_input",
+                    invocation.id,
+                    invocation.skill_id,
+                    invocation.trace_id,
+                    invocation.created_at,
+                    invocation.input,
+                )
+            )
+            if invocation.output is not None:
+                sources.append(
+                    (
+                        "invocation_output",
+                        invocation.id,
+                        invocation.skill_id,
+                        invocation.trace_id,
+                        invocation.created_at,
+                        invocation.output,
+                    )
+                )
+        for event in self.app_state.audit.events:
+            if event.metadata:
+                sources.append(
+                    (
+                        "audit_metadata",
+                        event.id,
+                        None,
+                        event.trace_id,
+                        event.created_at,
+                        event.metadata,
+                    )
+                )
+        sources.append(
+            (
+                "sample",
+                "privacy_red_team_fixture",
+                None,
+                "privacy-fixture-001",
+                None,
+                {
+                    "requester": "Priya Shah",
+                    "email": "priya.shah@atlas.example",
+                    "phone": "+1 415-555-0199",
+                    "ssn": "123-45-6789",
+                    "notes": "Patient diagnosis and treatment notes should not be exported raw.",
+                    "api_key": "api_key=sk-local-demo-placeholder",
+                },
+            )
+        )
+        return sources
+
+    def _scan_source(
+        self,
+        source_type: PrivacyRetentionSourceType,
+        source_id: str,
+        skill_id: str | None,
+        trace_id: str | None,
+        created_at: datetime | None,
+        payload: JsonDict,
+    ) -> PrivacyRetentionRecord:
+        findings: list[PrivacyRetentionFinding] = []
+        redacted = self._redact_value(payload, source_type, source_id, "", findings)
+        content = json.dumps(payload, sort_keys=True, default=str)
+        max_severity = self._max_severity(findings)
+        return PrivacyRetentionRecord(
+            source_type=source_type,
+            source_id=source_id,
+            skill_id=skill_id,
+            trace_id=trace_id,
+            created_at=created_at,
+            content_hash=sha256(content.encode("utf-8")).hexdigest(),
+            max_severity=max_severity,
+            finding_count=len(findings),
+            categories=sorted({finding.category for finding in findings}),
+            recommended_retention=self._recommended_retention(max_severity),
+            redacted_preview=redacted if isinstance(redacted, dict) else {"value": redacted},
+            findings=findings,
+        )
+
+    def _redact_value(
+        self,
+        value: object,
+        source_type: PrivacyRetentionSourceType,
+        source_id: str,
+        path: str,
+        findings: list[PrivacyRetentionFinding],
+    ) -> object:
+        if isinstance(value, dict):
+            return {
+                key: self._redact_value(
+                    nested,
+                    source_type,
+                    source_id,
+                    f"{path}.{key}" if path else str(key),
+                    findings,
+                )
+                for key, nested in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._redact_value(item, source_type, source_id, f"{path}[{index}]", findings)
+                for index, item in enumerate(value)
+            ]
+        if not isinstance(value, str):
+            return value
+
+        redacted = value
+        for index, rule in enumerate(self.PATTERNS, start=1):
+            for _match in re.finditer(rule["pattern"], redacted, flags=re.IGNORECASE | re.DOTALL):
+                findings.append(
+                    PrivacyRetentionFinding(
+                        finding_id=f"{source_id}:{path or 'root'}:{rule['category']}:{index}:{len(findings) + 1}",
+                        source_type=source_type,
+                        source_id=source_id,
+                        field_path=path or "$",
+                        severity=rule["severity"],
+                        category=rule["category"],
+                        matched_excerpt=rule["replacement"],
+                        redacted_excerpt=rule["replacement"],
+                        recommended_action=rule["recommended_action"],
+                        retention_action=rule["retention_action"],
+                        control=rule["control"],
+                    )
+                )
+            redacted = re.sub(
+                rule["pattern"],
+                rule["replacement"],
+                redacted,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        return redacted
+
+    def _max_severity(self, findings: list[PrivacyRetentionFinding]) -> PrivacyRetentionSeverity:
+        if not findings:
+            return "none"
+        return max(findings, key=lambda finding: self.SEVERITY_RANK[finding.severity]).severity
+
+    def _recommended_retention(self, severity: PrivacyRetentionSeverity) -> str:
+        if severity == "critical":
+            return "delete_or_redact_before_export"
+        if severity == "high":
+            return "retain_30_days_redacted_with_owner_review"
+        if severity == "medium":
+            return "retain_90_days_redacted"
+        if severity == "low":
+            return "retain_180_days_with_minimization_review"
+        return "retain_standard_local_audit_window"
+
+    def _deletion_candidates(self, records: list[PrivacyRetentionRecord]) -> list[JsonDict]:
+        return [
+            {
+                "source_type": record.source_type,
+                "source_id": record.source_id,
+                "skill_id": record.skill_id,
+                "trace_id": record.trace_id,
+                "max_severity": record.max_severity,
+                "recommended_retention": record.recommended_retention,
+                "categories": record.categories,
+            }
+            for record in records
+            if self.SEVERITY_RANK[record.max_severity] >= self.SEVERITY_RANK["high"]
+        ]
+
+    def _retention_policy(self) -> JsonDict:
+        return {
+            "critical": "delete_or_redact_before_export",
+            "high": "retain_30_days_redacted_with_owner_review",
+            "medium": "retain_90_days_redacted",
+            "low": "retain_180_days_with_minimization_review",
+            "none": "retain_standard_local_audit_window",
+            "artifact_rule": "Generated packs store redacted previews and hashes, not raw sensitive excerpts.",
+            "default_posture": "local_mock_only",
+        }
+
+    def _reviewer_checklist(self, report: PrivacyRetentionReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Invocation and audit evidence were scanned.",
+                "status": "pass" if report.summary["source_count"] else "fail",
+                "proof": f"{report.summary['source_count']} source(s) scanned.",
+            },
+            {
+                "item": "High-risk payloads have explicit retention actions.",
+                "status": "pass" if report.deletion_candidates else "warn",
+                "proof": f"{len(report.deletion_candidates)} deletion/redaction candidate(s).",
+            },
+            {
+                "item": "Redacted previews are available for reviewer artifacts.",
+                "status": "pass" if report.redaction_samples else "warn",
+                "proof": f"{len(report.redaction_samples)} redaction sample(s).",
+            },
+            {
+                "item": "Run local verification before publishing artifacts.",
+                "status": "manual",
+                "proof": "Use the local proof commands in this pack.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "privacy/retention-report|privacy_packs|Privacy Retention" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\privacy_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Privacy retention scanning is deterministic and local; it is not a substitute for enterprise DLP tooling.",
+            "The sample privacy fixture intentionally triggers blocked readiness so reviewers can inspect redaction behavior.",
+            "Only JSON-like invocation inputs, outputs, audit metadata, and ad hoc payloads are scanned.",
+            "Generated privacy artifacts store redacted previews, hashes, and findings; production systems should use durable retention jobs.",
+            "Generated privacy artifacts are written under ignored data/privacy_packs/.",
+        ]
+
+    def _excerpt(self, value: str) -> str:
+        compact = re.sub(r"\s+", " ", value.strip())
+        return compact[:160]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["privacy_retention_report"]
+        lines = [
+            "# Privacy Retention + Redaction Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Sources scanned: `{report['summary']['source_count']}`",
+            f"- Findings: `{report['summary']['finding_count']}`",
+            f"- Deletion/redaction candidates: `{report['summary']['deletion_candidate_count']}`",
+            "",
+            "## Retention Records",
+            "",
+            "| Source | Skill | Severity | Findings | Retention |",
+            "| --- | --- | ---: | ---: | --- |",
+            *[
+                f"| `{row['source_type']}:{row['source_id']}` | `{row.get('skill_id') or ''}` | `{row['max_severity']}` | {row['finding_count']} | `{row['recommended_retention']}` |"
+                for row in report["records"]
+            ],
+            "",
+            "## High-Risk Findings",
+            "",
+            *[
+                f"- `{finding['severity']}` `{finding['source_id']}` `{finding['field_path']}` `{finding['category']}` -> `{finding['retention_action']}`"
+                for finding in report["high_risk_findings"]
+            ],
+            "",
+            "## Retention Policy",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["retention_policy"].items()],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class EnterpriseReadinessService:
     PACK_ID = "portfolio_demo_pack_latest"
     SCORECARD_ID = "enterprise_readiness_scorecard_latest"
@@ -9949,6 +10475,39 @@ class SmokeMatrixService:
                     "data/prompt_governance/prompt_governance_pack_latest.md",
                 ],
                 "Writes Prompt Governance + Injection Risk reviewer artifacts.",
+            ),
+            self._endpoint(
+                "privacy retention",
+                "GET",
+                "/privacy/retention-report",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers",
+                [],
+                "Returns local PII findings, redacted previews, and retention recommendations for invocation/audit evidence.",
+            ),
+            self._endpoint(
+                "privacy retention",
+                "POST",
+                "/privacy/redact",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/privacy/redact -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"source_id\":\"ad_hoc\",\"payload\":{\"email\":\"priya.shah@atlas.example\"}}'",
+                [],
+                "Previews deterministic local redaction for ad hoc JSON payloads.",
+            ),
+            self._endpoint(
+                "privacy retention",
+                "POST",
+                "/privacy/retention-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/privacy/retention-pack -Method POST -Headers $headers",
+                [
+                    "data/privacy_packs/privacy_retention_pack_latest.json",
+                    "data/privacy_packs/privacy_retention_pack_latest.md",
+                ],
+                "Writes Privacy Retention + Redaction reviewer artifacts.",
             ),
             self._endpoint(
                 "incidents",
@@ -12769,6 +13328,7 @@ class DashboardSmokeService:
             {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
+            {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
             {"id": "ci_doctor", "label": "CI Doctor / Audit Pack", "purpose": "Static local CI and publish audit."},
             {"id": "release_pack", "label": "Release Pack", "purpose": "Release quality and publish artifacts."},
@@ -12805,6 +13365,9 @@ class DashboardSmokeService:
             self._endpoint_ref("reliability_pack", "POST", "/reliability/pack", "Writes Reliability Pack artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
+            self._endpoint_ref("privacy_retention", "GET", "/privacy/retention-report", "Privacy and retention scan signals."),
+            self._endpoint_ref("privacy_redact", "POST", "/privacy/redact", "Previews local redaction for JSON payloads."),
+            self._endpoint_ref("privacy_retention_pack", "POST", "/privacy/retention-pack", "Writes Privacy Retention artifacts."),
             self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
             self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
         ]
@@ -12836,6 +13399,7 @@ class DashboardSmokeService:
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
+            self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
             self._artifact_tab("api_contract", "API Contract", "Reviewer Collection", "data/api_contracts/"),
         ]
@@ -12903,6 +13467,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/privacy/retention-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/handoff/final-audit -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/handoff/final-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
@@ -13419,6 +13985,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
                 ["prompt_governance_pack_latest.json", "prompt_governance_pack_latest.md"],
                 "MCP prompt/resource injection-risk findings, endpoint review, approval gates, and audit-backed reviewer proof.",
+            ),
+            self._catalog_row(
+                "privacy_packs",
+                "Privacy Retention + Redaction Pack",
+                Path("data") / "privacy_packs",
+                "POST /privacy/retention-pack",
+                "Invoke-RestMethod http://localhost:8000/privacy/retention-pack -Method POST -Headers $headers",
+                ["privacy_retention_pack_latest.json", "privacy_retention_pack_latest.md"],
+                "Local PII redaction previews, retention actions, deletion candidates, and privacy reviewer proof.",
             ),
             self._catalog_row(
                 "workflow_reviews",
@@ -14346,6 +14921,7 @@ class PersistenceService:
             "metrics": [metric.model_dump(mode="json") for metric in app_state.metrics.metrics],
             "reliability_report": app_state.reliability.report().model_dump(mode="json"),
             "prompt_governance_report": app_state.prompt_governance.report().model_dump(mode="json"),
+            "privacy_retention_report": app_state.privacy_retention.report().model_dump(mode="json"),
             "governance_report": app_state.governance.generate().model_dump(mode="json"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -14393,6 +14969,7 @@ class AppState:
     usage: SkillUsageAnalyticsService = field(init=False)
     reliability: SkillReliabilityService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
+    privacy_retention: PrivacyRetentionService = field(init=False)
     enterprise: EnterpriseReadinessService = field(init=False)
     smoke: SmokeMatrixService = field(init=False)
     portfolio: PortfolioEvidenceService = field(init=False)
@@ -14446,6 +15023,7 @@ class AppState:
         self.reliability = SkillReliabilityService(self)
         self.invocation_service.reliability = self.reliability
         self.prompt_governance = PromptGovernanceService(self)
+        self.privacy_retention = PrivacyRetentionService(self)
         self.enterprise = EnterpriseReadinessService(self)
         self.smoke = SmokeMatrixService(self)
         self.portfolio = PortfolioEvidenceService(self)

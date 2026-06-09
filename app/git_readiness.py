@@ -31,6 +31,7 @@ class GitReadinessService:
         "data/launch_checklists/",
         "data/release_packs/",
         "data/audit_packs/",
+        "data/privacy_packs/",
         "data/reviewer_packs/",
         "data/artifact_indexes/",
         "data/ui_verification/",

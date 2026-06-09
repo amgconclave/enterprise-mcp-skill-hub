@@ -48,6 +48,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
 - `POST /prompt-governance/validate` - validates submitted prompt or resource text with local deterministic prompt-governance rules.
 - `POST /prompt-governance/pack` - writes the Prompt Governance + Injection Risk Pack Markdown/JSON under ignored local folder `data/prompt_governance/`.
+- `GET /privacy/retention-report` - scans local invocation inputs, outputs, audit metadata, and deterministic fixtures for PII-like retention risks with redacted previews.
+- `POST /privacy/redact` - previews deterministic local redaction for an ad hoc JSON payload.
+- `POST /privacy/retention-pack` - writes the Privacy Retention + Redaction Pack Markdown/JSON under ignored local folder `data/privacy_packs/`.
 - `GET /enterprise/readiness-scorecard` - returns the Enterprise Readiness scorecard with category scores, readiness status, risks, recommended actions, artifact links, MCP capability counts, and local verification commands.
 - `POST /enterprise/portfolio-demo-pack` - writes `portfolio_demo_pack_latest.json` and `portfolio_demo_pack_latest.md` under ignored local folder `data/portfolio_demo/`.
 - `GET /portfolio/evidence-index` - returns a deterministic Portfolio Evidence index mapping JD skills to endpoint, file, command, artifact, MCP, and governance proof.
@@ -426,6 +429,28 @@ Invoke-RestMethod http://localhost:8000/prompt-governance/pack `
 The report scans MCP prompt templates, MCP resources, and a deterministic red-team fixture for instruction overrides, safety bypasses, role impersonation, credential exfiltration, endpoint/tool abuse, external URLs, and approval-required language. Critical findings in real MCP prompt/resource content block readiness; red-team fixture findings demonstrate review gates without requiring external services.
 
 The Prompt Governance Pack writes `prompt_governance_pack_latest.json` and `.md` under ignored `data/prompt_governance/`. It includes high-risk findings, endpoint review rows, approval policy, reviewer checklist, prompt_governance audit events, local proof commands, and limitations.
+
+## Privacy Retention And Redaction
+
+```powershell
+Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers
+
+Invoke-RestMethod http://localhost:8000/privacy/redact `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"source_id":"ad_hoc_privacy_payload","payload":{"requester":"Priya Shah","email":"priya.shah@atlas.example","notes":"Patient diagnosis follow-up"}}'
+
+Invoke-RestMethod http://localhost:8000/privacy/retention-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"privacy-reviewer"}'
+```
+
+The report scans deterministic local fixtures plus live invocation inputs, outputs, and audit metadata for PII-like patterns. It returns high-risk findings, redacted previews, deletion/redaction candidates, retention policy actions, local proof commands, and limitations.
+
+The Privacy Retention Pack writes `privacy_retention_pack_latest.json` and `.md` under ignored `data/privacy_packs/`. It includes redacted previews and hashes rather than raw sensitive values, plus privacy_retention audit events and reviewer checklist items.
 
 ## Enterprise Readiness And Portfolio Demo Pack
 

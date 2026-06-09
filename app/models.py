@@ -48,6 +48,14 @@ CircuitBreakerState = Literal["closed", "open", "half_open"]
 CircuitBreakerAction = Literal["open", "close", "half_open"]
 PromptGovernanceSeverity = Literal["none", "low", "medium", "high", "critical"]
 PromptGovernanceTargetType = Literal["prompt", "resource", "text", "sample"]
+PrivacyRetentionSeverity = Literal["none", "low", "medium", "high", "critical"]
+PrivacyRetentionSourceType = Literal[
+    "invocation_input",
+    "invocation_output",
+    "audit_metadata",
+    "sample",
+    "text",
+]
 
 
 class TokenUsage(BaseModel):
@@ -628,6 +636,76 @@ class PromptGovernancePackRequest(BaseModel):
 
 
 class PromptGovernancePackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class PrivacyRetentionFinding(BaseModel):
+    finding_id: str
+    source_type: PrivacyRetentionSourceType
+    source_id: str
+    field_path: str
+    severity: PrivacyRetentionSeverity
+    category: str
+    matched_excerpt: str
+    redacted_excerpt: str
+    recommended_action: str
+    retention_action: str
+    control: str
+
+
+class PrivacyRetentionRecord(BaseModel):
+    source_type: PrivacyRetentionSourceType
+    source_id: str
+    skill_id: str | None = None
+    trace_id: str | None = None
+    created_at: datetime | None = None
+    content_hash: str
+    max_severity: PrivacyRetentionSeverity
+    finding_count: int
+    categories: list[str] = Field(default_factory=list)
+    recommended_retention: str
+    redacted_preview: JsonDict
+    findings: list[PrivacyRetentionFinding] = Field(default_factory=list)
+
+
+class PrivacyRetentionReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[PrivacyRetentionRecord]
+    high_risk_findings: list[PrivacyRetentionFinding] = Field(default_factory=list)
+    deletion_candidates: list[JsonDict] = Field(default_factory=list)
+    redaction_samples: list[JsonDict] = Field(default_factory=list)
+    retention_policy: JsonDict = Field(default_factory=dict)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class PrivacyRedactionRequest(BaseModel):
+    payload: JsonDict
+    source_id: str = "ad_hoc_payload"
+    actor: str = "privacy-reviewer"
+
+
+class PrivacyRedactionResult(BaseModel):
+    source_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    redacted_payload: JsonDict
+    findings: list[PrivacyRetentionFinding] = Field(default_factory=list)
+    summary: JsonDict
+
+
+class PrivacyRetentionPackRequest(BaseModel):
+    actor: str = "privacy-reviewer"
+
+
+class PrivacyRetentionPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

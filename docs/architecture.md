@@ -28,6 +28,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `TenantEntitlementService` applies deterministic local tenant/user RBAC and scope policies to promoted skills, returns MCP-safe allowed tool subsets, blocks enforced denied invocations, records `entitlement.denied` audit events, and writes reviewer packs under `data/entitlement_packs/`.
 - `SkillMarketplaceGovernanceService` turns the registry into a governed Skill Marketplace with lifecycle listings, deterministic Tenant Rollout eligibility scenarios, risk/review states, usage/version/MCP exposure signals, disabled-skill blocks, and rollout approval artifacts under `data/marketplace_packs/`.
 - `SkillUsageAnalyticsService` builds deterministic local Skill Usage Analytics from invocation history, audit events, metrics, the skill registry, marketplace tenant scenarios, and mock token/cost fixtures; it returns budgets/anomalies and writes Cost Chargeback artifacts under `data/usage_packs/`.
+- `PrivacyRetentionService` scans invocation inputs, invocation outputs, audit metadata, and ad hoc JSON payloads for local PII-like patterns, returns redacted previews and retention actions, and writes Privacy Retention artifacts under `data/privacy_packs/`.
 - `EnterpriseReadinessService` aggregates governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into an executive scorecard and portfolio demo pack under `data/portfolio_demo/`.
 - `PortfolioEvidenceService` maps recruiter JD skills to concrete implementation proof across MCP tools/resources/prompts, FastAPI APIs, manifests, governance, audit, evals, release, capacity, tenant, incident, readiness, smoke, and launch checklist surfaces, then writes an Interview Pack under `data/portfolio_packs/`.
 - `SmokeMatrixService` assembles a deterministic local API smoke matrix and writes launch checklist artifacts under `data/launch_checklists/` for README and interview verification.
@@ -239,6 +240,14 @@ The project keeps governance close to the skill runtime:
 3. The response groups usage by skill, tenant/environment, agent, status, MCP exposure, and latency band, then reports token/cost estimates, budget status, anomaly flags, disabled-skill blocked events, and coverage summary.
 4. `POST /usage/chargeback-pack` writes Markdown and JSON under ignored `data/usage_packs/` with usage tables, cost allocation, budget/anomaly flags, recommended controls, reviewer checklist, local proof commands, and limitations.
 5. The flow is local/mock portfolio evidence; cost estimates are not provider invoices and tenant/agent labels are deterministic scenarios.
+
+## Privacy Retention And Redaction Flow
+
+1. A reviewer calls `GET /privacy/retention-report`.
+2. `PrivacyRetentionService` scans deterministic fixtures plus live invocation inputs, outputs, and audit metadata using local regex rules for regulated identifiers, contact data, health context, and credential-like strings.
+3. The response returns source records, high-risk findings, redacted previews, deletion/redaction candidates, retention policy actions, local proof commands, and limitations.
+4. A reviewer calls `POST /privacy/redact` to preview redaction for an ad hoc JSON payload or `POST /privacy/retention-pack` to export reviewer evidence.
+5. The service writes Markdown and JSON under ignored `data/privacy_packs/`; generated artifacts store hashes and redacted previews rather than raw sensitive values.
 
 ## Enterprise Readiness Flow
 
