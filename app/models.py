@@ -14,6 +14,7 @@ PolicyDecisionValue = Literal["allow", "deny"]
 SecurityReadinessStatus = Literal["ready", "needs_review", "blocked"]
 TenantKey = Literal["healthcare", "fintech", "public_sector", "internal_demo"]
 TenantPolicyDecision = Literal["allowed", "blocked", "review_required"]
+TenantEntitlementDecisionValue = Literal["allow", "deny"]
 MarketplaceListingStatus = Literal["approved", "promoted", "draft", "disabled"]
 MarketplaceRiskLevel = Literal["low", "medium", "high"]
 MarketplaceReviewState = Literal["none", "approval_required", "review_required", "blocked", "disabled_block"]
@@ -108,6 +109,7 @@ class SkillInvocation(BaseModel):
     error: str | None = None
     policy_context: PolicyInvocationContext | None = None
     policy_decision: PolicySimulationResult | None = None
+    entitlement_decision: SkillEntitlementDecision | None = None
 
 
 class McpToolDefinition(BaseModel):
@@ -359,6 +361,71 @@ class TenantSandboxExportRequest(BaseModel):
 
 class TenantSandboxExportResult(BaseModel):
     sandbox_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class TenantSkillEntitlementPolicy(BaseModel):
+    tenant_id: str
+    skill_id: str = "*"
+    allowed_roles: list[PolicyRole] = Field(default_factory=list)
+    denied_roles: list[PolicyRole] = Field(default_factory=list)
+    required_scopes: list[str] = Field(default_factory=lambda: ["skill.invoke"])
+    allowed_environments: list[str] = Field(default_factory=lambda: ["local", "dev", "test"])
+    allowed_data_sensitivities: list[DataSensitivity] = Field(
+        default_factory=lambda: ["public", "internal"]
+    )
+    reason: str
+
+
+class SkillEntitlementDecision(BaseModel):
+    tenant_id: str
+    user_id: str
+    user_scopes: list[str] = Field(default_factory=list)
+    skill_id: str
+    role: PolicyRole
+    environment: str
+    data_sensitivity: DataSensitivity
+    decision: TenantEntitlementDecisionValue
+    reasons: list[str] = Field(default_factory=list)
+    matched_policies: list[str] = Field(default_factory=list)
+    missing_scopes: list[str] = Field(default_factory=list)
+    allowed_roles: list[PolicyRole] = Field(default_factory=list)
+    required_scopes: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementMatrixRequest(BaseModel):
+    tenant_id: str = "internal_demo"
+    user_id: str = "demo-user"
+    role: PolicyRole = "agent"
+    environment: str = "local"
+    data_sensitivity: DataSensitivity = "internal"
+    user_scopes: list[str] = Field(default_factory=lambda: ["skill.invoke"])
+    skill_ids: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementMatrixResult(BaseModel):
+    generated_at: datetime
+    request: TenantEntitlementMatrixRequest
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    decisions: list[SkillEntitlementDecision] = Field(default_factory=list)
+    policies: list[TenantSkillEntitlementPolicy] = Field(default_factory=list)
+    mcp_safe_tool_names: list[str] = Field(default_factory=list)
+    denied_skill_ids: list[str] = Field(default_factory=list)
+    reviewer_notes: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementPackRequest(BaseModel):
+    actor: str = "entitlement-reviewer"
+    scenarios: list[TenantEntitlementMatrixRequest] = Field(default_factory=list)
+
+
+class TenantEntitlementPackResult(BaseModel):
+    pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus
     json_path: str
@@ -1091,6 +1158,10 @@ class PolicyInvocationContext(BaseModel):
     data_sensitivity: DataSensitivity = "internal"
     requested_action: str = "invoke"
     enforce: bool = False
+    tenant_id: str = "internal_demo"
+    user_id: str = "demo-user"
+    user_scopes: list[str] = Field(default_factory=lambda: ["skill.invoke"])
+    enforce_entitlements: bool = False
 
 
 class PolicySimulationRequest(BaseModel):

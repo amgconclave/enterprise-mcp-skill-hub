@@ -108,6 +108,7 @@ from app.models import (
     RuntimeDemoReadinessResult,
     SecurityReadinessStatus,
     SecurityReviewSummary,
+    SkillEntitlementDecision,
     SkillGovernanceRecord,
     SkillIncidentDrillRequest,
     SkillIncidentDrillResult,
@@ -125,12 +126,17 @@ from app.models import (
     SmokeMatrixEndpoint,
     SmokeMatrixResult,
     TenantCapabilityDecision,
+    TenantEntitlementMatrixRequest,
+    TenantEntitlementMatrixResult,
+    TenantEntitlementPackRequest,
+    TenantEntitlementPackResult,
     TenantKey,
     TenantPolicyDecision,
     TenantPolicySimulationRequest,
     TenantPolicySimulationResult,
     TenantSandboxExportRequest,
     TenantSandboxExportResult,
+    TenantSkillEntitlementPolicy,
     TokenUsage,
     UiVerificationPackRequest,
     UiVerificationPackResult,
@@ -297,6 +303,380 @@ class SkillRegistry:
             versions[-1] = versions[-1].model_copy(update={"status": status})
 
 
+class TenantEntitlementService:
+    PACK_ID = "tenant_entitlement_pack_latest"
+
+    DEFAULT_POLICIES = [
+        {
+            "tenant_id": "internal_demo",
+            "skill_id": "*",
+            "allowed_roles": ["admin", "reviewer", "agent"],
+            "denied_roles": ["viewer"],
+            "required_scopes": ["skill.invoke"],
+            "allowed_environments": ["local", "dev", "test", "prod", "production"],
+            "allowed_data_sensitivities": ["public", "internal", "confidential"],
+            "reason": "Internal demo tenants allow governed agent invocation across promoted skills.",
+        },
+        {
+            "tenant_id": "healthcare",
+            "skill_id": "*",
+            "allowed_roles": ["admin", "reviewer", "agent"],
+            "denied_roles": ["viewer"],
+            "required_scopes": ["skill.invoke", "tenant.healthcare"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Healthcare tenant access is limited to non-production local review and internal data.",
+        },
+        {
+            "tenant_id": "healthcare",
+            "skill_id": "translate_text",
+            "allowed_roles": ["admin", "reviewer"],
+            "denied_roles": ["agent", "viewer"],
+            "required_scopes": ["skill.invoke", "tenant.healthcare", "phi.review"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Translation is review-gated for healthcare tenants because text can contain PHI.",
+        },
+        {
+            "tenant_id": "fintech",
+            "skill_id": "*",
+            "allowed_roles": ["admin", "reviewer", "agent"],
+            "denied_roles": ["viewer"],
+            "required_scopes": ["skill.invoke", "tenant.fintech"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Fintech agents can invoke non-confidential skills in local and pre-production environments.",
+        },
+        {
+            "tenant_id": "fintech",
+            "skill_id": "extract_entities",
+            "allowed_roles": ["admin", "reviewer"],
+            "denied_roles": ["agent", "viewer"],
+            "required_scopes": ["skill.invoke", "tenant.fintech", "pii.review"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal", "confidential"],
+            "reason": "Entity extraction is reviewer-gated for fintech tenants due to PII exposure risk.",
+        },
+        {
+            "tenant_id": "public_sector",
+            "skill_id": "*",
+            "allowed_roles": ["admin", "reviewer", "agent"],
+            "denied_roles": ["viewer"],
+            "required_scopes": ["skill.invoke", "tenant.public_sector"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Public-sector tenants require tenant-scoped authorization and no confidential data by default.",
+        },
+        {
+            "tenant_id": "public_sector",
+            "skill_id": "generate_action_items",
+            "allowed_roles": ["admin", "reviewer"],
+            "denied_roles": ["agent", "viewer"],
+            "required_scopes": ["skill.invoke", "tenant.public_sector", "casework.review"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Action item generation is reviewer-gated for public-sector casework handoffs.",
+        },
+    ]
+
+    def __init__(
+        self,
+        registry: SkillRegistry,
+        validator: SkillValidator,
+        audit: AuditService,
+        output_dir: Path | None = None,
+    ) -> None:
+        self.registry = registry
+        self.validator = validator
+        self.audit = audit
+        self.output_dir = output_dir or Path("data") / "entitlement_packs"
+        self.policies = [TenantSkillEntitlementPolicy.model_validate(policy) for policy in self.DEFAULT_POLICIES]
+
+    def list_policies(self) -> list[TenantSkillEntitlementPolicy]:
+        return sorted(self.policies, key=lambda policy: (policy.tenant_id, policy.skill_id))
+
+    def decide(self, skill: SkillManifest, context: PolicyInvocationContext) -> SkillEntitlementDecision:
+        exact = [policy for policy in self.policies if policy.tenant_id == context.tenant_id and policy.skill_id == skill.id]
+        wildcard = [
+            policy for policy in self.policies if policy.tenant_id == context.tenant_id and policy.skill_id == "*"
+        ]
+        applicable = exact or wildcard
+        reasons: list[str] = []
+        matched_policies: list[str] = []
+        missing_scopes: list[str] = []
+        allowed_roles: list[str] = []
+        required_scopes: list[str] = []
+
+        if not applicable:
+            return SkillEntitlementDecision(
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                user_scopes=sorted(context.user_scopes),
+                skill_id=skill.id,
+                role=context.role,
+                environment=context.environment,
+                data_sensitivity=context.data_sensitivity,
+                decision="deny",
+                reasons=[f"Tenant '{context.tenant_id}' has no entitlement policy for skill '{skill.id}'."],
+                matched_policies=[],
+                missing_scopes=[],
+            )
+
+        normalized_environment = context.environment.lower()
+        for policy in applicable:
+            policy_id = self._policy_id(policy)
+            matched_policies.append(policy_id)
+            allowed_roles.extend(role for role in policy.allowed_roles if role not in allowed_roles)
+            required_scopes.extend(scope for scope in policy.required_scopes if scope not in required_scopes)
+            policy_missing_scopes = sorted(set(policy.required_scopes) - set(context.user_scopes))
+            if context.role in policy.denied_roles:
+                reasons.append(f"{policy_id}: role '{context.role}' is explicitly denied. {policy.reason}")
+                continue
+            if context.role not in policy.allowed_roles:
+                reasons.append(f"{policy_id}: role '{context.role}' is not in allowed roles {policy.allowed_roles}.")
+                continue
+            if policy_missing_scopes:
+                missing_scopes.extend(scope for scope in policy_missing_scopes if scope not in missing_scopes)
+                reasons.append(f"{policy_id}: missing required scopes {policy_missing_scopes}.")
+                continue
+            allowed_environments = {environment.lower() for environment in policy.allowed_environments}
+            if normalized_environment not in allowed_environments:
+                reasons.append(f"{policy_id}: environment '{context.environment}' is outside allowed environments.")
+                continue
+            if context.data_sensitivity not in policy.allowed_data_sensitivities:
+                reasons.append(
+                    f"{policy_id}: data sensitivity '{context.data_sensitivity}' is outside allowed sensitivities."
+                )
+                continue
+            reasons.append(f"{policy_id}: entitlement allowed. {policy.reason}")
+            return SkillEntitlementDecision(
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                user_scopes=sorted(context.user_scopes),
+                skill_id=skill.id,
+                role=context.role,
+                environment=context.environment,
+                data_sensitivity=context.data_sensitivity,
+                decision="allow",
+                reasons=reasons,
+                matched_policies=matched_policies,
+                missing_scopes=sorted(missing_scopes),
+                allowed_roles=allowed_roles,
+                required_scopes=required_scopes,
+            )
+
+        return SkillEntitlementDecision(
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            user_scopes=sorted(context.user_scopes),
+            skill_id=skill.id,
+            role=context.role,
+            environment=context.environment,
+            data_sensitivity=context.data_sensitivity,
+            decision="deny",
+            reasons=reasons,
+            matched_policies=matched_policies,
+            missing_scopes=sorted(missing_scopes),
+            allowed_roles=allowed_roles,
+            required_scopes=required_scopes,
+        )
+
+    def matrix(self, request: TenantEntitlementMatrixRequest | None = None) -> TenantEntitlementMatrixResult:
+        request = request or TenantEntitlementMatrixRequest()
+        skill_ids = request.skill_ids or [skill.id for skill in self.registry.mcp_exposed()]
+        decisions: list[SkillEntitlementDecision] = []
+        for skill_id in skill_ids:
+            try:
+                skill = self.registry.get(skill_id)
+            except KeyError:
+                decisions.append(self._missing_skill_decision(skill_id, request))
+                continue
+            context = PolicyInvocationContext(
+                role=request.role,
+                environment=request.environment,
+                data_sensitivity=request.data_sensitivity,
+                requested_action="invoke",
+                enforce_entitlements=True,
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+                user_scopes=request.user_scopes,
+            )
+            decisions.append(self.decide(skill, context))
+        allowed = [decision.skill_id for decision in decisions if decision.decision == "allow"]
+        denied = [decision.skill_id for decision in decisions if decision.decision == "deny"]
+        mcp_safe_tool_names = [
+            skill_id
+            for skill_id in allowed
+            if self._is_valid_mcp_skill(skill_id)
+        ]
+        readiness_status: SecurityReadinessStatus = "ready" if allowed and denied else "needs_review"
+        return TenantEntitlementMatrixResult(
+            generated_at=utc_now(),
+            request=request,
+            readiness_status=readiness_status,
+            summary={
+                "tenant_id": request.tenant_id,
+                "user_id": request.user_id,
+                "allowed_skill_count": len(allowed),
+                "denied_skill_count": len(denied),
+                "policy_count": len(self.policies),
+                "mcp_safe_tool_count": len(mcp_safe_tool_names),
+            },
+            decisions=decisions,
+            policies=self.list_policies(),
+            mcp_safe_tool_names=sorted(mcp_safe_tool_names),
+            denied_skill_ids=sorted(denied),
+            reviewer_notes=[
+                "Entitlement decisions are deterministic local policy rows, not identity-provider lookups.",
+                "MCP-safe tools are the intersection of promoted tools, valid manifests, and allowed entitlement decisions.",
+                "Denied invocations record failed invocation rows and `entitlement.denied` audit events when enforced.",
+            ],
+        )
+
+    async def export_pack(self, request: TenantEntitlementPackRequest | None = None) -> TenantEntitlementPackResult:
+        request = request or TenantEntitlementPackRequest()
+        scenarios = request.scenarios or self._default_scenarios()
+        matrices = [self.matrix(scenario) for scenario in scenarios]
+        allowed_count = sum(matrix.summary["allowed_skill_count"] for matrix in matrices)
+        denied_count = sum(matrix.summary["denied_skill_count"] for matrix in matrices)
+        readiness_status: SecurityReadinessStatus = "ready" if allowed_count and denied_count else "needs_review"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "readiness_status": readiness_status,
+            "summary": {
+                "scenario_count": len(matrices),
+                "allowed_skill_count": allowed_count,
+                "denied_skill_count": denied_count,
+                "policy_count": len(self.policies),
+            },
+            "scenarios": [matrix.model_dump(mode="json") for matrix in matrices],
+            "limitations": [
+                "Tenant and user identities are local demo inputs.",
+                "Policies are static portfolio fixtures and should be replaced by IAM/IDP-backed policy stores in production.",
+                "External LLM providers remain optional; entitlement evaluation does not call network services.",
+            ],
+        }
+        json_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.audit.record(
+            "entitlement.pack_exported",
+            "entitlement_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness_status,
+                "scenario_count": len(matrices),
+                "denied_skill_count": denied_count,
+            },
+        )
+        return TenantEntitlementPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            json_path=str(json_path),
+            markdown_path=str(markdown_path),
+            summary=bundle["summary"],
+        )
+
+    def _missing_skill_decision(
+        self,
+        skill_id: str,
+        request: TenantEntitlementMatrixRequest,
+    ) -> SkillEntitlementDecision:
+        return SkillEntitlementDecision(
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+            user_scopes=sorted(request.user_scopes),
+            skill_id=skill_id,
+            role=request.role,
+            environment=request.environment,
+            data_sensitivity=request.data_sensitivity,
+            decision="deny",
+            reasons=[f"Unknown skill '{skill_id}' is not entitled."],
+        )
+
+    def _is_valid_mcp_skill(self, skill_id: str) -> bool:
+        try:
+            skill = self.registry.get(skill_id)
+        except KeyError:
+            return False
+        return self.registry.is_mcp_exposed(skill) and self.validator.validate_manifest(skill.model_dump(mode="json")).valid
+
+    def _default_scenarios(self) -> list[TenantEntitlementMatrixRequest]:
+        return [
+            TenantEntitlementMatrixRequest(
+                tenant_id="internal_demo",
+                user_id="agent-local-001",
+                role="agent",
+                user_scopes=["skill.invoke"],
+            ),
+            TenantEntitlementMatrixRequest(
+                tenant_id="healthcare",
+                user_id="care-review-agent",
+                role="agent",
+                user_scopes=["skill.invoke", "tenant.healthcare"],
+            ),
+            TenantEntitlementMatrixRequest(
+                tenant_id="fintech",
+                user_id="risk-agent",
+                role="agent",
+                data_sensitivity="confidential",
+                user_scopes=["skill.invoke", "tenant.fintech"],
+            ),
+            TenantEntitlementMatrixRequest(
+                tenant_id="public_sector",
+                user_id="viewer-portal",
+                role="viewer",
+                user_scopes=["skill.read", "tenant.public_sector"],
+            ),
+        ]
+
+    def _policy_id(self, policy: TenantSkillEntitlementPolicy) -> str:
+        return f"{policy.tenant_id}:{policy.skill_id}"
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Tenant RBAC And Skill Entitlement Pack",
+            "",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Scenarios: `{bundle['summary']['scenario_count']}`",
+            f"- Allowed skills: `{bundle['summary']['allowed_skill_count']}`",
+            f"- Denied skills: `{bundle['summary']['denied_skill_count']}`",
+            "",
+            "## Scenario Results",
+        ]
+        for scenario in bundle["scenarios"]:
+            request = scenario["request"]
+            lines.extend(
+                [
+                    "",
+                    f"### {request['tenant_id']} / {request['user_id']}",
+                    f"- Role: `{request['role']}`",
+                    f"- Scopes: `{', '.join(request['user_scopes']) or 'none'}`",
+                    f"- MCP-safe tools: `{', '.join(scenario['mcp_safe_tool_names']) or 'none'}`",
+                    f"- Denied skills: `{', '.join(scenario['denied_skill_ids']) or 'none'}`",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "## Reviewer Proof",
+                "- Use `POST /tenants/entitlements/evaluate` to inspect tenant/user scope decisions.",
+                "- Use `X-Entitlement-Enforce: true` with skill or MCP tool calls to block denied invocations.",
+                "- Denied calls record `entitlement.denied` audit events with trace IDs.",
+                "",
+                "## Limitations",
+            ]
+        )
+        lines.extend(f"- {item}" for item in bundle["limitations"])
+        return "\n".join(lines)
+
+
 class SkillInvocationService:
     def __init__(
         self,
@@ -306,6 +686,7 @@ class SkillInvocationService:
         metrics: MetricsService,
         provider: BaseLLMProvider,
         policy: PolicyService,
+        entitlements: TenantEntitlementService,
     ) -> None:
         self.registry = registry
         self.validator = validator
@@ -313,6 +694,7 @@ class SkillInvocationService:
         self.metrics = metrics
         self.provider = provider
         self.policy = policy
+        self.entitlements = entitlements
         self.invocations: list[SkillInvocation] = []
         self.reliability: SkillReliabilityService | None = None
 
@@ -326,6 +708,26 @@ class SkillInvocationService:
         trace_id = new_trace_id()
         manifest = self.registry.get(skill_id)
         policy_decision: PolicySimulationResult | None = None
+        entitlement_decision: SkillEntitlementDecision | None = None
+        if policy_context and policy_context.enforce_entitlements:
+            entitlement_decision = self.entitlements.decide(manifest, policy_context)
+            if entitlement_decision.decision == "deny":
+                return self._record_failure(
+                    manifest,
+                    payload,
+                    trace_id,
+                    actor,
+                    f"Entitlement denied invocation: {'; '.join(entitlement_decision.reasons)}",
+                    0.0,
+                    audit_action="entitlement.denied",
+                    metadata={
+                        "status": "failed",
+                        "entitlement_decision": entitlement_decision.model_dump(mode="json"),
+                    },
+                    policy_context=policy_context,
+                    policy_decision=policy_decision,
+                    entitlement_decision=entitlement_decision,
+                )
         if policy_context and policy_context.enforce:
             policy_decision = self.policy.simulate(manifest, policy_context)
             if policy_decision.decision == "deny":
@@ -343,6 +745,7 @@ class SkillInvocationService:
                     },
                     policy_context=policy_context,
                     policy_decision=policy_decision,
+                    entitlement_decision=entitlement_decision,
                 )
         if not manifest.enabled:
             return self._record_failure(
@@ -354,6 +757,7 @@ class SkillInvocationService:
                 0.0,
                 policy_context=policy_context,
                 policy_decision=policy_decision,
+                entitlement_decision=entitlement_decision,
             )
         if self.reliability:
             breaker_error = self.reliability.before_invocation(manifest, trace_id, actor)
@@ -369,6 +773,7 @@ class SkillInvocationService:
                     metadata={"status": "failed", "error": breaker_error, "circuit_state": "open"},
                     policy_context=policy_context,
                     policy_decision=policy_decision,
+                    entitlement_decision=entitlement_decision,
                 )
         errors = self.validator.validate_invocation(manifest, payload)
         if errors:
@@ -381,6 +786,7 @@ class SkillInvocationService:
                 0.0,
                 policy_context=policy_context,
                 policy_decision=policy_decision,
+                entitlement_decision=entitlement_decision,
             )
         with Timer() as timer:
             output = await self._execute_skill(manifest, payload)
@@ -395,6 +801,7 @@ class SkillInvocationService:
                 round(timer.elapsed_ms, 2),
                 policy_context=policy_context,
                 policy_decision=policy_decision,
+                entitlement_decision=entitlement_decision,
             )
         usage = TokenUsage(
             input_tokens=sum(len(str(value).split()) for value in payload.values()),
@@ -414,6 +821,7 @@ class SkillInvocationService:
             created_at=utc_now(),
             policy_context=policy_context,
             policy_decision=policy_decision,
+            entitlement_decision=entitlement_decision,
         )
         self.invocations.append(invocation)
         self.audit.record("skill.invoked", "skill", skill_id, trace_id, actor, {"status": "succeeded"})
@@ -447,7 +855,14 @@ class SkillInvocationService:
         replay_output: JsonDict | None = None
         replay_error: str | None = None
         policy_decision: PolicySimulationResult | None = None
-        if original.policy_context and original.policy_context.enforce:
+        entitlement_decision: SkillEntitlementDecision | None = None
+        if original.policy_context and original.policy_context.enforce_entitlements:
+            entitlement_decision = self.entitlements.decide(manifest, original.policy_context)
+            if entitlement_decision.decision == "deny":
+                replay_status = "failed"
+                replay_error = f"Entitlement denied invocation: {'; '.join(entitlement_decision.reasons)}"
+                drift_notes.append("Replay stopped at the same enforced entitlement gate.")
+        if replay_status == "succeeded" and original.policy_context and original.policy_context.enforce:
             policy_decision = self.policy.simulate(manifest, original.policy_context)
             if policy_decision.decision == "deny":
                 replay_status = "failed"
@@ -503,6 +918,7 @@ class SkillInvocationService:
                 "same_output": same_output,
                 "replay_status": replay_status,
                 "policy_decision": policy_decision.model_dump(mode="json") if policy_decision else None,
+                "entitlement_decision": entitlement_decision.model_dump(mode="json") if entitlement_decision else None,
             },
         )
         return InvocationReplayResult(
@@ -566,6 +982,7 @@ class SkillInvocationService:
         metadata: JsonDict | None = None,
         policy_context: PolicyInvocationContext | None = None,
         policy_decision: PolicySimulationResult | None = None,
+        entitlement_decision: SkillEntitlementDecision | None = None,
     ) -> SkillInvocation:
         usage = TokenUsage()
         invocation = SkillInvocation(
@@ -582,6 +999,7 @@ class SkillInvocationService:
             error=error,
             policy_context=policy_context,
             policy_decision=policy_decision,
+            entitlement_decision=entitlement_decision,
         )
         self.invocations.append(invocation)
         self.audit.record(
@@ -13955,6 +14373,7 @@ class AppState:
     provider: BaseLLMProvider
     policy: PolicyService = field(default_factory=PolicyService)
     registry: SkillRegistry = field(init=False)
+    entitlements: TenantEntitlementService = field(init=False)
     invocation_service: SkillInvocationService = field(init=False)
     prompts: PromptRegistry = field(init=False)
     resources: ResourceRegistry = field(init=False)
@@ -13991,8 +14410,15 @@ class AppState:
 
     def __post_init__(self) -> None:
         self.registry = SkillRegistry(self.audit)
+        self.entitlements = TenantEntitlementService(self.registry, self.validator, self.audit)
         self.invocation_service = SkillInvocationService(
-            self.registry, self.validator, self.audit, self.metrics, self.provider, self.policy
+            self.registry,
+            self.validator,
+            self.audit,
+            self.metrics,
+            self.provider,
+            self.policy,
+            self.entitlements,
         )
         self.prompts = PromptRegistry()
         self.resources = ResourceRegistry(self.registry)

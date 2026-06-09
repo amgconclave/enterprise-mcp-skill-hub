@@ -39,6 +39,8 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillManifest,
     SkillReliabilityPackRequest,
+    TenantEntitlementMatrixRequest,
+    TenantEntitlementPackRequest,
     TenantPolicySimulationRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
@@ -74,6 +76,7 @@ view = st.sidebar.radio(
         "Invoke Skill",
         "Policy Simulator",
         "Tenant Policy Sandbox",
+        "Tenant RBAC / Entitlements",
         "Skill Marketplace",
         "Skill Usage Analytics",
         "Skill Reliability",
@@ -350,6 +353,117 @@ elif view == "Tenant Policy Sandbox":
             st.json(export.model_dump(mode="json"))
     with st.expander("Simulation JSON"):
         st.json(simulation.model_dump(mode="json"))
+
+elif view == "Tenant RBAC / Entitlements":
+    st.subheader("Tenant RBAC / Entitlements")
+    st.caption("Evaluate tenant, user, scope, role, and skill entitlement decisions used by enforced invocations.")
+    col_tenant, col_user = st.columns(2)
+    tenant_id = col_tenant.selectbox(
+        "Tenant",
+        ["internal_demo", "healthcare", "fintech", "public_sector", "unknown_tenant"],
+    )
+    user_id = col_user.text_input("User ID", value="streamlit-agent")
+    col_role, col_env, col_sensitivity = st.columns(3)
+    role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+    environment = col_env.selectbox("Environment", ["local", "dev", "test", "production"], index=0)
+    sensitivity = col_sensitivity.selectbox("Data sensitivity", ["public", "internal", "confidential"], index=1)
+    scopes_text = st.text_input(
+        "User scopes",
+        value={
+            "internal_demo": "skill.invoke",
+            "healthcare": "skill.invoke,tenant.healthcare",
+            "fintech": "skill.invoke,tenant.fintech",
+            "public_sector": "skill.invoke,tenant.public_sector",
+        }.get(tenant_id, "skill.invoke"),
+    )
+    selected_skill_ids = st.multiselect(
+        "Skills",
+        [skill.id for skill in state.registry.mcp_exposed()],
+        default=[skill.id for skill in state.registry.mcp_exposed()],
+    )
+    entitlement_request = TenantEntitlementMatrixRequest(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=role,
+        environment=environment,
+        data_sensitivity=sensitivity,
+        user_scopes=[scope.strip() for scope in scopes_text.split(",") if scope.strip()],
+        skill_ids=selected_skill_ids,
+    )
+    entitlement = state.entitlements.matrix(entitlement_request)
+    col_ready, col_allowed, col_denied, col_safe = st.columns(4)
+    col_ready.metric("Readiness", entitlement.readiness_status.upper())
+    col_allowed.metric("Allowed", entitlement.summary["allowed_skill_count"])
+    col_denied.metric("Denied", entitlement.summary["denied_skill_count"])
+    col_safe.metric("MCP-safe tools", entitlement.summary["mcp_safe_tool_count"])
+    tab_decisions, tab_policies, tab_mcp, tab_export, tab_json = st.tabs(
+        ["Decisions", "Policies", "MCP Safe", "Export", "JSON"]
+    )
+    with tab_decisions:
+        st.dataframe(
+            [
+                {
+                    "decision": decision.decision,
+                    "skill": decision.skill_id,
+                    "tenant": decision.tenant_id,
+                    "user": decision.user_id,
+                    "role": decision.role,
+                    "missing_scopes": ", ".join(decision.missing_scopes),
+                    "policies": ", ".join(decision.matched_policies),
+                    "reason": " | ".join(decision.reasons),
+                }
+                for decision in entitlement.decisions
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_policies:
+        st.dataframe(
+            [
+                {
+                    "tenant": policy.tenant_id,
+                    "skill": policy.skill_id,
+                    "allowed_roles": ", ".join(policy.allowed_roles),
+                    "denied_roles": ", ".join(policy.denied_roles),
+                    "required_scopes": ", ".join(policy.required_scopes),
+                    "environments": ", ".join(policy.allowed_environments),
+                    "sensitivities": ", ".join(policy.allowed_data_sensitivities),
+                    "reason": policy.reason,
+                }
+                for policy in entitlement.policies
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_mcp:
+        st.json(
+            {
+                "mcp_safe_tool_names": entitlement.mcp_safe_tool_names,
+                "denied_skill_ids": entitlement.denied_skill_ids,
+                "reviewer_notes": entitlement.reviewer_notes,
+                "enforced_headers": {
+                    "X-Entitlement-Enforce": "true",
+                    "X-Tenant-ID": tenant_id,
+                    "X-User-ID": user_id,
+                    "X-User-Scopes": scopes_text,
+                },
+            }
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/entitlement_packs/.")
+        if st.button("Export Entitlement Pack", use_container_width=True):
+            export = run_async(
+                state.entitlements.export_pack(
+                    TenantEntitlementPackRequest(
+                        actor="streamlit-entitlement-reviewer",
+                        scenarios=[entitlement_request],
+                    )
+                )
+            )
+            st.success("Tenant RBAC entitlement pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(entitlement.model_dump(mode="json"))
 
 elif view == "Skill Marketplace":
     st.subheader("Skill Marketplace")

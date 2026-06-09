@@ -102,10 +102,15 @@ from app.models import (
     SkillStatusRequest,
     SkillVersion,
     SmokeMatrixResult,
+    TenantEntitlementMatrixRequest,
+    TenantEntitlementMatrixResult,
+    TenantEntitlementPackRequest,
+    TenantEntitlementPackResult,
     TenantPolicySimulationRequest,
     TenantPolicySimulationResult,
     TenantSandboxExportRequest,
     TenantSandboxExportResult,
+    TenantSkillEntitlementPolicy,
     UiVerificationPackRequest,
     UiVerificationPackResult,
     UsageAnalyticsResult,
@@ -203,6 +208,27 @@ def tenant_sandbox_export(
     _: str = Depends(require_api_key),
 ) -> TenantSandboxExportResult:
     return state.tenant_sandbox.export(request or TenantSandboxExportRequest())
+
+
+@app.get("/tenants/entitlements/policies", response_model=list[TenantSkillEntitlementPolicy])
+def tenant_entitlement_policies(_: str = Depends(require_api_key)) -> list[TenantSkillEntitlementPolicy]:
+    return state.entitlements.list_policies()
+
+
+@app.post("/tenants/entitlements/evaluate", response_model=TenantEntitlementMatrixResult)
+def tenant_entitlement_evaluate(
+    request: TenantEntitlementMatrixRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementMatrixResult:
+    return state.entitlements.matrix(request or TenantEntitlementMatrixRequest())
+
+
+@app.post("/tenants/entitlements/pack", response_model=TenantEntitlementPackResult)
+async def tenant_entitlement_pack(
+    request: TenantEntitlementPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementPackResult:
+    return await state.entitlements.export_pack(request or TenantEntitlementPackRequest())
 
 
 @app.get("/marketplace/catalog", response_model=MarketplaceCatalogResult)
@@ -465,7 +491,7 @@ async def invoke_skill(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if invocation.status == "failed":
-        if invocation.error and invocation.error.startswith("Policy denied"):
+        if invocation.error and invocation.error.startswith(("Policy denied", "Entitlement denied")):
             raise HTTPException(status_code=403, detail=invocation.error)
         raise HTTPException(status_code=422, detail=invocation.error)
     return invocation
@@ -786,6 +812,10 @@ def _policy_context_from_request(
         "data_sensitivity": "x-data-sensitivity",
         "requested_action": "x-requested-action",
         "enforce": "x-policy-enforce",
+        "tenant_id": "x-tenant-id",
+        "user_id": "x-user-id",
+        "user_scopes": "x-user-scopes",
+        "enforce_entitlements": "x-entitlement-enforce",
     }
     header_values = {
         field: http_request.headers.get(header)
@@ -798,5 +828,16 @@ def _policy_context_from_request(
     data = request.policy_context.model_dump() if request.policy_context else {}
     if "enforce" in header_values:
         header_values["enforce"] = header_values["enforce"].lower() in {"1", "true", "yes", "on"}
+    if "enforce_entitlements" in header_values:
+        header_values["enforce_entitlements"] = header_values["enforce_entitlements"].lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if "user_scopes" in header_values:
+        header_values["user_scopes"] = [
+            scope.strip() for scope in header_values["user_scopes"].split(",") if scope.strip()
+        ]
     data.update(header_values)
     return PolicyInvocationContext.model_validate(data)

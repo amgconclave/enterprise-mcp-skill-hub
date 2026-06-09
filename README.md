@@ -24,6 +24,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Cross-Agent Skill Dependency Map + Blast Radius Analyzer for graphing promoted skills, MCP tools/prompts/resources, workflows, release evidence, audit history, and capacity impact before owners change a skill, prompt, resource, or workflow template.
 - Skill Incident Drill + Recovery Runbook for deterministic local reliability scenarios covering schema breakage, disabled skill invocation, policy denial spikes, latency/capacity breaches, and workflow dependency failures.
 - Tenant Policy Sandbox + Data Sensitivity Simulator for healthcare, fintech, public sector, and internal demo tenants, returning allowed, blocked, and review-required MCP skills/workflows plus guardrails and exportable evidence.
+- Tenant RBAC + Skill Entitlement Pack for local tenant/user scopes, allowed and denied skill policies, MCP-safe tool subsets, enforced denied invocation audit events, dashboard review, and ignored `data/entitlement_packs/` artifacts.
 - Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
@@ -41,7 +42,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Prompt Governance, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Prompt Governance, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
 ## Quick Start
@@ -379,6 +380,39 @@ Invoke-RestMethod http://localhost:8000/tenants/sandbox-export -Method POST -Hea
 ```
 
 Fake tenants are `healthcare`, `fintech`, `public_sector`, and `internal_demo`. The simulator returns allowed, blocked, and review-required skills and workflows, policy reasons, impacted MCP tools/resources/prompts, recommended tenant guardrails, warnings, readiness status, and disabled/draft exclusions. Export writes `tenant_policy_sandbox_latest.json` and `tenant_policy_sandbox_latest.md` under ignored local folder `data/tenant_sandboxes/` with the tenant policy matrix, scenario results, blocked/review actions, MCP impact, local verification commands, JD skills demonstrated, and five interviewer talking points. The one-command demo prints tenant sandbox readiness and the exported tenant sandbox path.
+
+## Tenant RBAC And Skill Entitlements
+
+Evaluate local tenant/user RBAC and skill entitlements before tool execution:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/policies -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","environment":"local","data_sensitivity":"internal","user_scopes":["skill.invoke","tenant.healthcare"]}'
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/pack -Method POST -Headers $headers
+```
+
+Entitlement enforcement is opt-in on skill and MCP calls. This example is denied because healthcare agents are not entitled to `translate_text` without reviewer scopes:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/skills/translate_text/invoke `
+  -Headers @{
+    "X-API-Key"="dev-local-token"
+    "X-Entitlement-Enforce"="true"
+    "X-Tenant-ID"="healthcare"
+    "X-User-ID"="care-agent"
+    "X-User-Scopes"="skill.invoke,tenant.healthcare"
+    "X-Policy-Role"="agent"
+  } `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"input":{"text":"Patient follow-up note","target_language":"Spanish"},"actor":"care-agent"}'
+```
+
+`POST /tenants/entitlements/evaluate` returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`. Enforced denied invocations return `403`, create failed invocation history rows, and record `entitlement.denied` audit events. `POST /tenants/entitlements/pack` writes `tenant_entitlement_pack_latest.json` and `.md` under ignored `data/entitlement_packs/`.
 
 ## Skill Marketplace Governance And Tenant Rollout
 

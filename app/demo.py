@@ -26,6 +26,7 @@ from app.models import (
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillReliabilityPackRequest,
+    TenantEntitlementPackRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
@@ -152,6 +153,9 @@ async def main() -> None:
     )
     tenant_sandbox = state.tenant_sandbox.export(
         TenantSandboxExportRequest(actor="demo-tenant-policy-reviewer")
+    )
+    entitlement_pack = await state.entitlements.export_pack(
+        TenantEntitlementPackRequest(actor="demo-entitlement-reviewer")
     )
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
@@ -291,6 +295,10 @@ async def main() -> None:
                     "json_path": tenant_sandbox.json_path,
                     "markdown_path": tenant_sandbox.markdown_path,
                 },
+                "tenant entitlement readiness": entitlement_pack.readiness_status,
+                "tenant_entitlement_readiness": entitlement_pack.readiness_status,
+                "tenant entitlement pack path": entitlement_pack.markdown_path,
+                "tenant_entitlement_pack_path": entitlement_pack.markdown_path,
                 "skill marketplace readiness": marketplace_catalog.readiness_status,
                 "skill_marketplace_readiness": marketplace_catalog.readiness_status,
                 "marketplace catalog listings": marketplace_catalog.coverage_summary["listing_count"],

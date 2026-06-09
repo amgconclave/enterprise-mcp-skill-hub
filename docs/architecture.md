@@ -25,6 +25,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `DependencyMapService` builds the cross-agent dependency graph from promoted skills, MCP tools/prompts/resources, workflow templates, release preview evidence, audit/invocation history, and capacity forecast evidence; it analyzes blast radius and exports reports under `data/dependencies/`.
 - `SkillIncidentDrillService` runs deterministic local incident drills for schema, lifecycle, policy, capacity, and workflow dependency failures, then exports recovery runbooks under `data/incident_runbooks/`.
 - `TenantPolicySandboxService` applies fake healthcare, fintech, public sector, and internal demo tenant profiles to promoted MCP skills and approved workflows, producing allowed, blocked, and review-required decisions plus exportable evidence under `data/tenant_sandboxes/`.
+- `TenantEntitlementService` applies deterministic local tenant/user RBAC and scope policies to promoted skills, returns MCP-safe allowed tool subsets, blocks enforced denied invocations, records `entitlement.denied` audit events, and writes reviewer packs under `data/entitlement_packs/`.
 - `SkillMarketplaceGovernanceService` turns the registry into a governed Skill Marketplace with lifecycle listings, deterministic Tenant Rollout eligibility scenarios, risk/review states, usage/version/MCP exposure signals, disabled-skill blocks, and rollout approval artifacts under `data/marketplace_packs/`.
 - `SkillUsageAnalyticsService` builds deterministic local Skill Usage Analytics from invocation history, audit events, metrics, the skill registry, marketplace tenant scenarios, and mock token/cost fixtures; it returns budgets/anomalies and writes Cost Chargeback artifacts under `data/usage_packs/`.
 - `EnterpriseReadinessService` aggregates governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into an executive scorecard and portfolio demo pack under `data/portfolio_demo/`.
@@ -45,17 +46,19 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 1. A client authenticates with `X-API-Key`.
 2. The API or MCP adapter receives an invocation request.
 3. `SkillRegistry` resolves the manifest.
-4. If `policy_context.enforce=true` or policy headers request enforcement, `PolicyService` returns an allow/deny decision before execution.
-5. Denied policy checks create a failed invocation record, `policy.denied` audit event, and failure metric.
-6. Disabled skills fail before execution.
-7. `SkillValidator` checks input schema.
-8. A built-in handler or manifest-backed mock provider executes.
-9. `SkillValidator` checks output schema.
-10. `AuditService` and `MetricsService` record the outcome with a trace ID.
-11. Conformance and governance reports can export the current runtime posture.
-12. Security review summaries and evidence bundles combine those reports with policy denials and MCP exposure.
-13. Audit query and compliance attestation endpoints assemble local review evidence across audit, invocation, governance, workflow, release, and MCP sources.
-14. The API returns a structured invocation record.
+4. If `policy_context.enforce_entitlements=true` or entitlement headers request enforcement, `TenantEntitlementService` returns a tenant/user/scope allow/deny decision before execution.
+5. Denied entitlement checks create a failed invocation record, `entitlement.denied` audit event, and failure metric.
+6. If `policy_context.enforce=true` or policy headers request enforcement, `PolicyService` returns an allow/deny decision before execution.
+7. Denied policy checks create a failed invocation record, `policy.denied` audit event, and failure metric.
+8. Disabled skills fail before execution.
+9. `SkillValidator` checks input schema.
+10. A built-in handler or manifest-backed mock provider executes.
+11. `SkillValidator` checks output schema.
+12. `AuditService` and `MetricsService` record the outcome with a trace ID.
+13. Conformance and governance reports can export the current runtime posture.
+14. Security review summaries and evidence bundles combine those reports with policy denials and MCP exposure.
+15. Audit query and compliance attestation endpoints assemble local review evidence across audit, invocation, governance, workflow, release, and MCP sources.
+16. The API returns a structured invocation record.
 
 ## Workflow Composition Flow
 
@@ -118,6 +121,7 @@ The project keeps governance close to the skill runtime:
 - Recovery runbooks are saved with `POST /incidents/runbook` under ignored local folder `data/incident_runbooks/`.
 - Tenant policy simulations are available at `POST /tenants/policy-simulate`.
 - Tenant sandbox exports are saved with `POST /tenants/sandbox-export` under ignored local folder `data/tenant_sandboxes/`.
+- Tenant RBAC entitlement policies, evaluations, and reviewer packs are available through `GET /tenants/entitlements/policies`, `POST /tenants/entitlements/evaluate`, and `POST /tenants/entitlements/pack`, with pack output under ignored local folder `data/entitlement_packs/`.
 - Skill Marketplace catalog is available at `GET /marketplace/catalog`.
 - Tenant Rollout approval packs are saved with `POST /marketplace/rollout-pack` under ignored local folder `data/marketplace_packs/`.
 - Skill Usage Analytics are available at `GET /usage/analytics`.
@@ -210,6 +214,15 @@ The project keeps governance close to the skill runtime:
 4. Tenant overlays for healthcare, fintech, public sector, and internal demo convert outcomes into allowed, blocked, or review-required decisions.
 5. The response includes policy reasons, impacted MCP tools/resources/prompts, recommended guardrails, warnings, readiness, and excluded skills/workflows.
 6. `POST /tenants/sandbox-export` writes Markdown and JSON under ignored `data/tenant_sandboxes/` with the policy matrix, scenario results, blocked/review actions, MCP impact, local verification commands, JD skills demonstrated, and five interviewer talking points.
+
+## Tenant RBAC Entitlement Flow
+
+1. A reviewer calls `POST /tenants/entitlements/evaluate` with tenant id, user id, role, environment, sensitivity, scopes, and optional skill ids.
+2. `TenantEntitlementService` applies local wildcard and skill-specific entitlement policies for internal demo, healthcare, fintech, and public sector tenants.
+3. The response returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`.
+4. A skill or MCP caller can set `X-Entitlement-Enforce: true` plus tenant/user/scope headers to enforce the same decision before execution.
+5. Denied entitlement calls stop before handlers/providers run, create a failed invocation, record `entitlement.denied`, and remain replayable through the invocation replay endpoint.
+6. `POST /tenants/entitlements/pack` writes Markdown and JSON under ignored `data/entitlement_packs/` with scenario matrices, reviewer proof, local commands, and limitations.
 
 ## Skill Marketplace Tenant Rollout Flow
 

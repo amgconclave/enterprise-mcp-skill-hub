@@ -22,6 +22,18 @@ async def main() -> None:
         help="Policy data sensitivity for call.",
     )
     parser.add_argument("--enforce-policy", action="store_true", help="Enforce local policy before calling a tool.")
+    parser.add_argument("--tenant-id", default="internal_demo", help="Tenant id for entitlement checks.")
+    parser.add_argument("--user-id", default="cli-mcp-client", help="User id for entitlement checks.")
+    parser.add_argument(
+        "--user-scopes",
+        default="skill.invoke",
+        help="Comma-separated user scopes for entitlement checks.",
+    )
+    parser.add_argument(
+        "--enforce-entitlements",
+        action="store_true",
+        help="Enforce tenant/user skill entitlements before calling a tool.",
+    )
     args = parser.parse_args()
 
     state = create_state()
@@ -35,13 +47,17 @@ async def main() -> None:
         if not args.name:
             raise SystemExit("--name is required for call")
         policy_context = None
-        if args.enforce_policy or args.role:
+        if args.enforce_policy or args.enforce_entitlements or args.role:
             policy_context = PolicyInvocationContext(
                 role=args.role or "agent",
                 environment=args.environment,
                 data_sensitivity=args.data_sensitivity,
                 requested_action="invoke",
                 enforce=args.enforce_policy,
+                tenant_id=args.tenant_id,
+                user_id=args.user_id,
+                user_scopes=[scope.strip() for scope in args.user_scopes.split(",") if scope.strip()],
+                enforce_entitlements=args.enforce_entitlements,
             )
         payload = await state.mcp.call_tool(
             args.name,

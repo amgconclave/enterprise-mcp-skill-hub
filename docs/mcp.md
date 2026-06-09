@@ -26,6 +26,12 @@ MCP tool calls are permissive by default for local compatibility. Callers can pa
 
 Confidential invocation is allowed for `admin` and `reviewer`, and denied for `agent` and `viewer`. Denied calls return a failed MCP-shaped payload and record a `policy.denied` audit event.
 
+## Tenant RBAC Entitlements
+
+MCP tool calls can also enforce tenant/user entitlements with `enforce_entitlements=true`. The local entitlement pack evaluates tenant id, user id, user scopes, role, environment, sensitivity, and skill id before execution. Denied calls return the normal failed MCP-shaped payload, store a failed invocation row, and record `entitlement.denied` with the decision metadata.
+
+`POST /tenants/entitlements/evaluate` returns `mcp_safe_tool_names`, the set of promoted and schema-valid MCP tools allowed for a specific tenant/user context. `POST /tenants/entitlements/pack` writes reviewer evidence under `data/entitlement_packs/`.
+
 ## Resources
 
 Resources include file-backed sample policy/product docs plus a dynamic skill catalog:
@@ -57,6 +63,7 @@ python -m app.mcp_server resources
 python -m app.mcp_server prompts
 python -m app.mcp_server call --name search_knowledge_base --arguments "{\"query\":\"governance audit policy\",\"limit\":2}"
 python -m app.mcp_server call --name search_knowledge_base --arguments "{\"query\":\"confidential policy\",\"limit\":2}" --role viewer --data-sensitivity confidential --enforce-policy
+python -m app.mcp_server call --name translate_text --arguments "{\"text\":\"Patient follow-up note\",\"target_language\":\"Spanish\"}" --role agent --tenant-id healthcare --user-id care-agent --user-scopes skill.invoke,tenant.healthcare --enforce-entitlements
 ```
 
 The HTTP endpoints under `/mcp/*` expose the same adapter behavior for dashboard and integration testing.
@@ -102,6 +109,12 @@ The capacity forecast reports `mcp_tools_affected`, per-skill demand, top approv
 `POST /tenants/policy-simulate` evaluates fake tenant policy profiles for `healthcare`, `fintech`, `public_sector`, and `internal_demo` against the active promoted MCP tool catalog and approved workflow templates. The response separates allowed, blocked, and review-required skills/workflows and reports impacted MCP tools, resources, and prompts.
 
 `POST /tenants/sandbox-export` writes JSON/Markdown under `data/tenant_sandboxes/` with the tenant policy matrix, scenario results, blocked/review actions, MCP impact, local verification commands, JD skills demonstrated, and five interviewer talking points. Draft, disabled, validated-only, and schema-invalid skills remain excluded from tenant decisions and are reported as exclusions.
+
+## Tenant RBAC Entitlement MCP Impact
+
+`POST /tenants/entitlements/evaluate` computes tenant/user/scope decisions for promoted MCP skills and returns `mcp_safe_tool_names`, which is the allowed subset after entitlement checks. `POST /tenants/entitlements/pack` writes JSON/Markdown under `data/entitlement_packs/` with scenario matrices, denied skill ids, MCP-safe tool names, reviewer proof, and local-only limitations.
+
+When callers pass `X-Entitlement-Enforce: true` on `/skills/{skill_id}/invoke` or `/mcp/tools/{tool_name}/call`, the same entitlement gate runs before skill execution. Denied calls are MCP-safe because they return a failed payload instead of executing the tool and record `entitlement.denied` for audit review.
 
 ## Skill Marketplace Tenant Rollout
 

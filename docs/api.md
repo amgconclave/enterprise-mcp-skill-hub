@@ -35,6 +35,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /incidents/runbook` - writes incident recovery runbook JSON and Markdown under ignored local folder `data/incident_runbooks/`.
 - `POST /tenants/policy-simulate` - simulates tenant, role, environment, and data sensitivity policy for MCP skills and workflows; returns allowed, blocked, and review-required decisions, reasons, MCP impact, recommended guardrails, warnings, exclusions, and readiness.
 - `POST /tenants/sandbox-export` - writes `tenant_policy_sandbox_latest.json` and `tenant_policy_sandbox_latest.md` under ignored local folder `data/tenant_sandboxes/`.
+- `GET /tenants/entitlements/policies` - returns local tenant/user RBAC skill entitlement policies.
+- `POST /tenants/entitlements/evaluate` - evaluates tenant id, user id, scopes, role, environment, sensitivity, and requested skill ids into allowed/denied MCP-safe skill decisions.
+- `POST /tenants/entitlements/pack` - writes `tenant_entitlement_pack_latest.json` and `.md` under ignored local folder `data/entitlement_packs/`.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 - `GET /usage/analytics` - returns Skill Usage Analytics by skill, tenant/environment, agent, status, MCP exposure, latency band, token/cost estimate, budget status, anomaly flag, disabled-skill blocked event, and coverage summary.
@@ -131,6 +134,8 @@ Invocation remains permissive unless enforcement is requested. Enforce through t
 ```
 
 Or enforce through headers: `X-Policy-Enforce: true`, `X-Policy-Role`, `X-Policy-Environment`, `X-Data-Sensitivity`, and `X-Requested-Action`. Denied FastAPI skill invocations return `403` and record `policy.denied` audit events.
+
+Tenant/user entitlements can also be enforced by including `X-Entitlement-Enforce: true`, `X-Tenant-ID`, `X-User-ID`, and comma-separated `X-User-Scopes`. Entitlement-denied calls return `403`, create failed invocation rows, and record `entitlement.denied` audit events.
 
 Denied invocations are still stored in local invocation history. Replaying one through `POST /invocations/{invocation_id}/replay` evaluates the same enforced policy context and returns a failed replay with `same_output=true` when the denial is unchanged.
 
@@ -312,6 +317,39 @@ Invoke-RestMethod http://localhost:8000/tenants/sandbox-export `
 `tenant` values are `healthcare`, `fintech`, `public_sector`, and `internal_demo`. The simulator evaluates the current promoted MCP tool catalog plus approved workflow templates and returns `allowed_skills`, `blocked_skills`, `review_required_skills`, `allowed_workflows`, `blocked_workflows`, `review_required_workflows`, `policy_reasons`, impacted MCP tools/resources/prompts, recommended tenant guardrails, warnings, disabled/draft exclusions, and `readiness_status`.
 
 The export includes the tenant policy matrix, scenario results, blocked/review actions, MCP impact, local verification commands, JD skills demonstrated, and five interviewer talking points. It is deterministic and local/mock; no external tenant, auth, or policy service is required.
+
+## Tenant RBAC And Skill Entitlements
+
+```powershell
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/policies -Headers $headers
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","environment":"local","data_sensitivity":"internal","user_scopes":["skill.invoke","tenant.healthcare"]}'
+
+Invoke-RestMethod http://localhost:8000/skills/translate_text/invoke `
+  -Headers @{
+    "X-API-Key"="dev-local-token"
+    "X-Entitlement-Enforce"="true"
+    "X-Tenant-ID"="healthcare"
+    "X-User-ID"="care-agent"
+    "X-User-Scopes"="skill.invoke,tenant.healthcare"
+    "X-Policy-Role"="agent"
+  } `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"input":{"text":"Patient follow-up note","target_language":"Spanish"},"actor":"care-agent"}'
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"entitlement-reviewer"}'
+```
+
+The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The pack writes Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, reviewer proof, and local-only limitations.
 
 ## Skill Marketplace Governance And Tenant Rollout
 
