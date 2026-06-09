@@ -26,6 +26,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Tenant Policy Sandbox + Data Sensitivity Simulator for healthcare, fintech, public sector, and internal demo tenants, returning allowed, blocked, and review-required MCP skills/workflows plus guardrails and exportable evidence.
 - Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
+- Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
 - Enterprise Readiness Scorecard + Portfolio Demo Pack that rolls governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into one executive artifact.
 - API Smoke Matrix + Local Launch Checklist for quickly verifying auth/health, skills, MCP surfaces, governance, workflows, releases, capacity, tenant policy, usage analytics, incidents, and enterprise readiness in interviews or README walkthroughs.
 - Release Candidate Quality Gate + GitHub Publish Pack for deterministic local release gate scoring, endpoint/MCP/artifact inventory, verification commands, recruiter notes, and ignored `data/release_packs/` Markdown/JSON artifacts.
@@ -39,7 +40,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Skill Marketplace, Skill Usage Analytics, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Skill Marketplace, Skill Usage Analytics, Skill Reliability, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
 ## Quick Start
@@ -90,6 +91,8 @@ Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers
 Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers
+Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/handoff/final-audit -Headers $headers
 Invoke-RestMethod http://localhost:8000/handoff/final-pack -Method POST -Headers $headers
 ```
@@ -399,6 +402,20 @@ Get-ChildItem -Recurse -File data\usage_packs -ErrorAction SilentlyContinue | Se
 ```
 
 `GET /usage/analytics` returns deterministic local usage by skill, tenant/environment, agent, status, MCP exposure, latency band, token/cost estimate, budget status, anomaly flag, disabled-skill blocked event, and coverage summary. `POST /usage/chargeback-pack` writes `chargeback_pack_latest.json` and `.md` under ignored `data/usage_packs/` with usage tables, cost allocation, budget/anomaly flags, recommended controls, reviewer checklist, local proof commands, and limitations. The Streamlit dashboard has a `Skill Usage Analytics` view, and `python -m app.demo` prints usage readiness plus the Cost Chargeback Pack path.
+
+## Skill Reliability And Circuit Breakers
+
+Track per-skill failure, latency, and local circuit breaker posture:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers
+Invoke-RestMethod http://localhost:8000/reliability/circuit-breakers/search_knowledge_base -Method PATCH -Headers $headers -ContentType "application/json" -Body '{"action":"half_open","actor":"platform-sre","reason":"canary retry"}'
+Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /reliability/skills` returns deterministic local fixture evidence plus live invocation history for failure counts, consecutive failures, p95 latency, latency SLO breaches, circuit state, recent failure traces, and disable/re-enable recommendations. `PATCH /reliability/circuit-breakers/{skill_id}` opens, half-opens, or closes a local in-memory breaker and records audit evidence. `POST /reliability/pack` writes `reliability_pack_latest.json` and `.md` under ignored `data/reliability_packs/`. The Streamlit dashboard has a `Skill Reliability` view, and `python -m app.demo` prints reliability readiness plus the Reliability Pack path.
 
 ## Enterprise Readiness And Portfolio Demo Pack
 

@@ -43,6 +43,8 @@ SkillIncidentScenario = Literal[
 ]
 SkillIncidentSeverity = Literal["sev1", "sev2", "sev3"]
 CiDoctorCheckStatus = Literal["pass", "warn", "fail"]
+CircuitBreakerState = Literal["closed", "open", "half_open"]
+CircuitBreakerAction = Literal["open", "close", "half_open"]
 
 
 class TokenUsage(BaseModel):
@@ -442,6 +444,63 @@ class UsageChargebackPackRequest(BaseModel):
 
 
 class UsageChargebackPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class CircuitBreakerActionRequest(BaseModel):
+    action: CircuitBreakerAction
+    actor: str = "platform-sre"
+    reason: str | None = None
+
+
+class SkillReliabilityRecord(BaseModel):
+    skill_id: str
+    name: str
+    version: str
+    lifecycle_status: SkillLifecycleStatus
+    enabled: bool
+    mcp_exposed: bool
+    circuit_state: CircuitBreakerState
+    recommended_action: str
+    recommendation_reason: str
+    total_invocations: int
+    success_count: int
+    failure_count: int
+    blocked_count: int
+    consecutive_failures: int
+    failure_rate: float
+    average_latency_ms: float
+    p95_latency_ms: float
+    latency_slo_ms: float
+    latency_breach_count: int
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    recent_failures: list[JsonDict] = Field(default_factory=list)
+    audit_trace_ids: list[str] = Field(default_factory=list)
+
+
+class SkillReliabilityReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    skills: list[SkillReliabilityRecord]
+    disable_recommendations: list[JsonDict] = Field(default_factory=list)
+    re_enable_recommendations: list[JsonDict] = Field(default_factory=list)
+    circuit_breaker_events: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillReliabilityPackRequest(BaseModel):
+    actor: str = "platform-sre"
+
+
+class SkillReliabilityPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

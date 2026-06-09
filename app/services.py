@@ -38,6 +38,7 @@ from app.models import (
     CiDoctorCheck,
     CiDoctorCheckStatus,
     CiDoctorResult,
+    CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
     ComplianceAttestationResult,
     ConformanceReport,
@@ -107,6 +108,10 @@ from app.models import (
     SkillIncidentSeverity,
     SkillInvocation,
     SkillManifest,
+    SkillReliabilityPackRequest,
+    SkillReliabilityPackResult,
+    SkillReliabilityRecord,
+    SkillReliabilityReport,
     SkillVersion,
     SmokeMatrixEndpoint,
     SmokeMatrixResult,
@@ -300,6 +305,7 @@ class SkillInvocationService:
         self.provider = provider
         self.policy = policy
         self.invocations: list[SkillInvocation] = []
+        self.reliability: SkillReliabilityService | None = None
 
     async def invoke(
         self,
@@ -340,6 +346,21 @@ class SkillInvocationService:
                 policy_context=policy_context,
                 policy_decision=policy_decision,
             )
+        if self.reliability:
+            breaker_error = self.reliability.before_invocation(manifest, trace_id, actor)
+            if breaker_error:
+                return self._record_failure(
+                    manifest,
+                    payload,
+                    trace_id,
+                    actor,
+                    breaker_error,
+                    0.0,
+                    audit_action="reliability.circuit_breaker_blocked",
+                    metadata={"status": "failed", "error": breaker_error, "circuit_state": "open"},
+                    policy_context=policy_context,
+                    policy_decision=policy_decision,
+                )
         errors = self.validator.validate_invocation(manifest, payload)
         if errors:
             return self._record_failure(
@@ -400,6 +421,8 @@ class SkillInvocationService:
                 status="succeeded",
             )
         )
+        if self.reliability:
+            self.reliability.record_invocation(invocation)
         return invocation
 
     async def replay(self, invocation_id: str) -> InvocationReplayResult:
@@ -573,6 +596,8 @@ class SkillInvocationService:
                 status="failed",
             )
         )
+        if self.reliability:
+            self.reliability.record_invocation(invocation)
         return invocation
 
 
@@ -7189,6 +7214,517 @@ class SkillUsageAnalyticsService:
         return "\n".join(lines)
 
 
+class SkillReliabilityService:
+    PACK_ID = "reliability_pack_latest"
+    LATENCY_SLO_MS = 1_500.0
+    FAILURE_THRESHOLD = 3
+    FAILURE_RATE_REVIEW_THRESHOLD = 0.35
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "reliability_packs"
+        self._breakers: dict[str, JsonDict] = {}
+
+    def before_invocation(self, manifest: SkillManifest, trace_id: str, actor: str) -> str | None:
+        breaker = self._breaker(manifest.id)
+        if breaker["state"] != "open":
+            return None
+        self.app_state.audit.record(
+            "reliability.circuit_breaker_blocked",
+            "skill",
+            manifest.id,
+            trace_id,
+            actor,
+            {
+                "status": "failed",
+                "circuit_state": breaker["state"],
+                "opened_at": breaker.get("opened_at"),
+                "reason": breaker.get("reason"),
+            },
+        )
+        return (
+            f"Circuit breaker open for {manifest.id}; route to fallback or close after canary validation."
+        )
+
+    def record_invocation(self, invocation: SkillInvocation) -> None:
+        breaker = self._breaker(invocation.skill_id)
+        if invocation.error and invocation.error.startswith("Circuit breaker open"):
+            return
+        if invocation.status == "succeeded":
+            breaker["consecutive_failures"] = 0
+            if breaker["state"] == "half_open":
+                breaker["state"] = "closed"
+                breaker["closed_at"] = utc_now().isoformat()
+                breaker["reason"] = "Half-open canary invocation succeeded."
+                self._record_breaker_event(
+                    "reliability.circuit_closed",
+                    invocation.skill_id,
+                    invocation.trace_id,
+                    "system",
+                    breaker,
+                )
+            return
+
+        if invocation.error == "Skill is disabled.":
+            return
+        breaker["consecutive_failures"] = int(breaker.get("consecutive_failures", 0)) + 1
+        breaker["last_failure_at"] = invocation.created_at.isoformat()
+        breaker["reason"] = invocation.error or "Skill invocation failed."
+        if breaker["consecutive_failures"] >= self.FAILURE_THRESHOLD and breaker["state"] != "open":
+            breaker["state"] = "open"
+            breaker["opened_at"] = utc_now().isoformat()
+            self._record_breaker_event(
+                "reliability.circuit_opened",
+                invocation.skill_id,
+                invocation.trace_id,
+                "system",
+                breaker,
+            )
+
+    def set_breaker(self, skill_id: str, request: CircuitBreakerActionRequest) -> SkillReliabilityRecord:
+        self.app_state.registry.get(skill_id)
+        breaker = self._breaker(skill_id)
+        breaker["state"] = request.action
+        breaker["updated_at"] = utc_now().isoformat()
+        breaker["actor"] = request.actor
+        breaker["reason"] = request.reason or f"Manual circuit breaker action: {request.action}."
+        if request.action == "open":
+            breaker["opened_at"] = breaker["updated_at"]
+        elif request.action == "close":
+            breaker["closed_at"] = breaker["updated_at"]
+            breaker["consecutive_failures"] = 0
+        self._record_breaker_event(
+            f"reliability.circuit_{request.action}",
+            skill_id,
+            new_trace_id(),
+            request.actor,
+            breaker,
+        )
+        return self._record_for_skill(self.app_state.registry.get(skill_id), self._records())
+
+    def report(self) -> SkillReliabilityReport:
+        records = self._records()
+        skills = [self._record_for_skill(skill, records) for skill in self.app_state.registry.list()]
+        disable_recommendations = [
+            self._recommendation_row(skill)
+            for skill in skills
+            if skill.recommended_action
+            in {
+                "temporarily_disable_and_run_conformance",
+                "route_to_fallback_until_breaker_closes",
+                "keep_disabled_until_owner_review",
+            }
+        ]
+        re_enable_recommendations = [
+            self._recommendation_row(skill)
+            for skill in skills
+            if skill.recommended_action in {"keep_enabled", "re_enable_after_canary"}
+        ]
+        open_breakers = [skill.skill_id for skill in skills if skill.circuit_state == "open"]
+        review_skills = [
+            skill.skill_id
+            for skill in skills
+            if skill.recommended_action
+            in {
+                "temporarily_disable_and_run_conformance",
+                "route_to_degraded_mode_and_review_latency",
+                "route_to_fallback_until_breaker_closes",
+            }
+        ]
+        readiness: SecurityReadinessStatus = "ready"
+        if open_breakers:
+            readiness = "blocked"
+        elif review_skills or disable_recommendations:
+            readiness = "needs_review"
+        summary = {
+            "skill_count": len(skills),
+            "open_circuit_count": len(open_breakers),
+            "disable_recommendation_count": len(disable_recommendations),
+            "re_enable_recommendation_count": len(re_enable_recommendations),
+            "latency_slo_ms": self.LATENCY_SLO_MS,
+            "failure_threshold": self.FAILURE_THRESHOLD,
+            "total_invocations": sum(skill.total_invocations for skill in skills),
+            "total_failures": sum(skill.failure_count for skill in skills),
+            "local_only": True,
+            "fixture_record_count": sum(1 for record in records if record["source"] == "deterministic_fixture"),
+            "history_record_count": sum(1 for record in records if record["source"] == "existing_invocation_history"),
+        }
+        return SkillReliabilityReport(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            skills=skills,
+            disable_recommendations=disable_recommendations,
+            re_enable_recommendations=re_enable_recommendations,
+            circuit_breaker_events=self._breaker_events(),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: SkillReliabilityPackRequest | None = None) -> SkillReliabilityPackResult:
+        request = request or SkillReliabilityPackRequest()
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "reliability_report": report.model_dump(mode="json"),
+            "circuit_breaker_policy": {
+                "failure_threshold": self.FAILURE_THRESHOLD,
+                "latency_slo_ms": self.LATENCY_SLO_MS,
+                "failure_rate_review_threshold": self.FAILURE_RATE_REVIEW_THRESHOLD,
+                "mode": "local in-memory breaker state with deterministic fixture evidence",
+            },
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        bundle["summary"] = {
+            **report.summary,
+            "readiness_status": report.readiness_status,
+            "open_circuit_skills": [
+                skill.skill_id for skill in report.skills if skill.circuit_state == "open"
+            ],
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "reliability.pack_exported",
+            "reliability_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "open_circuit_count": report.summary["open_circuit_count"],
+            },
+        )
+        return SkillReliabilityPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _breaker(self, skill_id: str) -> JsonDict:
+        return self._breakers.setdefault(
+            skill_id,
+            {
+                "state": "closed",
+                "consecutive_failures": 0,
+                "opened_at": None,
+                "closed_at": None,
+                "updated_at": utc_now().isoformat(),
+                "actor": "system",
+                "reason": "No breaker events recorded.",
+            },
+        )
+
+    def _record_for_skill(
+        self,
+        skill: SkillManifest,
+        records: list[JsonDict],
+    ) -> SkillReliabilityRecord:
+        skill_records = [record for record in records if record["skill_id"] == skill.id]
+        latencies = sorted(record["latency_ms"] for record in skill_records)
+        failures = [record for record in skill_records if record["status"] == "failed"]
+        blocked = [record for record in skill_records if record["status"] == "blocked"]
+        successes = [record for record in skill_records if record["status"] == "succeeded"]
+        failure_rate = round(len(failures) / len(skill_records), 3) if skill_records else 0.0
+        p95_latency = self._p95(latencies)
+        breaker = self._breaker(skill.id)
+        recommendation, reason = self._recommendation(
+            skill,
+            breaker["state"],
+            len(skill_records),
+            len(failures),
+            failure_rate,
+            p95_latency,
+        )
+        return SkillReliabilityRecord(
+            skill_id=skill.id,
+            name=skill.name,
+            version=skill.version,
+            lifecycle_status=skill.status,
+            enabled=skill.enabled,
+            mcp_exposed=self.app_state.registry.is_mcp_exposed(skill),
+            circuit_state=breaker["state"],
+            recommended_action=recommendation,
+            recommendation_reason=reason,
+            total_invocations=len(skill_records),
+            success_count=len(successes),
+            failure_count=len(failures),
+            blocked_count=len(blocked),
+            consecutive_failures=int(breaker.get("consecutive_failures", 0)),
+            failure_rate=failure_rate,
+            average_latency_ms=round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+            p95_latency_ms=p95_latency,
+            latency_slo_ms=self.LATENCY_SLO_MS,
+            latency_breach_count=sum(1 for latency in latencies if latency > self.LATENCY_SLO_MS),
+            last_success_at=self._latest_timestamp(successes),
+            last_failure_at=self._latest_timestamp(failures),
+            recent_failures=[
+                {
+                    "trace_id": record["trace_id"],
+                    "created_at": record["created_at"].isoformat(),
+                    "error": record.get("error"),
+                    "source": record["source"],
+                }
+                for record in sorted(failures, key=lambda item: item["created_at"], reverse=True)[:5]
+            ],
+            audit_trace_ids=sorted({record["trace_id"] for record in skill_records})[:10],
+        )
+
+    def _records(self) -> list[JsonDict]:
+        return sorted(
+            [*self._fixture_records(), *self._history_records()],
+            key=lambda record: (record["skill_id"], record["created_at"], record["trace_id"]),
+        )
+
+    def _fixture_records(self) -> list[JsonDict]:
+        fixtures = [
+            ("summarize_document", "succeeded", 420.0, None),
+            ("summarize_document", "succeeded", 510.0, None),
+            ("extract_entities", "succeeded", 690.0, None),
+            ("extract_entities", "failed", 820.0, "Entity confidence dropped below reviewer threshold."),
+            ("classify_request", "succeeded", 360.0, None),
+            ("classify_request", "succeeded", 410.0, None),
+            ("generate_action_items", "succeeded", 870.0, None),
+            ("generate_action_items", "succeeded", 960.0, None),
+            ("search_knowledge_base", "succeeded", 2_250.0, None),
+            ("search_knowledge_base", "failed", 2_700.0, "Retrieval timeout exceeded local SLO."),
+            ("search_knowledge_base", "failed", 2_950.0, "Knowledge base fallback returned stale index."),
+            ("translate_text", "blocked", 0.0, "Skill is disabled."),
+        ]
+        base = datetime(2026, 6, 9, 11, 0, tzinfo=UTC)
+        records = []
+        for index, (skill_id, status, latency, error) in enumerate(fixtures, start=1):
+            records.append(
+                {
+                    "trace_id": f"reliability-fixture-{index:03d}",
+                    "skill_id": skill_id,
+                    "status": status,
+                    "latency_ms": latency,
+                    "error": error,
+                    "created_at": base.replace(minute=index),
+                    "source": "deterministic_fixture",
+                }
+            )
+        return records
+
+    def _history_records(self) -> list[JsonDict]:
+        records = []
+        for invocation in self.app_state.invocation_service.invocations:
+            status = "blocked" if invocation.error == "Skill is disabled." else invocation.status
+            records.append(
+                {
+                    "trace_id": invocation.trace_id,
+                    "skill_id": invocation.skill_id,
+                    "status": status,
+                    "latency_ms": invocation.latency_ms,
+                    "error": invocation.error,
+                    "created_at": invocation.created_at,
+                    "source": "existing_invocation_history",
+                }
+            )
+        return records
+
+    def _recommendation(
+        self,
+        skill: SkillManifest,
+        circuit_state: str,
+        total: int,
+        failures: int,
+        failure_rate: float,
+        p95_latency: float,
+    ) -> tuple[str, str]:
+        if not skill.enabled or skill.status == "disabled":
+            return "keep_disabled_until_owner_review", "Skill is disabled and should remain hidden from MCP exposure."
+        if circuit_state == "open":
+            return "route_to_fallback_until_breaker_closes", "Circuit breaker is open after repeated failures."
+        if circuit_state == "half_open":
+            return "re_enable_after_canary", "Breaker is half-open; run one canary invocation before full re-enable."
+        if total >= 3 and failure_rate >= self.FAILURE_RATE_REVIEW_THRESHOLD:
+            return (
+                "temporarily_disable_and_run_conformance",
+                f"Failure rate {failure_rate:.0%} across {total} local observations exceeds review threshold.",
+            )
+        if p95_latency > self.LATENCY_SLO_MS:
+            return (
+                "route_to_degraded_mode_and_review_latency",
+                f"p95 latency {p95_latency}ms exceeds {self.LATENCY_SLO_MS}ms SLO.",
+            )
+        if failures:
+            return "keep_enabled", "Failures are present but below breaker and failure-rate thresholds."
+        return "keep_enabled", "Reliability signals are within local/mock guardrails."
+
+    def _recommendation_row(self, skill: SkillReliabilityRecord) -> JsonDict:
+        return {
+            "skill_id": skill.skill_id,
+            "circuit_state": skill.circuit_state,
+            "recommended_action": skill.recommended_action,
+            "reason": skill.recommendation_reason,
+            "failure_rate": skill.failure_rate,
+            "p95_latency_ms": skill.p95_latency_ms,
+            "mcp_exposed": skill.mcp_exposed,
+        }
+
+    def _breaker_events(self) -> list[JsonDict]:
+        return [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.action.startswith("reliability.circuit_")
+        ]
+
+    def _record_breaker_event(
+        self,
+        action: str,
+        skill_id: str,
+        trace_id: str,
+        actor: str,
+        breaker: JsonDict,
+    ) -> None:
+        self.app_state.audit.record(
+            action,
+            "skill",
+            skill_id,
+            trace_id,
+            actor,
+            {
+                "circuit_state": breaker["state"],
+                "consecutive_failures": breaker.get("consecutive_failures", 0),
+                "reason": breaker.get("reason"),
+            },
+        )
+
+    def _latest_timestamp(self, records: list[JsonDict]) -> datetime | None:
+        if not records:
+            return None
+        return max(record["created_at"] for record in records)
+
+    def _p95(self, latencies: list[float]) -> float:
+        if not latencies:
+            return 0.0
+        index = max(0, min(len(latencies) - 1, round(len(latencies) * 0.95) - 1))
+        return round(latencies[index], 2)
+
+    def _reviewer_checklist(self, report: SkillReliabilityReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Per-skill reliability rows cover every registered skill.",
+                "status": "pass" if report.summary["skill_count"] == len(self.app_state.registry.list()) else "fail",
+                "proof": f"{report.summary['skill_count']} skill reliability row(s).",
+            },
+            {
+                "item": "Breaker events are visible through audit metadata.",
+                "status": "pass" if isinstance(report.circuit_breaker_events, list) else "fail",
+                "proof": f"{len(report.circuit_breaker_events)} circuit breaker event(s).",
+            },
+            {
+                "item": "Disable and re-enable recommendations are explicit.",
+                "status": "pass" if report.disable_recommendations and report.re_enable_recommendations else "warn",
+                "proof": (
+                    f"{len(report.disable_recommendations)} disable recommendation(s), "
+                    f"{len(report.re_enable_recommendations)} re-enable recommendation(s)."
+                ),
+            },
+            {
+                "item": "Run local verification before treating reliability recommendations as release gates.",
+                "status": "manual",
+                "proof": "pytest, ruff, eval, conformance, dashboard smoke, demo, and MCP CLI checks.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "reliability/skills|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Circuit breaker state is local in-memory state for portfolio/demo execution and is not shared across processes.",
+            "Fresh-clone reliability evidence includes deterministic fixtures; live invocation history is added as local API, MCP, eval, and demo calls run.",
+            "Recommendations are advisory governance signals; production deployments should connect them to durable telemetry and alerting.",
+            "OpenAI, Azure OpenAI, and external observability systems remain optional and are not required for this pack.",
+            "Generated reliability artifacts are written under ignored data/reliability_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["reliability_report"]
+        lines = [
+            "# Skill Reliability + Circuit Breaker Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Open circuits: `{report['summary']['open_circuit_count']}`",
+            "",
+            "## Skill Reliability",
+            "",
+            "| Skill | Circuit | Failures | Failure Rate | p95 Latency | Recommendation |",
+            "| --- | --- | ---: | ---: | ---: | --- |",
+            *[
+                f"| `{row['skill_id']}` | `{row['circuit_state']}` | {row['failure_count']} | {row['failure_rate']:.0%} | {row['p95_latency_ms']}ms | `{row['recommended_action']}` |"
+                for row in report["skills"]
+            ],
+            "",
+            "## Disable Recommendations",
+            "",
+            *[
+                f"- `{item['skill_id']}`: `{item['recommended_action']}` - {item['reason']}"
+                for item in report["disable_recommendations"]
+            ],
+            "",
+            "## Re-enable Recommendations",
+            "",
+            *[
+                f"- `{item['skill_id']}`: `{item['recommended_action']}` - {item['reason']}"
+                for item in report["re_enable_recommendations"]
+            ],
+            "",
+            "## Circuit Breaker Policy",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["circuit_breaker_policy"].items()],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class EnterpriseReadinessService:
     PACK_ID = "portfolio_demo_pack_latest"
     SCORECARD_ID = "enterprise_readiness_scorecard_latest"
@@ -8174,6 +8710,7 @@ class SmokeMatrixService:
         incident = await self.app_state.incidents.drill(SkillIncidentDrillRequest(actor="smoke-matrix"))
         marketplace = await self.app_state.marketplace.catalog()
         usage = self.app_state.usage.analytics()
+        reliability = self.app_state.reliability.report()
         enterprise = await self.app_state.enterprise.scorecard()
         tools = self.app_state.mcp.list_tools()
         resources = self.app_state.mcp.list_resources()
@@ -8189,6 +8726,7 @@ class SmokeMatrixService:
                 incident.readiness_status,
                 marketplace.readiness_status,
                 usage.readiness_status,
+                reliability.readiness_status,
                 enterprise.readiness_status,
             ],
         )
@@ -8206,6 +8744,7 @@ class SmokeMatrixService:
                 "tenant policy",
                 "marketplace",
                 "usage analytics",
+                "skill reliability",
                 "incidents",
                 "enterprise readiness",
                 "portfolio evidence",
@@ -8232,6 +8771,9 @@ class SmokeMatrixService:
             "usage_readiness": usage.readiness_status,
             "usage_estimated_cost": usage.summary["estimated_cost"],
             "usage_anomaly_count": usage.summary["anomaly_count"],
+            "reliability_readiness": reliability.readiness_status,
+            "open_circuit_count": reliability.summary["open_circuit_count"],
+            "disable_recommendation_count": reliability.summary["disable_recommendation_count"],
             "incident_readiness": incident.readiness_status,
             "enterprise_readiness": enterprise.readiness_status,
             "enterprise_score": enterprise.overall_score,
@@ -8486,6 +9028,39 @@ class SmokeMatrixService:
                 "Writes Skill Usage Analytics and Cost Chargeback reviewer artifacts.",
             ),
             self._endpoint(
+                "skill reliability",
+                "GET",
+                "/reliability/skills",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
+                [],
+                "Returns per-skill failure, latency, circuit state, and disable/re-enable recommendations.",
+            ),
+            self._endpoint(
+                "skill reliability",
+                "PATCH",
+                "/reliability/circuit-breakers/search_knowledge_base",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/reliability/circuit-breakers/search_knowledge_base -Method PATCH -Headers $headers -ContentType 'application/json' -Body '{\"action\":\"half_open\",\"actor\":\"sre\",\"reason\":\"canary retry\"}'",
+                [],
+                "Manually opens, closes, or half-opens a local in-memory circuit breaker for a skill.",
+            ),
+            self._endpoint(
+                "skill reliability",
+                "POST",
+                "/reliability/pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+                [
+                    "data/reliability_packs/reliability_pack_latest.json",
+                    "data/reliability_packs/reliability_pack_latest.md",
+                ],
+                "Writes Skill Reliability and Circuit Breaker reviewer artifacts.",
+            ),
+            self._endpoint(
                 "incidents",
                 "POST",
                 "/incidents/drill",
@@ -8706,6 +9281,11 @@ class SmokeMatrixService:
                 Path("data") / "usage_packs" / SkillUsageAnalyticsService.PACK_ID,
             ),
             (
+                "Skill Reliability + Circuit Breaker Pack",
+                "POST /reliability/pack",
+                Path("data") / "reliability_packs" / SkillReliabilityService.PACK_ID,
+            ),
+            (
                 "Portfolio demo pack",
                 "POST /enterprise/portfolio-demo-pack",
                 Path("data") / "portfolio_demo" / "portfolio_demo_pack_latest",
@@ -8779,6 +9359,8 @@ class SmokeMatrixService:
             "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
         ]
@@ -11288,6 +11870,7 @@ class DashboardSmokeService:
             {"id": "artifact_inventory", "label": "Artifact Inventory", "purpose": "Generated proof index."},
             {"id": "skill_marketplace", "label": "Skill Marketplace", "purpose": "Tenant rollout approval pack."},
             {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
+            {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
             {"id": "ci_doctor", "label": "CI Doctor / Audit Pack", "purpose": "Static local CI and publish audit."},
             {"id": "release_pack", "label": "Release Pack", "purpose": "Release quality and publish artifacts."},
@@ -11320,6 +11903,8 @@ class DashboardSmokeService:
             self._endpoint_ref("marketplace_rollout_pack", "POST", "/marketplace/rollout-pack", "Writes Tenant Rollout approval pack."),
             self._endpoint_ref("usage_analytics", "GET", "/usage/analytics", "Skill Usage Analytics and chargeback signals."),
             self._endpoint_ref("usage_chargeback_pack", "POST", "/usage/chargeback-pack", "Writes Cost Chargeback artifacts."),
+            self._endpoint_ref("skill_reliability", "GET", "/reliability/skills", "Skill reliability and breaker signals."),
+            self._endpoint_ref("reliability_pack", "POST", "/reliability/pack", "Writes Reliability Pack artifacts."),
             self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
             self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
         ]
@@ -11349,6 +11934,7 @@ class DashboardSmokeService:
             self._artifact_tab("runtime_demo", "Runtime Demo", "Runtime Demo Pack", "data/runtime_packs/"),
             self._artifact_tab("marketplace_pack", "Skill Marketplace", "Tenant Rollout", "data/marketplace_packs/"),
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
+            self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
             self._artifact_tab("api_contract", "API Contract", "Reviewer Collection", "data/api_contracts/"),
         ]
@@ -11412,6 +11998,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/handoff/final-audit -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/handoff/final-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
@@ -11421,11 +12009,13 @@ class DashboardSmokeService:
             'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
             'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
+            'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\runtime_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
 
@@ -11906,6 +12496,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
                 ["chargeback_pack_latest.json", "chargeback_pack_latest.md"],
                 "Enterprise usage, token, latency, budget, anomaly, disabled-skill block, and chargeback allocation proof.",
+            ),
+            self._catalog_row(
+                "reliability_packs",
+                "Skill Reliability + Circuit Breaker Pack",
+                Path("data") / "reliability_packs",
+                "POST /reliability/pack",
+                "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+                ["reliability_pack_latest.json", "reliability_pack_latest.md"],
+                "Per-skill failure, latency SLO, circuit breaker state, disable/re-enable recommendations, and reviewer proof.",
             ),
             self._catalog_row(
                 "workflow_reviews",
@@ -12831,6 +13430,7 @@ class PersistenceService:
             ],
             "audit_events": [event.model_dump(mode="json") for event in app_state.audit.events],
             "metrics": [metric.model_dump(mode="json") for metric in app_state.metrics.metrics],
+            "reliability_report": app_state.reliability.report().model_dump(mode="json"),
             "governance_report": app_state.governance.generate().model_dump(mode="json"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -12875,6 +13475,7 @@ class AppState:
     tenant_sandbox: TenantPolicySandboxService = field(init=False)
     marketplace: SkillMarketplaceGovernanceService = field(init=False)
     usage: SkillUsageAnalyticsService = field(init=False)
+    reliability: SkillReliabilityService = field(init=False)
     enterprise: EnterpriseReadinessService = field(init=False)
     smoke: SmokeMatrixService = field(init=False)
     portfolio: PortfolioEvidenceService = field(init=False)
@@ -12918,6 +13519,8 @@ class AppState:
         self.tenant_sandbox = TenantPolicySandboxService(self)
         self.marketplace = SkillMarketplaceGovernanceService(self)
         self.usage = SkillUsageAnalyticsService(self)
+        self.reliability = SkillReliabilityService(self)
+        self.invocation_service.reliability = self.reliability
         self.enterprise = EnterpriseReadinessService(self)
         self.smoke = SmokeMatrixService(self)
         self.portfolio = PortfolioEvidenceService(self)

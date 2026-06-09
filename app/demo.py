@@ -24,6 +24,7 @@ from app.models import (
     RuntimeDemoPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
+    SkillReliabilityPackRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
@@ -159,6 +160,10 @@ async def main() -> None:
     usage_chargeback_pack = state.usage.chargeback_pack(
         UsageChargebackPackRequest(actor="demo-finops-reviewer")
     )
+    reliability_report = state.reliability.report()
+    reliability_pack = state.reliability.pack(
+        SkillReliabilityPackRequest(actor="demo-platform-sre")
+    )
     enterprise_scorecard = await state.enterprise.scorecard()
     portfolio_demo_pack = await state.enterprise.portfolio_demo_pack(
         EnterprisePortfolioDemoPackRequest(actor="demo-portfolio-reviewer")
@@ -293,6 +298,18 @@ async def main() -> None:
                 "cost_chargeback_estimated_cost": usage_analytics.summary["estimated_cost"],
                 "chargeback pack path": usage_chargeback_pack.markdown_path,
                 "chargeback_pack_path": usage_chargeback_pack.markdown_path,
+                "skill reliability readiness": reliability_report.readiness_status,
+                "skill_reliability_readiness": reliability_report.readiness_status,
+                "skill reliability open circuits": reliability_report.summary["open_circuit_count"],
+                "skill_reliability_open_circuits": reliability_report.summary["open_circuit_count"],
+                "skill reliability disable recommendations": reliability_report.summary[
+                    "disable_recommendation_count"
+                ],
+                "skill_reliability_disable_recommendations": reliability_report.summary[
+                    "disable_recommendation_count"
+                ],
+                "reliability pack path": reliability_pack.markdown_path,
+                "reliability_pack_path": reliability_pack.markdown_path,
                 "enterprise readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness_score": enterprise_scorecard.overall_score,

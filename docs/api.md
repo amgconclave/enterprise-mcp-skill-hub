@@ -39,6 +39,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 - `GET /usage/analytics` - returns Skill Usage Analytics by skill, tenant/environment, agent, status, MCP exposure, latency band, token/cost estimate, budget status, anomaly flag, disabled-skill blocked event, and coverage summary.
 - `POST /usage/chargeback-pack` - writes the Cost Chargeback Pack Markdown/JSON under ignored local folder `data/usage_packs/` with usage tables, cost allocation, budget/anomaly flags, recommended controls, reviewer checklist, local proof commands, and limitations.
+- `GET /reliability/skills` - returns per-skill failure counts, latency SLO posture, circuit breaker state, disable/re-enable recommendations, trace evidence, and local/mock limitations.
+- `PATCH /reliability/circuit-breakers/{skill_id}` - manually opens, half-opens, or closes a local in-memory circuit breaker for a skill and records audit evidence.
+- `POST /reliability/pack` - writes the Skill Reliability + Circuit Breaker Pack Markdown/JSON under ignored local folder `data/reliability_packs/`.
 - `GET /enterprise/readiness-scorecard` - returns the Enterprise Readiness scorecard with category scores, readiness status, risks, recommended actions, artifact links, MCP capability counts, and local verification commands.
 - `POST /enterprise/portfolio-demo-pack` - writes `portfolio_demo_pack_latest.json` and `portfolio_demo_pack_latest.md` under ignored local folder `data/portfolio_demo/`.
 - `GET /portfolio/evidence-index` - returns a deterministic Portfolio Evidence index mapping JD skills to endpoint, file, command, artifact, MCP, and governance proof.
@@ -338,6 +341,28 @@ Invoke-RestMethod http://localhost:8000/usage/chargeback-pack `
 The analytics response returns usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget status, anomaly flags, disabled-skill blocked events, coverage summary, and local/mock limitations.
 
 The Cost Chargeback Pack writes `chargeback_pack_latest.json` and `.md` under ignored `data/usage_packs/`. It includes usage tables, cost allocation, budget/anomaly flags, recommended controls, reviewer checklist, local proof commands, and limitations.
+
+## Skill Reliability And Circuit Breakers
+
+```powershell
+Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers
+
+Invoke-RestMethod http://localhost:8000/reliability/circuit-breakers/search_knowledge_base `
+  -Headers $headers `
+  -Method PATCH `
+  -ContentType "application/json" `
+  -Body '{"action":"half_open","actor":"platform-sre","reason":"canary retry"}'
+
+Invoke-RestMethod http://localhost:8000/reliability/pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-sre"}'
+```
+
+The reliability response combines deterministic local fixtures with live invocation history. It reports per-skill failure counts, blocked events, consecutive failures, p95 latency, latency SLO breaches, circuit state, recommended disable/re-enable action, recent failure traces, and local limitations.
+
+The Reliability Pack writes `reliability_pack_latest.json` and `.md` under ignored `data/reliability_packs/`. The pack includes the circuit breaker policy, recommendations, reviewer checklist, local proof commands, and limitations. Breaker state is local and in-memory by default.
 
 ## Enterprise Readiness And Portfolio Demo Pack
 

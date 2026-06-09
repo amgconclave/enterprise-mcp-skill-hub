@@ -31,6 +31,7 @@ from app.models import (
     CapacityPlanExportRequest,
     CapacityPlanExportResult,
     CiDoctorResult,
+    CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
     ComplianceAttestationResult,
     ConformanceReport,
@@ -89,6 +90,10 @@ from app.models import (
     SkillIncidentRunbookResult,
     SkillInvocation,
     SkillManifest,
+    SkillReliabilityPackRequest,
+    SkillReliabilityPackResult,
+    SkillReliabilityRecord,
+    SkillReliabilityReport,
     SkillStatusRequest,
     SkillVersion,
     SmokeMatrixResult,
@@ -219,6 +224,31 @@ def usage_chargeback_pack(
     _: str = Depends(require_api_key),
 ) -> UsageChargebackPackResult:
     return state.usage.chargeback_pack(request or UsageChargebackPackRequest())
+
+
+@app.get("/reliability/skills", response_model=SkillReliabilityReport)
+def skill_reliability(_: str = Depends(require_api_key)) -> SkillReliabilityReport:
+    return state.reliability.report()
+
+
+@app.patch("/reliability/circuit-breakers/{skill_id}", response_model=SkillReliabilityRecord)
+def set_circuit_breaker(
+    skill_id: str,
+    request: CircuitBreakerActionRequest,
+    _: str = Depends(require_api_key),
+) -> SkillReliabilityRecord:
+    try:
+        return state.reliability.set_breaker(skill_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/reliability/pack", response_model=SkillReliabilityPackResult)
+def skill_reliability_pack(
+    request: SkillReliabilityPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillReliabilityPackResult:
+    return state.reliability.pack(request or SkillReliabilityPackRequest())
 
 
 @app.get("/enterprise/readiness-scorecard", response_model=EnterpriseReadinessScorecard)

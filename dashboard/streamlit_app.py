@@ -19,6 +19,7 @@ from app.models import (
     CapacityGuardrails,
     CapacityGuardrailsRequest,
     CapacityPlanExportRequest,
+    CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
     DependencyReportRequest,
     EnterprisePortfolioDemoPackRequest,
@@ -35,6 +36,7 @@ from app.models import (
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillManifest,
+    SkillReliabilityPackRequest,
     TenantPolicySimulationRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
@@ -72,6 +74,7 @@ view = st.sidebar.radio(
         "Tenant Policy Sandbox",
         "Skill Marketplace",
         "Skill Usage Analytics",
+        "Skill Reliability",
         "Enterprise Readiness",
         "Portfolio Pack",
         "Reviewer Quickstart",
@@ -451,6 +454,58 @@ elif view == "Skill Usage Analytics":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(analytics.model_dump(mode="json"))
+
+elif view == "Skill Reliability":
+    st.subheader("Skill Reliability")
+    st.caption("Per-skill failures, latency SLOs, circuit breakers, and enablement recommendations.")
+    reliability = state.reliability.report()
+    col_ready, col_open, col_disable, col_total = st.columns(4)
+    col_ready.metric("Readiness", reliability.readiness_status.upper())
+    col_open.metric("Open circuits", reliability.summary["open_circuit_count"])
+    col_disable.metric("Disable recs", reliability.summary["disable_recommendation_count"])
+    col_total.metric("Invocations", reliability.summary["total_invocations"])
+
+    tab_skills, tab_recs, tab_breakers, tab_export, tab_json = st.tabs(
+        ["Skills", "Recommendations", "Circuit Breakers", "Reliability Pack", "JSON"]
+    )
+    with tab_skills:
+        st.dataframe(
+            [skill.model_dump(mode="json") for skill in reliability.skills],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_recs:
+        st.dataframe(reliability.disable_recommendations, use_container_width=True, hide_index=True)
+        st.dataframe(reliability.re_enable_recommendations, use_container_width=True, hide_index=True)
+        st.json(reliability.summary)
+    with tab_breakers:
+        skill_ids = [skill.id for skill in state.registry.list()]
+        selected_skill = st.selectbox("Skill", skill_ids)
+        action = st.segmented_control("Action", ["open", "half_open", "close"], default="half_open")
+        reason = st.text_input("Reason", value="streamlit reliability review")
+        if st.button("Apply Circuit Breaker Action", use_container_width=True):
+            updated = state.reliability.set_breaker(
+                selected_skill,
+                CircuitBreakerActionRequest(
+                    action=action,
+                    actor="streamlit-sre",
+                    reason=reason,
+                ),
+            )
+            st.success("Circuit breaker updated.")
+            st.json(updated.model_dump(mode="json"))
+        st.dataframe(reliability.circuit_breaker_events, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/reliability_packs/.")
+        actor = st.text_input("Reliability pack actor", value="streamlit-platform-sre")
+        if st.button("Export Reliability Pack", use_container_width=True):
+            export = state.reliability.pack(
+                SkillReliabilityPackRequest(actor=actor)
+            )
+            st.success("Reliability Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(reliability.model_dump(mode="json"))
 
 elif view == "Enterprise Readiness":
     st.subheader("Enterprise Readiness")
