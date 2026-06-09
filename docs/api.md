@@ -45,6 +45,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /reliability/skills` - returns per-skill failure counts, latency SLO posture, circuit breaker state, disable/re-enable recommendations, trace evidence, and local/mock limitations.
 - `PATCH /reliability/circuit-breakers/{skill_id}` - manually opens, half-opens, or closes a local in-memory circuit breaker for a skill and records audit evidence.
 - `POST /reliability/pack` - writes the Skill Reliability + Circuit Breaker Pack Markdown/JSON under ignored local folder `data/reliability_packs/`.
+- `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
+- `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
 - `POST /prompt-governance/validate` - validates submitted prompt or resource text with local deterministic prompt-governance rules.
 - `POST /prompt-governance/pack` - writes the Prompt Governance + Injection Risk Pack Markdown/JSON under ignored local folder `data/prompt_governance/`.

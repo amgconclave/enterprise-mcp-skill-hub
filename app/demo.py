@@ -21,6 +21,7 @@ from app.models import (
     PortfolioInterviewPackRequest,
     PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
+    ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
@@ -169,6 +170,10 @@ async def main() -> None:
     reliability_report = state.reliability.report()
     reliability_pack = state.reliability.pack(
         SkillReliabilityPackRequest(actor="demo-platform-sre")
+    )
+    provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
+    provider_fallback_pack = state.provider_readiness.fallback_pack(
+        ProviderFallbackPackRequest(actor="demo-provider-reviewer")
     )
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
@@ -328,6 +333,12 @@ async def main() -> None:
                 ],
                 "reliability pack path": reliability_pack.markdown_path,
                 "reliability_pack_path": reliability_pack.markdown_path,
+                "provider readiness": provider_readiness.readiness_status,
+                "provider_readiness": provider_readiness.readiness_status,
+                "provider current": provider_readiness.current_provider["name"],
+                "provider_current": provider_readiness.current_provider["name"],
+                "provider fallback pack path": provider_fallback_pack.markdown_path,
+                "provider_fallback_pack_path": provider_fallback_pack.markdown_path,
                 "prompt governance readiness": prompt_governance_report.readiness_status,
                 "prompt_governance_readiness": prompt_governance_report.readiness_status,
                 "prompt governance findings": prompt_governance_report.summary["finding_count"],

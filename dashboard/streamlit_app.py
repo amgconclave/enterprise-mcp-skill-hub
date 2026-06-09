@@ -34,6 +34,7 @@ from app.models import (
     PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
     PromptGovernanceValidationRequest,
+    ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
@@ -82,6 +83,7 @@ view = st.sidebar.radio(
         "Skill Marketplace",
         "Skill Usage Analytics",
         "Skill Reliability",
+        "Provider Readiness",
         "Prompt Governance",
         "Privacy Retention",
         "Enterprise Readiness",
@@ -626,6 +628,37 @@ elif view == "Skill Reliability":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(reliability.model_dump(mode="json"))
+
+elif view == "Provider Readiness":
+    st.subheader("Provider Readiness")
+    st.caption("Static local readiness checks for mock, OpenAI, Azure OpenAI, and fallback gates.")
+    report = state.provider_readiness.readiness(actor="streamlit-provider-reviewer")
+    col_ready, col_current, col_external, col_routes = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_current.metric("Current provider", report.current_provider["name"])
+    col_external.metric("External skills", report.summary["external_skill_count"])
+    col_routes.metric("Fallback routes", report.summary["fallback_route_count"])
+
+    tab_checks, tab_fallbacks, tab_skills, tab_export, tab_json = st.tabs(
+        ["Provider Checks", "Fallback Matrix", "Skill Providers", "Provider Pack", "JSON"]
+    )
+    with tab_checks:
+        st.dataframe(report.provider_checks, use_container_width=True, hide_index=True)
+    with tab_fallbacks:
+        st.dataframe(report.fallback_matrix, use_container_width=True, hide_index=True)
+    with tab_skills:
+        st.dataframe(report.skill_provider_inventory, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/provider_packs/.")
+        actor = st.text_input("Provider pack actor", value="streamlit-provider-reviewer")
+        if st.button("Export Provider Fallback Pack", use_container_width=True):
+            export = state.provider_readiness.fallback_pack(
+                ProviderFallbackPackRequest(actor=actor)
+            )
+            st.success("Provider Fallback Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Prompt Governance":
     st.subheader("Prompt Governance")

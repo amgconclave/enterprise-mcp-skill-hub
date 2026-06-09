@@ -586,6 +586,31 @@ class SkillReliabilityPackResult(BaseModel):
     summary: JsonDict
 
 
+class ProviderReadinessReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    current_provider: JsonDict
+    provider_checks: list[JsonDict] = Field(default_factory=list)
+    fallback_matrix: list[JsonDict] = Field(default_factory=list)
+    skill_provider_inventory: list[JsonDict] = Field(default_factory=list)
+    summary: JsonDict
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ProviderFallbackPackRequest(BaseModel):
+    actor: str = "provider-reviewer"
+
+
+class ProviderFallbackPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class PromptGovernanceValidationRequest(BaseModel):
     content: str
     target_id: str = "ad_hoc"

@@ -13,6 +13,7 @@ from importlib.util import find_spec
 from pathlib import Path
 
 from app.api_contracts import ApiContractService
+from app.config import get_settings
 from app.git_readiness import GitReadinessService
 from app.models import (
     AgentRun,
@@ -100,6 +101,9 @@ from app.models import (
     PromptGovernanceTargetResult,
     PromptGovernanceTargetType,
     PromptGovernanceValidationRequest,
+    ProviderFallbackPackRequest,
+    ProviderFallbackPackResult,
+    ProviderReadinessReport,
     ReleaseDiffItem,
     ReleaseExportResult,
     ReleaseMcpCapabilities,
@@ -10444,6 +10448,29 @@ class SmokeMatrixService:
                 "Writes Skill Reliability and Circuit Breaker reviewer artifacts.",
             ),
             self._endpoint(
+                "provider readiness",
+                "GET",
+                "/providers/readiness",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers",
+                [],
+                "Returns mock-default provider posture, optional hosted-provider checks, and fallback routes.",
+            ),
+            self._endpoint(
+                "provider readiness",
+                "POST",
+                "/providers/fallback-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
+                [
+                    "data/provider_packs/provider_fallback_pack_latest.json",
+                    "data/provider_packs/provider_fallback_pack_latest.md",
+                ],
+                "Writes Provider Readiness and Fallback reviewer artifacts.",
+            ),
+            self._endpoint(
                 "prompt governance",
                 "GET",
                 "/prompt-governance/report",
@@ -10735,6 +10762,11 @@ class SmokeMatrixService:
                 Path("data") / "reliability_packs" / SkillReliabilityService.PACK_ID,
             ),
             (
+                "Provider Readiness + Fallback Pack",
+                "POST /providers/fallback-pack",
+                Path("data") / "provider_packs" / ProviderReadinessService.PACK_ID,
+            ),
+            (
                 "Prompt Governance + Injection Risk Pack",
                 "POST /prompt-governance/pack",
                 Path("data") / "prompt_governance" / PromptGovernanceService.PACK_ID,
@@ -10815,6 +10847,8 @@ class SmokeMatrixService:
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
@@ -11559,6 +11593,7 @@ class CiDoctorService:
         "data/incident_runbooks/",
         "data/tenant_sandboxes/",
         "data/usage_packs/",
+        "data/provider_packs/",
         "data/portfolio_demo/",
         "data/portfolio_packs/",
         "data/launch_checklists/",
@@ -13327,6 +13362,7 @@ class DashboardSmokeService:
             {"id": "skill_marketplace", "label": "Skill Marketplace", "purpose": "Tenant rollout approval pack."},
             {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
+            {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
@@ -13363,6 +13399,8 @@ class DashboardSmokeService:
             self._endpoint_ref("usage_chargeback_pack", "POST", "/usage/chargeback-pack", "Writes Cost Chargeback artifacts."),
             self._endpoint_ref("skill_reliability", "GET", "/reliability/skills", "Skill reliability and breaker signals."),
             self._endpoint_ref("reliability_pack", "POST", "/reliability/pack", "Writes Reliability Pack artifacts."),
+            self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
+            self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
             self._endpoint_ref("privacy_retention", "GET", "/privacy/retention-report", "Privacy and retention scan signals."),
@@ -13398,6 +13436,7 @@ class DashboardSmokeService:
             self._artifact_tab("marketplace_pack", "Skill Marketplace", "Tenant Rollout", "data/marketplace_packs/"),
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
+            self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
@@ -13479,6 +13518,7 @@ class DashboardSmokeService:
             'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
+            'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -13486,6 +13526,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
@@ -13976,6 +14017,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
                 ["reliability_pack_latest.json", "reliability_pack_latest.md"],
                 "Per-skill failure, latency SLO, circuit breaker state, disable/re-enable recommendations, and reviewer proof.",
+            ),
+            self._catalog_row(
+                "provider_packs",
+                "Provider Readiness + Fallback Pack",
+                Path("data") / "provider_packs",
+                "POST /providers/fallback-pack",
+                "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
+                ["provider_fallback_pack_latest.json", "provider_fallback_pack_latest.md"],
+                "Mock-default provider posture, optional OpenAI/Azure checks, fallback matrix, re-enable gates, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
                 "prompt_governance",
@@ -14902,6 +14952,366 @@ class FinalHandoffService:
         return path if path.is_absolute() else self.repo_root / path
 
 
+class ProviderReadinessService:
+    PACK_ID = "provider_fallback_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "provider_packs"
+
+    def readiness(self, actor: str = "provider-readiness-reviewer") -> ProviderReadinessReport:
+        settings = get_settings()
+        current = {
+            "name": self.app_state.provider.name,
+            "model": self.app_state.provider.model,
+            "configured_from": "LLM_PROVIDER",
+            "default_is_mock": settings.llm_provider == "mock",
+            "network_call_required_for_report": False,
+        }
+        checks = self._provider_checks(settings)
+        fallback_matrix = self._fallback_matrix()
+        inventory = self._skill_provider_inventory()
+        active_failures = [
+            check
+            for check in checks
+            if check["provider"] == current["name"] and check["status"] == "fail"
+        ]
+        external_skill_count = sum(1 for row in inventory if row["provider"] != "mock")
+        configured_external_count = sum(
+            1 for check in checks
+            if check["provider"] != "mock" and check["credential_presence"] == "present"
+        )
+        readiness: SecurityReadinessStatus = "ready"
+        if active_failures:
+            readiness = "blocked"
+        elif current["name"] != "mock" or external_skill_count or configured_external_count:
+            readiness = "needs_review"
+        summary = {
+            "current_provider": current["name"],
+            "provider_count": len(checks),
+            "active_provider_failure_count": len(active_failures),
+            "external_skill_count": external_skill_count,
+            "configured_external_provider_count": configured_external_count,
+            "mock_default_active": current["name"] == "mock",
+            "network_calls_performed": 0,
+            "fallback_route_count": len(fallback_matrix),
+        }
+        report = ProviderReadinessReport(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            current_provider=current,
+            provider_checks=checks,
+            fallback_matrix=fallback_matrix,
+            skill_provider_inventory=inventory,
+            summary=summary,
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "provider_readiness.report_run",
+            "provider_readiness",
+            current["name"],
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness,
+                "current_provider": current["name"],
+                "active_provider_failure_count": len(active_failures),
+                "external_skill_count": external_skill_count,
+                "configured_external_provider_count": configured_external_count,
+            },
+        )
+        return report
+
+    def fallback_pack(
+        self,
+        request: ProviderFallbackPackRequest | None = None,
+    ) -> ProviderFallbackPackResult:
+        request = request or ProviderFallbackPackRequest()
+        report = self.readiness(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "provider_readiness": report.model_dump(mode="json"),
+            "fallback_policy": self._fallback_policy(),
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "audit_events": [
+                event.model_dump(mode="json")
+                for event in self.app_state.audit.events
+                if event.action.startswith("provider_readiness.")
+            ],
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        bundle["summary"] = {
+            **report.summary,
+            "readiness_status": report.readiness_status,
+            "audit_event_count": len(bundle["audit_events"]),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "provider_readiness.fallback_pack_exported",
+            "provider_fallback_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "current_provider": report.current_provider["name"],
+            },
+        )
+        return ProviderFallbackPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _provider_checks(self, settings: object) -> list[JsonDict]:
+        openai_package = find_spec("openai") is not None
+        return [
+            {
+                "provider": "mock",
+                "display_name": "Mock LLM Provider",
+                "status": "pass",
+                "active": self.app_state.provider.name == "mock",
+                "credential_presence": "not_required",
+                "required_settings": [],
+                "package_available": True,
+                "network_required": False,
+                "risk_flags": [],
+                "recommended_action": "Keep as the default for local demos, CI, and reviewer workflows.",
+            },
+            self._external_provider_check(
+                provider="openai",
+                display_name="OpenAI Provider",
+                required_settings=["OPENAI_API_KEY"],
+                present=bool(getattr(settings, "openai_api_key", None)),
+                package_available=openai_package,
+                active=self.app_state.provider.name == "openai",
+            ),
+            self._external_provider_check(
+                provider="azure_openai",
+                display_name="Azure OpenAI Provider",
+                required_settings=[
+                    "AZURE_OPENAI_API_KEY",
+                    "AZURE_OPENAI_ENDPOINT",
+                    "AZURE_OPENAI_DEPLOYMENT",
+                ],
+                present=all(
+                    [
+                        getattr(settings, "azure_openai_api_key", None),
+                        getattr(settings, "azure_openai_endpoint", None),
+                        getattr(settings, "azure_openai_deployment", None),
+                    ]
+                ),
+                package_available=openai_package,
+                active=self.app_state.provider.name == "azure_openai",
+            ),
+        ]
+
+    def _external_provider_check(
+        self,
+        provider: str,
+        display_name: str,
+        required_settings: list[str],
+        present: bool,
+        package_available: bool,
+        active: bool,
+    ) -> JsonDict:
+        missing = []
+        if not present:
+            missing.append("credentials_or_endpoint")
+        if not package_available:
+            missing.append("openai_package")
+        status = "pass" if present and package_available else "optional_not_configured"
+        if active and missing:
+            status = "fail"
+        risk_flags = []
+        if active and provider != "mock":
+            risk_flags.append("external_llm_active")
+        if missing:
+            risk_flags.extend(f"missing_{item}" for item in missing)
+        return {
+            "provider": provider,
+            "display_name": display_name,
+            "status": status,
+            "active": active,
+            "credential_presence": "present" if present else "absent",
+            "required_settings": required_settings,
+            "package_available": package_available,
+            "network_required": True,
+            "risk_flags": risk_flags,
+            "recommended_action": (
+                "Configure credentials and install provider dependencies before selecting this provider."
+                if missing
+                else "Require production approval, logging, and cost guardrails before external rollout."
+            ),
+        }
+
+    def _skill_provider_inventory(self) -> list[JsonDict]:
+        rows = []
+        for skill in self.app_state.registry.list():
+            rows.append(
+                {
+                    "skill_id": skill.id,
+                    "name": skill.name,
+                    "provider": skill.provider,
+                    "enabled": skill.enabled,
+                    "status": skill.status,
+                    "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill),
+                    "review_required": skill.provider != "mock",
+                }
+            )
+        return rows
+
+    def _fallback_matrix(self) -> list[JsonDict]:
+        return [
+            {
+                "provider": "mock",
+                "failure_mode": "unexpected_local_handler_error",
+                "fallback_route": "surface deterministic failed invocation and audit trace",
+                "approval_gate": "none_for_local_demo",
+                "audit_action": "skill.invocation_failed",
+            },
+            {
+                "provider": "openai",
+                "failure_mode": "missing_key_rate_limit_or_provider_error",
+                "fallback_route": "switch LLM_PROVIDER=mock and replay deterministic sample cases",
+                "approval_gate": "platform_reviewer_approval_before_reenable",
+                "audit_action": "provider_readiness.fallback_pack_exported",
+            },
+            {
+                "provider": "azure_openai",
+                "failure_mode": "missing_endpoint_deployment_key_or_provider_error",
+                "fallback_route": "switch LLM_PROVIDER=mock and keep Azure deployment disabled",
+                "approval_gate": "cloud_owner_and_security_reviewer_approval",
+                "audit_action": "provider_readiness.fallback_pack_exported",
+            },
+        ]
+
+    def _fallback_policy(self) -> JsonDict:
+        return {
+            "default_provider": "mock",
+            "external_provider_enablement": "manual_env_configuration_only",
+            "credential_handling": "presence_only_checks_no_secret_values_exported",
+            "fallback_trigger": "active_provider_missing_requirements_or_runtime_failure",
+            "fallback_action": "return_to_mock_provider_and_rerun_eval_conformance_demo_commands",
+            "reenable_gate": "reviewer_approval_after_credentials_package_cost_and_logging_checks",
+        }
+
+    def _reviewer_checklist(self, report: ProviderReadinessReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Mock provider remains available for local demos.",
+                "status": "pass" if any(row["provider"] == "mock" and row["status"] == "pass" for row in report.provider_checks) else "fail",
+                "proof": f"Current provider: {report.current_provider['name']}.",
+            },
+            {
+                "item": "Optional external providers do not block fresh-clone verification.",
+                "status": "pass" if report.summary["network_calls_performed"] == 0 else "fail",
+                "proof": "Readiness report performs static presence checks only.",
+            },
+            {
+                "item": "Skill manifests avoid accidental hosted-provider rollout.",
+                "status": "pass" if report.summary["external_skill_count"] == 0 else "warn",
+                "proof": f"{report.summary['external_skill_count']} skill(s) declare non-mock providers.",
+            },
+            {
+                "item": "Fallback and re-enable gates are explicit.",
+                "status": "pass" if report.fallback_matrix else "fail",
+                "proof": f"{len(report.fallback_matrix)} provider fallback row(s).",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
+            'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Provider readiness is a static local check and does not call OpenAI, Azure OpenAI, or any external network endpoint.",
+            "Credential checks only record presence or absence; secret values are never exported.",
+            "Runtime provider errors are still exercised through invocation, eval, conformance, and demo commands.",
+            "Production deployments should add live canary checks, budget enforcement, and incident routing before hosted-provider rollout.",
+            "Generated provider artifacts are written under ignored data/provider_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["provider_readiness"]
+        lines = [
+            "# Provider Readiness + Fallback Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Current provider: `{report['current_provider']['name']}`",
+            f"- External skill count: `{report['summary']['external_skill_count']}`",
+            "",
+            "## Provider Checks",
+            "",
+            "| Provider | Status | Active | Credentials | Package | Network |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| `{row['provider']}` | `{row['status']}` | `{row['active']}` | `{row['credential_presence']}` | `{row['package_available']}` | `{row['network_required']}` |"
+                for row in report["provider_checks"]
+            ],
+            "",
+            "## Fallback Matrix",
+            "",
+            *[
+                f"- `{row['provider']}` `{row['failure_mode']}` -> {row['fallback_route']} (`{row['approval_gate']}`)"
+                for row in report["fallback_matrix"]
+            ],
+            "",
+            "## Fallback Policy",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["fallback_policy"].items()],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class PersistenceService:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path(".local") / "skill_hub_snapshot.json"
@@ -14920,6 +15330,7 @@ class PersistenceService:
             "audit_events": [event.model_dump(mode="json") for event in app_state.audit.events],
             "metrics": [metric.model_dump(mode="json") for metric in app_state.metrics.metrics],
             "reliability_report": app_state.reliability.report().model_dump(mode="json"),
+            "provider_readiness_report": app_state.provider_readiness.readiness().model_dump(mode="json"),
             "prompt_governance_report": app_state.prompt_governance.report().model_dump(mode="json"),
             "privacy_retention_report": app_state.privacy_retention.report().model_dump(mode="json"),
             "governance_report": app_state.governance.generate().model_dump(mode="json"),
@@ -14968,6 +15379,7 @@ class AppState:
     marketplace: SkillMarketplaceGovernanceService = field(init=False)
     usage: SkillUsageAnalyticsService = field(init=False)
     reliability: SkillReliabilityService = field(init=False)
+    provider_readiness: ProviderReadinessService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
     enterprise: EnterpriseReadinessService = field(init=False)
@@ -15022,6 +15434,7 @@ class AppState:
         self.usage = SkillUsageAnalyticsService(self)
         self.reliability = SkillReliabilityService(self)
         self.invocation_service.reliability = self.reliability
+        self.provider_readiness = ProviderReadinessService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)
         self.enterprise = EnterpriseReadinessService(self)

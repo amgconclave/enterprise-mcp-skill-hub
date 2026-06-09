@@ -79,6 +79,9 @@ from app.models import (
     PromptGovernanceReport,
     PromptGovernanceTargetResult,
     PromptGovernanceValidationRequest,
+    ProviderFallbackPackRequest,
+    ProviderFallbackPackResult,
+    ProviderReadinessReport,
     RegisterSkillRequest,
     ReleaseExportResult,
     ReleasePreview,
@@ -285,6 +288,19 @@ def skill_reliability_pack(
     _: str = Depends(require_api_key),
 ) -> SkillReliabilityPackResult:
     return state.reliability.pack(request or SkillReliabilityPackRequest())
+
+
+@app.get("/providers/readiness", response_model=ProviderReadinessReport)
+def provider_readiness(_: str = Depends(require_api_key)) -> ProviderReadinessReport:
+    return state.provider_readiness.readiness(actor="api-provider-reviewer")
+
+
+@app.post("/providers/fallback-pack", response_model=ProviderFallbackPackResult)
+def provider_fallback_pack(
+    request: ProviderFallbackPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ProviderFallbackPackResult:
+    return state.provider_readiness.fallback_pack(request or ProviderFallbackPackRequest())
 
 
 @app.get("/prompt-governance/report", response_model=PromptGovernanceReport)

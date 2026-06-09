@@ -28,6 +28,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
+- Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, audit events, and ignored `data/prompt_governance/` artifacts.
 - Privacy Retention + Redaction Pack for scanning invocation/audit payloads and ad hoc JSON for local PII patterns, redacted previews, retention actions, deletion candidates, audit events, and ignored `data/privacy_packs/` artifacts.
 - Enterprise Readiness Scorecard + Portfolio Demo Pack that rolls governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into one executive artifact.
@@ -457,6 +458,19 @@ Get-ChildItem -Recurse -File data\reliability_packs -ErrorAction SilentlyContinu
 ```
 
 `GET /reliability/skills` returns deterministic local fixture evidence plus live invocation history for failure counts, consecutive failures, p95 latency, latency SLO breaches, circuit state, recent failure traces, and disable/re-enable recommendations. `PATCH /reliability/circuit-breakers/{skill_id}` opens, half-opens, or closes a local in-memory breaker and records audit evidence. `POST /reliability/pack` writes `reliability_pack_latest.json` and `.md` under ignored `data/reliability_packs/`. The Streamlit dashboard has a `Skill Reliability` view, and `python -m app.demo` prints reliability readiness plus the Reliability Pack path.
+
+## Provider Readiness And Fallbacks
+
+Validate local/mock default posture and optional hosted provider readiness before rollout:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers
+Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /providers/readiness` performs static local checks for `mock`, `openai`, and `azure_openai` provider posture without network calls or secret-value export. `POST /providers/fallback-pack` writes `provider_fallback_pack_latest.json` and `.md` under ignored `data/provider_packs/` with provider checks, credential-presence signals, fallback routes, re-enable gates, reviewer checklist, audit events, local proof commands, and limitations. The Streamlit dashboard has a `Provider Readiness` view, and `python -m app.demo` prints provider readiness plus the Provider Fallback Pack path.
 
 ## Prompt Governance And Injection Risk
 
