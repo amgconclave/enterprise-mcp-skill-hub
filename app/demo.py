@@ -19,6 +19,7 @@ from app.models import (
     MarketplaceRolloutPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
+    PromptGovernancePackRequest,
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
@@ -163,6 +164,10 @@ async def main() -> None:
     reliability_report = state.reliability.report()
     reliability_pack = state.reliability.pack(
         SkillReliabilityPackRequest(actor="demo-platform-sre")
+    )
+    prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
+    prompt_governance_pack = state.prompt_governance.pack(
+        PromptGovernancePackRequest(actor="demo-prompt-security")
     )
     enterprise_scorecard = await state.enterprise.scorecard()
     portfolio_demo_pack = await state.enterprise.portfolio_demo_pack(
@@ -310,6 +315,18 @@ async def main() -> None:
                 ],
                 "reliability pack path": reliability_pack.markdown_path,
                 "reliability_pack_path": reliability_pack.markdown_path,
+                "prompt governance readiness": prompt_governance_report.readiness_status,
+                "prompt_governance_readiness": prompt_governance_report.readiness_status,
+                "prompt governance findings": prompt_governance_report.summary["finding_count"],
+                "prompt_governance_findings": prompt_governance_report.summary["finding_count"],
+                "prompt governance approvals": prompt_governance_report.summary[
+                    "approval_required_count"
+                ],
+                "prompt_governance_approvals": prompt_governance_report.summary[
+                    "approval_required_count"
+                ],
+                "prompt governance pack path": prompt_governance_pack.markdown_path,
+                "prompt_governance_pack_path": prompt_governance_pack.markdown_path,
                 "enterprise readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness": enterprise_scorecard.readiness_status,
                 "enterprise_readiness_score": enterprise_scorecard.overall_score,

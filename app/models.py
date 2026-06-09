@@ -45,6 +45,8 @@ SkillIncidentSeverity = Literal["sev1", "sev2", "sev3"]
 CiDoctorCheckStatus = Literal["pass", "warn", "fail"]
 CircuitBreakerState = Literal["closed", "open", "half_open"]
 CircuitBreakerAction = Literal["open", "close", "half_open"]
+PromptGovernanceSeverity = Literal["none", "low", "medium", "high", "critical"]
+PromptGovernanceTargetType = Literal["prompt", "resource", "text", "sample"]
 
 
 class TokenUsage(BaseModel):
@@ -501,6 +503,64 @@ class SkillReliabilityPackRequest(BaseModel):
 
 
 class SkillReliabilityPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class PromptGovernanceValidationRequest(BaseModel):
+    content: str
+    target_id: str = "ad_hoc"
+    target_type: PromptGovernanceTargetType = "text"
+    actor: str = "prompt-security-reviewer"
+
+
+class PromptGovernanceFinding(BaseModel):
+    finding_id: str
+    target_type: PromptGovernanceTargetType
+    target_id: str
+    severity: PromptGovernanceSeverity
+    category: str
+    pattern: str
+    description: str
+    matched_excerpt: str
+    approval_required: bool
+    recommended_action: str
+    control: str
+
+
+class PromptGovernanceTargetResult(BaseModel):
+    target_type: PromptGovernanceTargetType
+    target_id: str
+    name: str
+    content_hash: str
+    max_severity: PromptGovernanceSeverity
+    approval_required: bool
+    finding_count: int
+    categories: list[str] = Field(default_factory=list)
+    findings: list[PromptGovernanceFinding] = Field(default_factory=list)
+
+
+class PromptGovernanceReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    targets: list[PromptGovernanceTargetResult]
+    high_risk_findings: list[PromptGovernanceFinding] = Field(default_factory=list)
+    approval_required_targets: list[JsonDict] = Field(default_factory=list)
+    endpoint_review: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class PromptGovernancePackRequest(BaseModel):
+    actor: str = "prompt-security-reviewer"
+
+
+class PromptGovernancePackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

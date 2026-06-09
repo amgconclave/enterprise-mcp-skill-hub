@@ -69,6 +69,11 @@ from app.models import (
     PortfolioInterviewPackResult,
     PromoteSkillRequest,
     PromptDefinition,
+    PromptGovernancePackRequest,
+    PromptGovernancePackResult,
+    PromptGovernanceReport,
+    PromptGovernanceTargetResult,
+    PromptGovernanceValidationRequest,
     RegisterSkillRequest,
     ReleaseExportResult,
     ReleasePreview,
@@ -249,6 +254,27 @@ def skill_reliability_pack(
     _: str = Depends(require_api_key),
 ) -> SkillReliabilityPackResult:
     return state.reliability.pack(request or SkillReliabilityPackRequest())
+
+
+@app.get("/prompt-governance/report", response_model=PromptGovernanceReport)
+def prompt_governance_report(_: str = Depends(require_api_key)) -> PromptGovernanceReport:
+    return state.prompt_governance.report(actor="api-prompt-governance")
+
+
+@app.post("/prompt-governance/validate", response_model=PromptGovernanceTargetResult)
+def prompt_governance_validate(
+    request: PromptGovernanceValidationRequest,
+    _: str = Depends(require_api_key),
+) -> PromptGovernanceTargetResult:
+    return state.prompt_governance.validate(request)
+
+
+@app.post("/prompt-governance/pack", response_model=PromptGovernancePackResult)
+def prompt_governance_pack(
+    request: PromptGovernancePackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> PromptGovernancePackResult:
+    return state.prompt_governance.pack(request or PromptGovernancePackRequest())
 
 
 @app.get("/enterprise/readiness-scorecard", response_model=EnterpriseReadinessScorecard)

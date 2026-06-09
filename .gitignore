@@ -17,6 +17,7 @@ data/tenant_sandboxes/
 data/marketplace_packs/
 data/usage_packs/
 data/reliability_packs/
+data/prompt_governance/
 data/portfolio_demo/
 data/portfolio_packs/
 data/portfolio_interview/
