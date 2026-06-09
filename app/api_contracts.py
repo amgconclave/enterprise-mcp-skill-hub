@@ -1,0 +1,824 @@
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter, defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from app.models import (
+    ApiContractAuditResult,
+    ApiContractCheck,
+    ApiReviewerCollectionRequest,
+    ApiReviewerCollectionResult,
+    CiDoctorCheckStatus,
+    JsonDict,
+    SecurityReadinessStatus,
+)
+from app.utils import new_trace_id, utc_now
+
+
+class ApiContractService:
+    AUDIT_ID = "api_contract_audit_latest"
+    COLLECTION_ID = "reviewer_collection_latest"
+
+    IMPORTANT_ENDPOINTS = [
+        ("POST", "/auth/demo-token"),
+        ("GET", "/health"),
+        ("GET", "/skills"),
+        ("POST", "/skills/{skill_id}/invoke"),
+        ("GET", "/mcp/tools"),
+        ("GET", "/mcp/resources"),
+        ("GET", "/mcp/prompts"),
+        ("GET", "/marketplace/catalog"),
+        ("POST", "/marketplace/rollout-pack"),
+        ("GET", "/usage/analytics"),
+        ("POST", "/usage/chargeback-pack"),
+        ("GET", "/ops/smoke-matrix"),
+        ("POST", "/ops/launch-checklist"),
+        ("GET", "/ui/dashboard-smoke"),
+        ("GET", "/artifacts/inventory"),
+        ("GET", "/api/contract-audit"),
+        ("POST", "/api/reviewer-collection"),
+        ("GET", "/handoff/final-audit"),
+        ("POST", "/handoff/final-pack"),
+        ("GET", "/runtime/demo-readiness"),
+        ("POST", "/runtime/demo-pack"),
+    ]
+
+    DEMO_FLOW_ENDPOINTS = [
+        ("POST", "/agents/run"),
+        ("POST", "/policy/simulate"),
+        ("POST", "/workflows/{template_id}/simulate"),
+        ("GET", "/conformance/report"),
+        ("POST", "/evidence/export"),
+        ("POST", "/releases/export"),
+        ("POST", "/ops/launch-checklist"),
+        ("POST", "/reviewer/walkthrough-pack"),
+        ("POST", "/artifacts/readme-checklist"),
+        ("GET", "/marketplace/catalog"),
+        ("POST", "/marketplace/rollout-pack"),
+        ("GET", "/usage/analytics"),
+        ("POST", "/usage/chargeback-pack"),
+        ("POST", "/ui/verification-pack"),
+        ("GET", "/api/contract-audit"),
+        ("POST", "/api/reviewer-collection"),
+    ]
+
+    def __init__(
+        self,
+        app_state: Any,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "api_contracts"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def contract_audit(self) -> ApiContractAuditResult:
+        routes = self._route_inventory()
+        route_keys = {(route["method"], route["path"]) for route in routes}
+        docs_coverage = self._docs_api_coverage(route_keys)
+        dashboard_alignment = self._dashboard_smoke_alignment(route_keys)
+        artifact_coverage = self._generated_artifact_endpoint_coverage(route_keys)
+        demo_coverage = self._demo_flow_endpoint_coverage(route_keys)
+        mcp_inventory = self._mcp_inventory()
+        mcp_coverage = self._mcp_coverage(mcp_inventory)
+        missing_docs = [
+            f"{item['method']} {item['path']} is missing from docs/api.md."
+            for item in docs_coverage
+            if item["important"] and not item["docs_api_mentioned"]
+        ]
+        duplicate_deprecated_warnings = self._deprecated_duplicate_route_warnings(routes)
+        checks = self._checks(
+            routes,
+            docs_coverage,
+            dashboard_alignment,
+            artifact_coverage,
+            demo_coverage,
+            mcp_inventory,
+            mcp_coverage,
+            missing_docs,
+            duplicate_deprecated_warnings,
+        )
+        fail_count = sum(1 for check in checks if check.status == "fail")
+        warn_count = sum(1 for check in checks if check.status == "warn")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if fail_count:
+            readiness_status = "blocked"
+        elif warn_count:
+            readiness_status = "needs_review"
+        score = self._score(checks)
+        protected_count = sum(1 for route in routes if route["auth_required"])
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "route_count": len(routes),
+            "protected_endpoint_count": protected_count,
+            "important_endpoint_count": len(docs_coverage),
+            "docs_api_missing_count": len(missing_docs),
+            "dashboard_smoke_aligned": dashboard_alignment["aligned"],
+            "generated_artifact_endpoint_count": len(artifact_coverage),
+            "demo_flow_endpoint_count": len(demo_coverage),
+            "mcp_tool_count": mcp_inventory["tool_count"],
+            "mcp_resource_count": mcp_inventory["resource_count"],
+            "mcp_prompt_count": mcp_inventory["prompt_count"],
+            "warning_count": warn_count,
+            "fail_count": fail_count,
+            "artifact_root": str(self.output_dir),
+        }
+        return ApiContractAuditResult(
+            audit_id=self.AUDIT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=score,
+            summary=summary,
+            checks=checks,
+            openapi_route_count=len(routes),
+            auth_protected_endpoint_count=protected_count,
+            endpoint_inventory_by_domain=self._group_routes_by_domain(routes),
+            docs_api_coverage=docs_coverage,
+            dashboard_smoke_alignment=dashboard_alignment,
+            generated_artifact_endpoint_coverage=artifact_coverage,
+            demo_flow_endpoint_coverage=demo_coverage,
+            mcp_inventory=mcp_inventory,
+            mcp_coverage=mcp_coverage,
+            missing_docs_warnings=missing_docs,
+            deprecated_duplicate_route_warnings=duplicate_deprecated_warnings,
+            local_only_limitations=self._limitations(),
+            verification_commands=self._verification_commands(),
+        )
+
+    def reviewer_collection(
+        self,
+        request: ApiReviewerCollectionRequest | None = None,
+    ) -> ApiReviewerCollectionResult:
+        request = request or ApiReviewerCollectionRequest()
+        audit = self.contract_audit()
+        bundle = {
+            "collection_id": self.COLLECTION_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": audit.readiness_status,
+            "contract_audit": audit.model_dump(mode="json"),
+            "endpoint_inventory_grouped_by_domain": audit.endpoint_inventory_by_domain,
+            "mcp_inventory": audit.mcp_inventory,
+            "sample_commands": self._sample_commands(),
+            "demo_token_flow": self._demo_token_flow(),
+            "mcp_cli_commands": self._mcp_cli_commands(),
+            "expected_status_codes": self._expected_status_codes(),
+            "auth_notes": self._auth_notes(),
+            "generated_artifact_endpoints": audit.generated_artifact_endpoint_coverage,
+            "one_command_verification_order": self._one_command_verification_order(),
+            "recruiter_engineer_explanation": self._recruiter_engineer_explanation(audit),
+            "limitations": audit.local_only_limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.COLLECTION_ID}.json"
+        markdown_path = self.output_dir / f"{self.COLLECTION_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "api.reviewer_collection_exported",
+            "api_reviewer_collection",
+            self.COLLECTION_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ApiReviewerCollectionResult(
+            collection_id=self.COLLECTION_ID,
+            generated_at=utc_now(),
+            readiness_status=audit.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "route_count": audit.openapi_route_count,
+                "protected_endpoint_count": audit.auth_protected_endpoint_count,
+                "mcp_tool_count": audit.mcp_inventory["tool_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _route_inventory(self) -> list[JsonDict]:
+        source = self._read_text(Path("app") / "main.py")
+        pattern = re.compile(
+            r"@app\.(get|post|patch|put|delete)\(\s*[\"']([^\"']+)[\"'][^\n]*\n(?P<body>.*?)(?=\n@app\.|\Z)",
+            re.DOTALL,
+        )
+        routes = []
+        for method, path, body in pattern.findall(source):
+            function_match = re.search(r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)|async\s+def\s+([a-zA-Z_][a-zA-Z0-9_]*)", body)
+            function_name = ""
+            if function_match:
+                function_name = next(group for group in function_match.groups() if group)
+            routes.append(
+                {
+                    "method": method.upper(),
+                    "path": path,
+                    "domain": self._domain_for(path),
+                    "function": function_name,
+                    "auth_required": "Depends(require_api_key)" in body,
+                    "openapi_inferred": True,
+                    "docs_api_mentioned": path in self._read_text(Path("docs") / "api.md"),
+                    "deprecated_hint": "deprecated" in body.lower() or "deprecated" in path.lower(),
+                }
+            )
+        return sorted(routes, key=lambda route: (route["domain"], route["path"], route["method"]))
+
+    def _group_routes_by_domain(self, routes: list[JsonDict]) -> JsonDict:
+        grouped: dict[str, list[JsonDict]] = defaultdict(list)
+        for route in routes:
+            grouped[route["domain"]].append(route)
+        return {
+            domain: {
+                "count": len(items),
+                "protected_count": sum(1 for item in items if item["auth_required"]),
+                "endpoints": items,
+            }
+            for domain, items in sorted(grouped.items())
+        }
+
+    def _docs_api_coverage(self, route_keys: set[tuple[str, str]]) -> list[JsonDict]:
+        docs = self._read_text(Path("docs") / "api.md")
+        readme = self._read_text(Path("README.md"))
+        rows = []
+        for method, path in self.IMPORTANT_ENDPOINTS:
+            rows.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "important": True,
+                    "implemented": (method, path) in route_keys,
+                    "docs_api_mentioned": path in docs,
+                    "readme_mentioned": path in readme,
+                }
+            )
+        return rows
+
+    def _dashboard_smoke_alignment(self, route_keys: set[tuple[str, str]]) -> JsonDict:
+        smoke = self.app_state.ui_verification.dashboard_smoke()
+        endpoint_refs = smoke.endpoint_references
+        missing_routes = [
+            f"{endpoint['method']} {endpoint['path']}"
+            for endpoint in endpoint_refs
+            if (endpoint["method"], endpoint["path"]) not in route_keys
+        ]
+        contract_refs = [
+            endpoint
+            for endpoint in endpoint_refs
+            if endpoint["path"] in {"/api/contract-audit", "/api/reviewer-collection"}
+        ]
+        return {
+            "smoke_id": smoke.smoke_id,
+            "readiness_status": smoke.readiness_status,
+            "aligned": not missing_routes and len(contract_refs) == 2,
+            "endpoint_reference_count": len(endpoint_refs),
+            "missing_route_references": missing_routes,
+            "contract_endpoint_references": contract_refs,
+            "generated_artifact_tabs": [
+                tab
+                for tab in smoke.generated_artifact_tabs
+                if tab["artifact_dir"] == "data/api_contracts/"
+            ],
+        }
+
+    def _generated_artifact_endpoint_coverage(self, route_keys: set[tuple[str, str]]) -> list[JsonDict]:
+        rows = []
+        for item in self.app_state.artifacts.inventory().items:
+            if not item.producer_endpoint:
+                continue
+            method, path = item.producer_endpoint.split(" ", 1)
+            rows.append(
+                {
+                    "artifact_id": item.artifact_id,
+                    "name": item.name,
+                    "producer_endpoint": item.producer_endpoint,
+                    "directory": item.directory,
+                    "ignored_status": item.ignored_status,
+                    "implemented": (method, path) in route_keys,
+                    "generated": item.generated,
+                }
+            )
+        return rows
+
+    def _demo_flow_endpoint_coverage(self, route_keys: set[tuple[str, str]]) -> list[JsonDict]:
+        demo_source = self._read_text(Path("app") / "demo.py")
+        return [
+            {
+                "method": method,
+                "path": path,
+                "implemented": (method, path) in route_keys,
+                "demo_mentions_path": path in demo_source,
+                "demo_invokes_service": self._demo_service_hint(path) in demo_source,
+            }
+            for method, path in self.DEMO_FLOW_ENDPOINTS
+        ]
+
+    def _mcp_inventory(self) -> JsonDict:
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        return {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema_keys": sorted(tool.input_schema.get("properties", {}).keys()),
+                    "output_schema_keys": sorted(tool.output_schema.get("properties", {}).keys()),
+                }
+                for tool in tools
+            ],
+            "resources": [
+                {
+                    "uri": resource.uri,
+                    "name": resource.name,
+                    "mime_type": resource.mime_type,
+                    "content_ref": resource.content_ref,
+                }
+                for resource in resources
+            ],
+            "prompts": [
+                {
+                    "id": prompt.id,
+                    "name": prompt.name,
+                    "arguments": [argument.model_dump(mode="json") for argument in prompt.arguments],
+                }
+                for prompt in prompts
+            ],
+            "cli_commands": self._mcp_cli_commands(),
+        }
+
+    def _mcp_coverage(self, mcp_inventory: JsonDict) -> JsonDict:
+        docs = self._read_text(Path("docs") / "mcp.md") + "\n" + self._read_text(Path("docs") / "api.md")
+        readme = self._read_text(Path("README.md"))
+        commands = self._mcp_cli_commands()
+        return {
+            "tools_endpoint_documented": "/mcp/tools" in docs,
+            "resources_endpoint_documented": "/mcp/resources" in docs,
+            "prompts_endpoint_documented": "/mcp/prompts" in docs,
+            "cli_commands_documented": {command: command in docs or command in readme for command in commands},
+            "all_inventory_non_empty": all(
+                mcp_inventory[key] > 0 for key in ("tool_count", "resource_count", "prompt_count")
+            ),
+        }
+
+    def _checks(
+        self,
+        routes: list[JsonDict],
+        docs_coverage: list[JsonDict],
+        dashboard_alignment: JsonDict,
+        artifact_coverage: list[JsonDict],
+        demo_coverage: list[JsonDict],
+        mcp_inventory: JsonDict,
+        mcp_coverage: JsonDict,
+        missing_docs: list[str],
+        duplicate_deprecated_warnings: list[str],
+    ) -> list[ApiContractCheck]:
+        protected_count = sum(1 for route in routes if route["auth_required"])
+        missing_important = [
+            f"{item['method']} {item['path']}" for item in docs_coverage if not item["implemented"]
+        ]
+        artifact_missing = [
+            item["producer_endpoint"] for item in artifact_coverage if not item["implemented"]
+        ]
+        demo_missing = [f"{item['method']} {item['path']}" for item in demo_coverage if not item["implemented"]]
+        return [
+            self._check(
+                "openapi_route_count",
+                "openapi",
+                "OpenAPI route count",
+                "pass" if routes else "fail",
+                f"Found {len(routes)} FastAPI route decorator(s) in app/main.py.",
+                [f"{route['method']} {route['path']}" for route in routes[:10]],
+                "Restore FastAPI route declarations in app/main.py.",
+            ),
+            self._check(
+                "auth_protected_endpoint_count",
+                "auth",
+                "Auth-protected endpoint count",
+                "pass" if protected_count >= 1 else "fail",
+                f"Found {protected_count} endpoint(s) guarded by X-API-Key dependency.",
+                [f"{route['method']} {route['path']}" for route in routes if route["auth_required"]][:10],
+                "Protect non-public API endpoints with require_api_key.",
+            ),
+            self._check(
+                "important_endpoint_docs_api_coverage",
+                "docs",
+                "docs/api coverage for important endpoints",
+                "pass" if not missing_docs and not missing_important else "warn",
+                f"{len(missing_docs)} important endpoint doc mention(s) missing; {len(missing_important)} important route(s) missing.",
+                [f"{item['method']} {item['path']}" for item in docs_coverage if item["docs_api_mentioned"]],
+                "Add missing important endpoint mentions to docs/api.md.",
+            ),
+            self._check(
+                "dashboard_smoke_alignment",
+                "dashboard",
+                "Dashboard smoke alignment",
+                "pass" if dashboard_alignment["aligned"] else "warn",
+                f"Dashboard smoke references {dashboard_alignment['endpoint_reference_count']} endpoint(s) and includes API Contract endpoints: {len(dashboard_alignment['contract_endpoint_references'])}.",
+                [endpoint["path"] for endpoint in dashboard_alignment["contract_endpoint_references"]],
+                "Add API Contract endpoints and artifact tab to DashboardSmokeService.",
+            ),
+            self._check(
+                "generated_artifact_endpoint_coverage",
+                "artifacts",
+                "Generated artifact endpoint coverage",
+                "pass" if not artifact_missing else "warn",
+                f"{len(artifact_coverage)} generated artifact producer endpoint(s) checked; {len(artifact_missing)} missing route(s).",
+                [item["producer_endpoint"] for item in artifact_coverage if item["implemented"]],
+                "Keep artifact inventory producer endpoints aligned with FastAPI routes.",
+            ),
+            self._check(
+                "demo_flow_endpoint_coverage",
+                "demo",
+                "Demo flow endpoint coverage",
+                "pass" if not demo_missing else "warn",
+                f"{len(demo_coverage)} demo flow endpoint(s) checked; {len(demo_missing)} missing route(s).",
+                [f"{item['method']} {item['path']}" for item in demo_coverage if item["implemented"]],
+                "Keep app/demo.py service flow aligned with published API endpoints.",
+            ),
+            self._check(
+                "mcp_tools_resources_prompts_coverage",
+                "mcp",
+                "MCP tools/resources/prompts coverage",
+                "pass" if mcp_coverage["all_inventory_non_empty"] else "fail",
+                f"Found {mcp_inventory['tool_count']} tool(s), {mcp_inventory['resource_count']} resource(s), and {mcp_inventory['prompt_count']} prompt(s).",
+                mcp_inventory["cli_commands"],
+                "Promote at least one skill and keep MCP resources/prompts registered.",
+            ),
+            self._check(
+                "missing_docs_warnings",
+                "docs",
+                "Missing docs warnings",
+                "pass" if not missing_docs else "warn",
+                f"{len(missing_docs)} important endpoint(s) are missing docs/api.md coverage.",
+                missing_docs[:10],
+                "Update docs/api.md for the missing endpoint(s).",
+            ),
+            self._check(
+                "deprecated_duplicate_route_warnings",
+                "routes",
+                "Deprecated or duplicate route warnings",
+                "pass" if not duplicate_deprecated_warnings else "warn",
+                f"{len(duplicate_deprecated_warnings)} deprecated or duplicate route warning(s) found.",
+                duplicate_deprecated_warnings[:10],
+                "Remove duplicates or mark deprecated routes clearly in docs.",
+            ),
+            self._check(
+                "local_only_limitations",
+                "runtime",
+                "Local-only limitations",
+                "pass",
+                f"{len(self._limitations())} local-only limitation(s) disclosed.",
+                self._limitations(),
+                None,
+            ),
+        ]
+
+    def _check(
+        self,
+        check_id: str,
+        category: str,
+        title: str,
+        status: CiDoctorCheckStatus,
+        detail: str,
+        evidence: list[str],
+        remediation: str | None,
+    ) -> ApiContractCheck:
+        return ApiContractCheck(
+            id=check_id,
+            category=category,
+            status=status,
+            title=title,
+            detail=detail,
+            evidence=evidence,
+            remediation=None if status == "pass" else remediation,
+        )
+
+    def _deprecated_duplicate_route_warnings(self, routes: list[JsonDict]) -> list[str]:
+        counts = Counter((route["method"], route["path"]) for route in routes)
+        warnings = [
+            f"Duplicate route declaration: {method} {path}"
+            for (method, path), count in counts.items()
+            if count > 1
+        ]
+        warnings.extend(
+            f"Deprecated route hint found: {route['method']} {route['path']}"
+            for route in routes
+            if route["deprecated_hint"]
+        )
+        return sorted(warnings)
+
+    def _expected_status_codes(self) -> list[JsonDict]:
+        return [
+            {"method": "POST", "path": "/auth/demo-token", "with_api_key": False, "expected_status": 200},
+            {"method": "GET", "path": "/health", "with_api_key": False, "expected_status": 200},
+            {"method": "GET", "path": "/skills", "with_api_key": False, "expected_status": 401},
+            {"method": "GET", "path": "/skills", "with_api_key": True, "expected_status": 200},
+            {"method": "GET", "path": "/api/contract-audit", "with_api_key": True, "expected_status": 200},
+            {"method": "GET", "path": "/marketplace/catalog", "with_api_key": True, "expected_status": 200},
+            {"method": "GET", "path": "/usage/analytics", "with_api_key": True, "expected_status": 200},
+            {
+                "method": "POST",
+                "path": "/usage/chargeback-pack",
+                "with_api_key": True,
+                "expected_status": 200,
+            },
+            {
+                "method": "POST",
+                "path": "/marketplace/rollout-pack",
+                "with_api_key": True,
+                "expected_status": 200,
+            },
+            {
+                "method": "POST",
+                "path": "/api/reviewer-collection",
+                "with_api_key": True,
+                "expected_status": 200,
+            },
+            {"method": "GET", "path": "/mcp/tools", "with_api_key": True, "expected_status": 200},
+            {"method": "GET", "path": "/mcp/resources", "with_api_key": True, "expected_status": 200},
+            {"method": "GET", "path": "/mcp/prompts", "with_api_key": True, "expected_status": 200},
+        ]
+
+    def _sample_commands(self) -> JsonDict:
+        return {
+            "powershell": [
+                "$token = Invoke-RestMethod http://localhost:8000/auth/demo-token -Method POST",
+                "$headers = @{ $token.header = $token.token }",
+                "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/mcp/tools -Headers $headers",
+            ],
+            "curl": [
+                "curl.exe -s -X POST http://localhost:8000/auth/demo-token",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-audit",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/catalog",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/rollout-pack",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/usage/analytics",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/usage/chargeback-pack",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/reviewer-collection",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/mcp/tools",
+            ],
+        }
+
+    def _demo_token_flow(self) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "command": "Invoke-RestMethod http://localhost:8000/auth/demo-token -Method POST",
+                "expected_status": 200,
+                "expected_output": "`token` and `header` fields.",
+            },
+            {
+                "step": 2,
+                "command": "$headers = @{ \"X-API-Key\" = \"dev-local-token\" }",
+                "expected_status": "local shell setup",
+                "expected_output": "Headers object for protected endpoints.",
+            },
+            {
+                "step": 3,
+                "command": "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+                "expected_status": 200,
+                "expected_output": "Structured API Contract audit JSON.",
+            },
+        ]
+
+    def _mcp_cli_commands(self) -> list[str]:
+        return [
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+        ]
+
+    def _auth_notes(self) -> list[str]:
+        return [
+            "`POST /auth/demo-token` and `GET /health` are public local demo endpoints.",
+            "All API Contract, MCP, skill, workflow, ops, artifact, and dashboard endpoints expect `X-API-Key`.",
+            "The default local token is `dev-local-token`; `.env` can override it through `API_KEY`.",
+            "401 on a protected endpoint means the reviewer should refresh `$headers` from the demo-token flow.",
+        ]
+
+    def _one_command_verification_order(self) -> list[JsonDict]:
+        commands = [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
+            'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+        return [
+            {"step": index, "command": command, "expected": self._expected_for_command(command)}
+            for index, command in enumerate(commands, start=1)
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [item["command"] for item in self._one_command_verification_order()]
+
+    def _recruiter_engineer_explanation(self, audit: ApiContractAuditResult) -> JsonDict:
+        return {
+            "recruiter": (
+                "The API Contract audit turns the repo into a self-checking portfolio artifact: "
+                f"{audit.openapi_route_count} FastAPI routes, {audit.mcp_inventory['tool_count']} MCP tools, "
+                f"{audit.mcp_inventory['resource_count']} resources, and {audit.mcp_inventory['prompt_count']} prompts "
+                "are summarized with copy-ready local commands."
+            ),
+            "engineer": (
+                "The Reviewer Collection is generated from route decorators, docs, dashboard smoke wiring, "
+                "artifact inventory, demo flow expectations, and the live in-process MCP adapter. "
+                "It should be regenerated from a fresh clone and compared against pytest, ruff, eval, conformance, "
+                "dashboard smoke, demo, and MCP CLI output."
+            ),
+        }
+
+    def _limitations(self) -> list[str]:
+        return [
+            "OpenAPI route count is source-derived from FastAPI decorators in app/main.py; it does not start a server.",
+            "Docs coverage checks route string mentions in docs/api.md and README.md rather than semantic prose quality.",
+            "Dashboard alignment uses deterministic Streamlit source smoke checks; it does not launch a browser.",
+            "Generated artifact coverage confirms producer endpoint wiring and ignored folders, not artifact freshness in CI.",
+            "The default provider is local/mock; OpenAI and Azure OpenAI remain optional integrations.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        audit = bundle["contract_audit"]
+        lines = [
+            "# API Contract Reviewer Collection",
+            "",
+            f"- Collection ID: `{bundle['collection_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- OpenAPI route count: `{audit['openapi_route_count']}`",
+            f"- Auth-protected endpoint count: `{audit['auth_protected_endpoint_count']}`",
+            "",
+            "## Contract Checks",
+            "",
+            "| Status | Category | Check | Detail |",
+            "| --- | --- | --- | --- |",
+            *[
+                f"| `{check['status']}` | {check['category']} | {check['title']} | {check['detail']} |"
+                for check in audit["checks"]
+            ],
+            "",
+            "## Endpoint Inventory By Domain",
+            "",
+            *[
+                f"- {domain}: `{group['count']}` endpoints, `{group['protected_count']}` protected"
+                for domain, group in bundle["endpoint_inventory_grouped_by_domain"].items()
+            ],
+            "",
+            "## Sample PowerShell Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["sample_commands"]["powershell"]],
+            "",
+            "## Sample Curl Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["sample_commands"]["curl"]],
+            "",
+            "## Demo Token Flow",
+            "",
+            *[
+                f"- {item['step']}. `{item['command']}` -> `{item['expected_status']}`"
+                for item in bundle["demo_token_flow"]
+            ],
+            "",
+            "## MCP CLI Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["mcp_cli_commands"]],
+            "",
+            "## Expected Status Codes",
+            "",
+            *[
+                f"- `{item['method']} {item['path']}` with_api_key=`{item['with_api_key']}` -> `{item['expected_status']}`"
+                for item in bundle["expected_status_codes"]
+            ],
+            "",
+            "## Generated Artifact Endpoints",
+            "",
+            *[
+                f"- {item['name']}: `{item['producer_endpoint']}` -> `{item['directory']}`"
+                for item in bundle["generated_artifact_endpoints"]
+            ],
+            "",
+            "## One-Command Verification Order",
+            "",
+            *[
+                f"- {item['step']}. `{item['command']}` - {item['expected']}"
+                for item in bundle["one_command_verification_order"]
+            ],
+            "",
+            "## Recruiter And Engineer Explanation",
+            "",
+            f"- Recruiter: {bundle['recruiter_engineer_explanation']['recruiter']}",
+            f"- Engineer: {bundle['recruiter_engineer_explanation']['engineer']}",
+            "",
+            "## Auth Notes",
+            "",
+            *[f"- {note}" for note in bundle["auth_notes"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _domain_for(self, path: str) -> str:
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            return "root"
+        if parts[0] == "api":
+            return "api contract"
+        return parts[0].replace("-", " ")
+
+    def _demo_service_hint(self, path: str) -> str:
+        hints = {
+            "/agents/run": "state.agent.run",
+            "/policy/simulate": "state.policy.simulate",
+            "/workflows/{template_id}/simulate": "state.workflows.simulate",
+            "/conformance/report": "state.conformance.generate",
+            "/evidence/export": "state.evidence.export",
+            "/releases/export": "state.releases.export",
+            "/ops/launch-checklist": "state.smoke.launch_checklist",
+            "/reviewer/walkthrough-pack": "state.reviewer.walkthrough_pack",
+            "/artifacts/readme-checklist": "state.artifacts.readme_checklist",
+            "/ui/verification-pack": "state.ui_verification.verification_pack",
+            "/marketplace/catalog": "state.marketplace.catalog",
+            "/marketplace/rollout-pack": "state.marketplace.rollout_pack",
+            "/usage/analytics": "state.usage.analytics",
+            "/usage/chargeback-pack": "state.usage.chargeback_pack",
+            "/api/contract-audit": "state.api_contracts.contract_audit",
+            "/api/reviewer-collection": "state.api_contracts.reviewer_collection",
+        }
+        return hints.get(path, path)
+
+    def _expected_for_command(self, command: str) -> str:
+        if "pytest" in command:
+            return "All local tests pass."
+        if "ruff" in command:
+            return "No lint findings across app, tests, and dashboard."
+        if "run_eval" in command:
+            return "Golden eval and validate-only paths pass."
+        if "run_conformance" in command:
+            return "MCP conformance report passes for promoted skills."
+        if "dashboard_smoke" in command:
+            return "Dashboard API Contract tab and endpoint references are wired."
+        if "app.demo" in command:
+            return "Demo prints contract audit status and Reviewer Collection path."
+        if "mcp_server" in command:
+            return "MCP CLI prints non-empty tools/resources/prompts JSON."
+        if command.startswith("rg "):
+            return "Source, docs, dashboard, tests, and scripts mention the contract surface."
+        return "Generated data/api_contracts artifacts are present after POST /api/reviewer-collection."
+
+    def _score(self, checks: list[ApiContractCheck]) -> int:
+        total = len(checks) or 1
+        passed = sum(1 for check in checks if check.status == "pass")
+        score = round(100 * passed / total)
+        score -= min(35, 10 * sum(1 for check in checks if check.status == "fail"))
+        score -= min(20, 3 * sum(1 for check in checks if check.status == "warn"))
+        return max(0, min(100, score))
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._root(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8", errors="ignore")
+
+    def _root(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+    def _file_row(self, path: Path) -> JsonDict:
+        stat = path.stat()
+        return {
+            "path": str(path),
+            "length": stat.st_size,
+            "last_write_time": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+        }

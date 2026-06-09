@@ -194,7 +194,7 @@ def test_mcp_resources_prompts_and_skill_catalog(client: TestClient, auth_header
     prompts = client.get("/mcp/prompts", headers=auth_headers)
     assert prompts.status_code == 200
     prompt_ids = {prompt["id"] for prompt in prompts.json()}
-    assert {"support_reply", "rfp_answer", "meeting_summary"} == prompt_ids
+    assert {"support_reply", "rfp_answer", "meeting_summary", "workflow_composition"} == prompt_ids
 
 
 def test_demo_agent_selects_multiple_governed_skills_and_records_metrics(

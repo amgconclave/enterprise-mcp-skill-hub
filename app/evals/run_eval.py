@@ -7,7 +7,7 @@ import time
 
 from app.bootstrap import BUILTIN_MANIFESTS, create_state
 from app.evals.golden import GoldenEvalRunner
-from app.models import SkillManifest
+from app.models import SkillManifest, TenantPolicySimulationRequest, TenantSandboxExportRequest
 
 
 async def run(validate_only: bool = False) -> dict:
@@ -78,6 +78,20 @@ async def run(validate_only: bool = False) -> dict:
     summary = state.metrics.summary()
     governance_report = state.governance.generate()
     golden_result = await GoldenEvalRunner(state).run()
+    capacity_forecast = await state.capacity.forecast()
+    capacity_guardrails = state.capacity.guardrails()
+    capacity_export = await state.capacity.plan_export()
+    tenant_simulation = state.tenant_sandbox.simulate(
+        TenantPolicySimulationRequest(
+            tenant="healthcare",
+            role="reviewer",
+            environment="production",
+            data_sensitivity="confidential",
+        )
+    )
+    tenant_export = state.tenant_sandbox.export(
+        TenantSandboxExportRequest(actor="eval-tenant-policy-reviewer")
+    )
     passed = (
         valid == len(BUILTIN_MANIFESTS)
         and not invalid_result.valid
@@ -90,6 +104,11 @@ async def run(validate_only: bool = False) -> dict:
         and promotion_audited
         and governance_report.status == "pass"
         and golden_result.failed_cases == 0
+        and capacity_forecast.per_skill
+        and capacity_guardrails.status == "defaulted"
+        and capacity_export.readiness_status in {"ready", "needs_review", "blocked"}
+        and tenant_simulation.impacted_mcp_tools
+        and tenant_export.readiness_status in {"ready", "needs_review", "blocked"}
         and len(agent_run.selected_skills) >= 2
         and (validate_only or success_count == len(BUILTIN_MANIFESTS))
     )
@@ -108,6 +127,13 @@ async def run(validate_only: bool = False) -> dict:
         "golden_eval_score": golden_result.score,
         "golden_eval_passed_cases": golden_result.passed_cases,
         "golden_eval_failed_cases": golden_result.failed_cases,
+        "capacity_forecast_readiness": capacity_forecast.readiness_status,
+        "capacity_forecast_skill_count": len(capacity_forecast.per_skill),
+        "capacity_guardrails_status": capacity_guardrails.status,
+        "capacity_plan_json_path": capacity_export.json_path,
+        "tenant_sandbox_readiness": tenant_export.readiness_status,
+        "tenant_sandbox_json_path": tenant_export.json_path,
+        "tenant_sandbox_impacted_tool_count": len(tenant_simulation.impacted_mcp_tools),
         "built_in_skill_invocation_success_count": success_count,
         "demo_agent_selected_skill_count": len(agent_run.selected_skills),
         "average_invocation_latency": summary.average_latency_ms or elapsed_ms,

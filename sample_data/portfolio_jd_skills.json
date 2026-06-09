@@ -1,0 +1,19 @@
+{
+  "title": "Portfolio Evidence and Interview Pack JD coverage",
+  "skills": [
+    "MCP tools/resources/prompts",
+    "FastAPI admin API",
+    "Skill manifests and schema validation",
+    "Governance, audit logs, enable/disable/versioning",
+    "Workflow templates and conformance evals",
+    "Release preview and capacity guardrails",
+    "Tenant policy sandbox and incident runbook",
+    "Enterprise readiness, smoke matrix, and launch checklist",
+    "Portfolio Evidence and Interview Pack"
+  ],
+  "artifact_targets": [
+    "data/portfolio_packs/interview_pack_latest.json",
+    "data/portfolio_packs/interview_pack_latest.md",
+    "data/portfolio_interview/"
+  ]
+}

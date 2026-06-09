@@ -1,4 +1,4 @@
-.PHONY: install test dev mcp dashboard demo validate-skills eval lint
+.PHONY: install test dev mcp dashboard demo validate-skills eval conformance lint
 
 install:
 	python -m pip install -r requirements-dev.txt
@@ -26,3 +26,6 @@ validate-skills:
 
 eval:
 	python -m app.evals.run_eval
+
+conformance:
+	python -m app.evals.run_conformance

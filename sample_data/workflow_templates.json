@@ -1,0 +1,59 @@
+[
+  {
+    "id": "support_triage",
+    "name": "Support Triage",
+    "description": "Classify a customer support request, retrieve approved context, summarize the case, and create handoff actions.",
+    "ordered_skill_ids": [
+      "classify_request",
+      "search_knowledge_base",
+      "summarize_document",
+      "generate_action_items"
+    ],
+    "required_role": "agent",
+    "default_sensitivity": "internal",
+    "expected_outputs": [
+      "request_category",
+      "priority",
+      "approved_context",
+      "case_summary",
+      "handoff_actions"
+    ]
+  },
+  {
+    "id": "rfp_answer_pack",
+    "name": "RFP Answer Pack",
+    "description": "Build a governed answer pack for procurement questions with classification, approved sources, summary, and entity/risk extraction.",
+    "ordered_skill_ids": [
+      "classify_request",
+      "search_knowledge_base",
+      "summarize_document",
+      "extract_entities"
+    ],
+    "required_role": "reviewer",
+    "default_sensitivity": "confidential",
+    "expected_outputs": [
+      "answer_outline",
+      "approved_sources",
+      "risk_notes",
+      "named_entities"
+    ]
+  },
+  {
+    "id": "meeting_to_actions",
+    "name": "Meeting To Actions",
+    "description": "Turn meeting notes into a concise summary, extracted entities, risks, and owner-based action items.",
+    "ordered_skill_ids": [
+      "summarize_document",
+      "extract_entities",
+      "generate_action_items"
+    ],
+    "required_role": "agent",
+    "default_sensitivity": "internal",
+    "expected_outputs": [
+      "meeting_summary",
+      "decisions_and_risks",
+      "entities",
+      "owner_actions"
+    ]
+  }
+]

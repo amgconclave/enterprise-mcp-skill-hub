@@ -9,7 +9,39 @@ import yaml
 
 from app.bootstrap import create_state
 from app.evals.golden import GoldenEvalRunner, load_cases
-from app.models import PolicyInvocationContext, PolicySimulationRequest, SkillManifest
+from app.models import (
+    ApiReviewerCollectionRequest,
+    ArtifactReadmeChecklistRequest,
+    AuditPackRequest,
+    AuditQueryRequest,
+    BlastRadiusRequest,
+    CapacityForecastRequest,
+    CapacityGuardrails,
+    CapacityGuardrailsRequest,
+    CapacityPlanExportRequest,
+    ComplianceAttestationRequest,
+    DependencyReportRequest,
+    EnterprisePortfolioDemoPackRequest,
+    FinalHandoffPackRequest,
+    GitPushPlanRequest,
+    LaunchChecklistRequest,
+    MarketplaceRolloutPackRequest,
+    PolicyInvocationContext,
+    PolicySimulationRequest,
+    PortfolioInterviewPackRequest,
+    ReleasePublishPackRequest,
+    ReviewerWalkthroughPackRequest,
+    RuntimeDemoPackRequest,
+    SkillIncidentDrillRequest,
+    SkillIncidentRunbookRequest,
+    SkillManifest,
+    TenantPolicySimulationRequest,
+    TenantSandboxExportRequest,
+    UiVerificationPackRequest,
+    UsageChargebackPackRequest,
+    WorkflowSimulationRequest,
+    WorkflowTemplate,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "sample_data" / "manifests"
@@ -37,8 +69,32 @@ view = st.sidebar.radio(
         "Promote Skill",
         "Invoke Skill",
         "Policy Simulator",
+        "Tenant Policy Sandbox",
+        "Skill Marketplace",
+        "Skill Usage Analytics",
+        "Enterprise Readiness",
+        "Portfolio Pack",
+        "Reviewer Quickstart",
+        "Artifact Inventory",
+        "API Contract",
+        "Launch Checklist",
+        "CI Doctor / Audit Pack",
+        "UI Verification",
+        "Git Readiness",
+        "Runtime Demo",
+        "Final Handoff",
+        "Release Pack",
+        "Workflow Templates / Composition",
+        "Workflow Review Queue",
         "Demo Agent",
         "Evaluation Lab",
+        "Conformance / Replay",
+        "Security Evidence / Audit",
+        "Audit Query / Attestation",
+        "Release Preview / Release Notes",
+        "Capacity Forecast / Guardrails",
+        "Dependency Map / Blast Radius",
+        "Skill Incident Drill / Runbook",
         "MCP Inspector",
         "Governance Report",
         "Metrics",
@@ -191,6 +247,1016 @@ elif view == "Policy Simulator":
         hide_index=True,
     )
 
+elif view == "Tenant Policy Sandbox":
+    st.subheader("Tenant Policy Sandbox")
+    st.caption("Simulate tenant, role, environment, and sensitivity policy over MCP skills and workflows.")
+    col_tenant, col_role = st.columns(2)
+    tenant = col_tenant.selectbox(
+        "Tenant",
+        ["healthcare", "fintech", "public_sector", "internal_demo"],
+    )
+    role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+    col_env, col_sensitivity = st.columns(2)
+    environment = col_env.selectbox("Environment", ["local", "staging", "production"], index=0)
+    sensitivity = col_sensitivity.selectbox("Data sensitivity", ["public", "internal", "confidential"], index=1)
+    tenant_request = TenantPolicySimulationRequest(
+        tenant=tenant,
+        role=role,
+        environment=environment,
+        data_sensitivity=sensitivity,
+    )
+    simulation = state.tenant_sandbox.simulate(tenant_request)
+    col_ready, col_allowed, col_review, col_blocked = st.columns(4)
+    col_ready.metric("Readiness", simulation.readiness_status.upper())
+    col_allowed.metric("Allowed skills", simulation.summary["allowed_skill_count"])
+    col_review.metric("Review-required", simulation.summary["review_required_skill_count"])
+    col_blocked.metric("Blocked skills", simulation.summary["blocked_skill_count"])
+
+    tab_matrix, tab_skills, tab_workflows, tab_mcp, tab_export = st.tabs(
+        ["Matrix", "Skills", "Workflows", "MCP Impact", "Export"]
+    )
+    with tab_matrix:
+        st.dataframe(state.tenant_sandbox.policy_matrix(), use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"guardrail": guardrail} for guardrail in simulation.recommended_tenant_guardrails],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_skills:
+        st.dataframe(
+            [
+                {
+                    "decision": item.decision,
+                    "skill": item.id,
+                    "rules": ", ".join(item.matched_rules),
+                    "tools": ", ".join(item.mcp_tools),
+                    "prompts": ", ".join(item.mcp_prompts),
+                }
+                for item in (
+                    simulation.allowed_skills
+                    + simulation.review_required_skills
+                    + simulation.blocked_skills
+                )
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(simulation.excluded_skills)
+    with tab_workflows:
+        st.dataframe(
+            [
+                {
+                    "decision": item.decision,
+                    "workflow": item.id,
+                    "skills": " -> ".join(item.related_skills),
+                    "rules": ", ".join(item.matched_rules),
+                }
+                for item in (
+                    simulation.allowed_workflows
+                    + simulation.review_required_workflows
+                    + simulation.blocked_workflows
+                )
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(simulation.excluded_workflows)
+    with tab_mcp:
+        st.json(
+            {
+                "impacted_mcp_tools": simulation.impacted_mcp_tools,
+                "impacted_mcp_resources": simulation.impacted_mcp_resources,
+                "impacted_mcp_prompts": simulation.impacted_mcp_prompts,
+                "warnings": simulation.warnings,
+                "policy_reasons": simulation.policy_reasons,
+            }
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/tenant_sandboxes/.")
+        if st.button("Export Tenant Sandbox", use_container_width=True):
+            export = state.tenant_sandbox.export(
+                TenantSandboxExportRequest(
+                    actor="streamlit-tenant-policy-reviewer",
+                    scenarios=[tenant_request],
+                )
+            )
+            st.success("Tenant sandbox exported.")
+            st.json(export.model_dump(mode="json"))
+    with st.expander("Simulation JSON"):
+        st.json(simulation.model_dump(mode="json"))
+
+elif view == "Skill Marketplace":
+    st.subheader("Skill Marketplace")
+    st.caption("Governed marketplace catalog with Tenant Rollout decisions, version notes, and rollout approval artifacts.")
+    catalog = run_async(state.marketplace.catalog())
+    col_ready, col_listings, col_blocked, col_review = st.columns(4)
+    col_ready.metric("Readiness", catalog.readiness_status.upper())
+    col_listings.metric("Listings", catalog.coverage_summary["listing_count"])
+    col_blocked.metric("Blocked rollouts", catalog.coverage_summary["blocked_rollout_count"])
+    col_review.metric("Review required", catalog.coverage_summary["review_required_rollout_count"])
+
+    tab_catalog, tab_tenants, tab_versions, tab_export, tab_json = st.tabs(
+        ["Catalog", "Tenant Rollout", "Versions", "Export", "JSON"]
+    )
+    with tab_catalog:
+        st.dataframe(
+            [
+                {
+                    "skill": listing.skill_id,
+                    "name": listing.name,
+                    "version": listing.version,
+                    "status": listing.listing_status,
+                    "risk": listing.risk_level,
+                    "review_state": listing.required_review_state,
+                    "mcp": listing.mcp_exposure_state["exposure_status"],
+                    "invocations": listing.usage_signals["invocation_count"],
+                }
+                for listing in catalog.listings
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(catalog.coverage_summary)
+    with tab_tenants:
+        st.dataframe(catalog.tenant_scenarios, use_container_width=True, hide_index=True)
+        st.dataframe(catalog.blocked_rollouts, use_container_width=True, hide_index=True)
+        st.dataframe(catalog.review_required_rollouts, use_container_width=True, hide_index=True)
+        st.dataframe(catalog.disabled_skill_blocks, use_container_width=True, hide_index=True)
+    with tab_versions:
+        st.dataframe(
+            [
+                {
+                    "skill": listing.skill_id,
+                    "versions": len(listing.versions),
+                    "notes": " | ".join(listing.version_comparison_notes),
+                }
+                for listing in catalog.listings
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/marketplace_packs/.")
+        if st.button("Export Tenant Rollout Pack", use_container_width=True):
+            export = run_async(
+                state.marketplace.rollout_pack(
+                    MarketplaceRolloutPackRequest(actor="streamlit-marketplace-reviewer")
+                )
+            )
+            st.success("Tenant Rollout approval pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(catalog.model_dump(mode="json"))
+
+elif view == "Skill Usage Analytics":
+    st.subheader("Skill Usage Analytics")
+    st.caption("Enterprise usage, token budget, latency, anomaly, and Cost Chargeback controls.")
+    analytics = state.usage.analytics()
+    col_ready, col_records, col_cost, col_anomalies = st.columns(4)
+    col_ready.metric("Readiness", analytics.readiness_status.upper())
+    col_records.metric("Usage records", analytics.summary["record_count"])
+    col_cost.metric("Estimated cost", f"${analytics.summary['estimated_cost']:.4f}")
+    col_anomalies.metric("Anomalies", analytics.summary["anomaly_count"])
+
+    tab_skills, tab_tenants, tab_agents, tab_budgets, tab_export, tab_json = st.tabs(
+        ["Skills", "Tenants", "Agents", "Budgets / Anomalies", "Cost Chargeback", "JSON"]
+    )
+    with tab_skills:
+        st.dataframe(analytics.usage_by_skill, use_container_width=True, hide_index=True)
+        st.dataframe(analytics.latency_bands, use_container_width=True, hide_index=True)
+    with tab_tenants:
+        st.dataframe(analytics.usage_by_tenant_environment, use_container_width=True, hide_index=True)
+        st.json(analytics.token_cost_estimates)
+    with tab_agents:
+        st.dataframe(analytics.usage_by_agent, use_container_width=True, hide_index=True)
+        st.json(
+            {
+                "usage_by_status": analytics.usage_by_status,
+                "usage_by_mcp_exposure": analytics.usage_by_mcp_exposure,
+            }
+        )
+    with tab_budgets:
+        st.dataframe(analytics.budget_status, use_container_width=True, hide_index=True)
+        st.dataframe(analytics.anomalies, use_container_width=True, hide_index=True)
+        st.dataframe(analytics.disabled_skill_blocked_events, use_container_width=True, hide_index=True)
+        st.json(analytics.coverage_summary)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/usage_packs/.")
+        actor = st.text_input("Chargeback pack actor", value="streamlit-finops-reviewer")
+        if st.button("Export Cost Chargeback Pack", use_container_width=True):
+            export = state.usage.chargeback_pack(
+                UsageChargebackPackRequest(actor=actor)
+            )
+            st.success("Cost Chargeback Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(analytics.model_dump(mode="json"))
+
+elif view == "Enterprise Readiness":
+    st.subheader("Enterprise Readiness")
+    scorecard = run_async(state.enterprise.scorecard())
+    col_status, col_score, col_risks, col_tools = st.columns(4)
+    col_status.metric("Readiness", scorecard.readiness_status.upper())
+    col_score.metric("Overall score", scorecard.overall_score)
+    col_risks.metric("Risks", len(scorecard.risks))
+    col_tools.metric("MCP tools", scorecard.mcp_capability_counts["tool_count"])
+
+    st.dataframe(
+        [
+            {
+                "category": category.category,
+                "score": category.score,
+                "readiness_status": category.readiness_status,
+                "signals": " | ".join(category.signals),
+                "risks": " | ".join(category.risks),
+            }
+            for category in scorecard.category_scores
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    tab_risks, tab_artifacts, tab_commands, tab_export, tab_json = st.tabs(
+        ["Risks / Actions", "Artifacts", "Verification", "Portfolio Pack", "Scorecard JSON"]
+    )
+    with tab_risks:
+        st.dataframe([{"risk": risk} for risk in scorecard.risks], use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"recommended_action": action} for action in scorecard.recommended_actions],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_artifacts:
+        st.json(scorecard.mcp_capability_counts)
+        st.dataframe(scorecard.artifact_links, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in scorecard.verification_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/portfolio_demo/.")
+        actor = st.text_input("Portfolio pack actor", value="streamlit-portfolio-reviewer")
+        if st.button("Export Portfolio Demo Pack", use_container_width=True):
+            export = run_async(
+                state.enterprise.portfolio_demo_pack(
+                    EnterprisePortfolioDemoPackRequest(actor=actor)
+                )
+            )
+            st.success("Portfolio demo pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(scorecard.model_dump(mode="json"))
+
+elif view == "Portfolio Pack":
+    st.subheader("Portfolio Evidence And Interview Pack")
+    st.caption("Map JD skills to implementation proof and export a local Markdown/JSON interview script pack.")
+    index = run_async(state.portfolio.evidence_index())
+    col_ready, col_score, col_skills, col_proofs = st.columns(4)
+    col_ready.metric("Readiness", index.readiness_status.upper())
+    col_score.metric("Evidence score", index.evidence_score)
+    col_skills.metric("JD skills", index.jd_skill_count)
+    col_proofs.metric("Proof rows", index.proof_count)
+
+    tab_coverage, tab_matrix, tab_commands, tab_pack, tab_json = st.tabs(
+        ["JD Coverage", "Proof Matrix", "Commands", "Interview Pack", "Index JSON"]
+    )
+    with tab_coverage:
+        st.dataframe(
+            [
+                {
+                    "jd_skill": item["jd_skill"],
+                    "coverage_status": item["coverage_status"],
+                    "evidence": " | ".join(item["evidence"]),
+                    "endpoints": " | ".join(item["endpoints"]),
+                    "files": " | ".join(item["files"]),
+                }
+                for item in index.jd_coverage
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(index.mcp_capability_counts)
+    with tab_matrix:
+        st.dataframe(index.proof_matrix, use_container_width=True, hide_index=True)
+        st.dataframe(index.artifact_inventory, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in index.verification_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_pack:
+        actor = st.text_input("Interview pack actor", value="streamlit-portfolio-interviewer")
+        if st.button("Export Interview Pack", use_container_width=True):
+            export = run_async(
+                state.portfolio.interview_pack(
+                    PortfolioInterviewPackRequest(actor=actor)
+                )
+            )
+            st.success("Interview pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+            pack = json.loads(Path(export.json_path).read_text(encoding="utf-8"))
+            st.dataframe(
+                [{"talking_point": point} for point in pack["technical_talking_points"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("Export to see the Interview Pack artifact path and technical talking points.")
+    with tab_json:
+        st.json(index.model_dump(mode="json"))
+
+elif view == "Reviewer Quickstart":
+    st.subheader("Reviewer Quickstart")
+    st.caption("Follow a copy-ready local reviewer path and export the Walkthrough Pack under data/reviewer_packs/.")
+    quickstart = run_async(state.reviewer.quickstart())
+    col_ready, col_steps, col_endpoints, col_artifacts = st.columns(4)
+    col_ready.metric("Readiness", quickstart.readiness_status.upper())
+    col_steps.metric("Proof items", quickstart.summary["quickstart_item_count"])
+    col_endpoints.metric("Endpoints", quickstart.summary["endpoint_count"])
+    col_artifacts.metric("Artifacts", quickstart.summary["artifact_count"])
+
+    tab_setup, tab_api, tab_mcp, tab_artifacts, tab_export, tab_json = st.tabs(
+        ["Setup", "API Walkthrough", "MCP Walkthrough", "Artifacts", "Walkthrough Pack", "JSON"]
+    )
+    with tab_setup:
+        st.dataframe(
+            [{"command": command} for command in quickstart.setup_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(quickstart.one_command_demo)
+        st.dataframe(
+            [{"command": command} for command in quickstart.verification_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_api:
+        st.dataframe(quickstart.endpoint_walkthrough, use_container_width=True, hide_index=True)
+        st.dataframe(quickstart.expected_outputs, use_container_width=True, hide_index=True)
+    with tab_mcp:
+        st.dataframe(quickstart.mcp_command_walkthrough, use_container_width=True, hide_index=True)
+    with tab_artifacts:
+        st.dataframe(quickstart.artifact_proof_map, use_container_width=True, hide_index=True)
+        st.dataframe([{"note": note} for note in quickstart.troubleshooting], use_container_width=True, hide_index=True)
+        st.json(quickstart.role_specific_notes)
+    with tab_export:
+        actor = st.text_input("Walkthrough pack actor", value="streamlit-github-reviewer")
+        if st.button("Export Walkthrough Pack", use_container_width=True):
+            export = run_async(
+                state.reviewer.walkthrough_pack(
+                    ReviewerWalkthroughPackRequest(actor=actor)
+                )
+            )
+            st.success("Walkthrough Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate recruiter and engineer walkthrough Markdown/JSON artifacts.")
+    with tab_json:
+        st.json(quickstart.model_dump(mode="json"))
+
+elif view == "Artifact Inventory":
+    st.subheader("Artifact Inventory")
+    st.caption("Inspect generated artifact directories and export the README Checklist under data/artifact_indexes/.")
+    inventory = state.artifacts.inventory()
+    col_ready, col_items, col_generated, col_ignored = st.columns(4)
+    col_ready.metric("Readiness", inventory.readiness_status.upper())
+    col_items.metric("Artifacts", inventory.artifact_count)
+    col_generated.metric("Generated dirs", inventory.generated_directory_count)
+    col_ignored.metric("Ignored dirs", inventory.ignored_directory_count)
+
+    tab_inventory, tab_readme, tab_commands, tab_export, tab_json = st.tabs(
+        ["Inventory", "README Checklist", "Commands", "Export", "JSON"]
+    )
+    with tab_inventory:
+        st.dataframe(
+            [
+                {
+                    "artifact": item.name,
+                    "directory": item.directory,
+                    "ignored_status": item.ignored_status,
+                    "generated": item.generated,
+                    "producer": item.producer_endpoint or item.producer_command,
+                    "freshness": item.freshness_notes,
+                }
+                for item in inventory.items
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(
+            {
+                item.artifact_id: item.latest_files
+                for item in inventory.items
+                if item.latest_files
+            }
+        )
+    with tab_readme:
+        st.dataframe(inventory.readme_badge_suggestions, use_container_width=True, hide_index=True)
+        st.dataframe(inventory.reviewer_proof_checklist, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"note": note} for note in inventory.cleanup_regeneration_notes],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in inventory.local_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        actor = st.text_input("README Checklist actor", value="streamlit-github-reviewer")
+        if st.button("Export README Checklist", use_container_width=True):
+            export = state.artifacts.readme_checklist(
+                ArtifactReadmeChecklistRequest(actor=actor)
+            )
+            st.success("README Checklist exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate the README Checklist Markdown/JSON artifact index.")
+    with tab_json:
+        st.json(inventory.model_dump(mode="json"))
+
+elif view == "API Contract":
+    st.subheader("API Contract")
+    st.caption("Audit OpenAPI route coverage, protected endpoints, docs alignment, generated artifacts, demo flow, and MCP inventory.")
+    audit = state.api_contracts.contract_audit()
+    col_ready, col_score, col_routes, col_auth = st.columns(4)
+    col_ready.metric("Readiness", audit.readiness_status.upper())
+    col_score.metric("Score", audit.score)
+    col_routes.metric("OpenAPI routes", audit.openapi_route_count)
+    col_auth.metric("Protected", audit.auth_protected_endpoint_count)
+
+    tab_checks, tab_endpoints, tab_mcp, tab_collection, tab_json = st.tabs(
+        ["Checks", "Endpoints", "MCP", "Reviewer Collection", "Audit JSON"]
+    )
+    with tab_checks:
+        st.dataframe(
+            [
+                {
+                    "status": check.status,
+                    "category": check.category,
+                    "check": check.title,
+                    "detail": check.detail,
+                }
+                for check in audit.checks
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(
+            {
+                "missing_docs_warnings": audit.missing_docs_warnings,
+                "deprecated_duplicate_route_warnings": audit.deprecated_duplicate_route_warnings,
+                "local_only_limitations": audit.local_only_limitations,
+            }
+        )
+    with tab_endpoints:
+        endpoint_rows = [
+            {
+                "domain": domain,
+                "method": endpoint["method"],
+                "path": endpoint["path"],
+                "auth_required": endpoint["auth_required"],
+                "docs_api_mentioned": endpoint["docs_api_mentioned"],
+            }
+            for domain, group in audit.endpoint_inventory_by_domain.items()
+            for endpoint in group["endpoints"]
+        ]
+        st.dataframe(endpoint_rows, use_container_width=True, hide_index=True)
+        st.dataframe(audit.docs_api_coverage, use_container_width=True, hide_index=True)
+        st.json(
+            {
+                "dashboard_smoke_alignment": audit.dashboard_smoke_alignment,
+                "generated_artifact_endpoint_coverage": audit.generated_artifact_endpoint_coverage,
+                "demo_flow_endpoint_coverage": audit.demo_flow_endpoint_coverage,
+            }
+        )
+    with tab_mcp:
+        st.json(audit.mcp_inventory)
+        st.json(audit.mcp_coverage)
+    with tab_collection:
+        st.caption("Writes Markdown and JSON under data/api_contracts/.")
+        actor = st.text_input("Collection actor", value="streamlit-api-contract-reviewer")
+        if st.button("Export Reviewer Collection", use_container_width=True):
+            export = state.api_contracts.reviewer_collection(ApiReviewerCollectionRequest(actor=actor))
+            st.success("Reviewer Collection exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.dataframe(
+                [{"command": command} for command in audit.verification_commands],
+                use_container_width=True,
+                hide_index=True,
+            )
+    with tab_json:
+        st.json(audit.model_dump(mode="json"))
+
+elif view == "Launch Checklist":
+    st.subheader("Launch Checklist")
+    st.caption("Generate a local API smoke matrix and interview launch checklist under data/launch_checklists/.")
+    matrix = run_async(state.smoke.smoke_matrix())
+    col_ready, col_endpoints, col_tools, col_artifacts = st.columns(4)
+    col_ready.metric("Smoke readiness", matrix.readiness_status.upper())
+    col_endpoints.metric("Endpoints", len(matrix.endpoint_matrix))
+    col_tools.metric("MCP tools", matrix.readiness_summary["mcp_tool_count"])
+    col_artifacts.metric("Artifacts", len(matrix.artifact_expectations))
+
+    tab_matrix, tab_artifacts, tab_commands, tab_export, tab_json = st.tabs(
+        ["Smoke Matrix", "Artifacts", "Commands", "Export", "JSON"]
+    )
+    with tab_matrix:
+        st.dataframe(
+            [
+                {
+                    "area": endpoint.area,
+                    "method": endpoint.method,
+                    "path": endpoint.path,
+                    "expected_status": endpoint.expected_status,
+                    "auth_required": endpoint.auth_required,
+                    "signal": endpoint.readiness_signal,
+                    "sample_command": endpoint.sample_command,
+                }
+                for endpoint in matrix.endpoint_matrix
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_artifacts:
+        st.dataframe(matrix.artifact_expectations, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in matrix.verification_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        actor = st.text_input("Checklist actor", value="streamlit-launch-reviewer")
+        if st.button("Export Launch Checklist", use_container_width=True):
+            export = run_async(
+                state.smoke.launch_checklist(
+                    LaunchChecklistRequest(actor=actor)
+                )
+            )
+            st.success("Launch checklist exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(matrix.model_dump(mode="json"))
+
+elif view == "CI Doctor / Audit Pack":
+    st.subheader("CI Doctor / Audit Pack")
+    st.caption("Run local CI, docs, dependency, Docker/env, ignore, and secret scan checks; export under data/audit_packs/.")
+    doctor = run_async(state.ci_doctor.ci_doctor())
+    col_status, col_score, col_checks, col_secrets = st.columns(4)
+    col_status.metric("CI Doctor", doctor.readiness_status.upper())
+    col_score.metric("Score", doctor.score)
+    col_checks.metric("Checks", len(doctor.checks))
+    col_secrets.metric("Secret scan matches", doctor.secret_scan_summary["match_count"])
+
+    tab_checks, tab_commands, tab_dependencies, tab_secrets, tab_export, tab_json = st.tabs(
+        ["Checks", "Commands", "Dependencies", "Secret Scan", "Audit Pack", "JSON"]
+    )
+    with tab_checks:
+        st.dataframe(
+            [check.model_dump(mode="json") for check in doctor.checks],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(doctor.summary)
+        st.dataframe(doctor.publish_safety_checklist, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [check.model_dump(mode="json") for check in doctor.command_checks],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_dependencies:
+        st.dataframe(doctor.dependency_inventory["files"], use_container_width=True, hide_index=True)
+        st.dataframe(doctor.dependency_inventory["dependencies"], use_container_width=True, hide_index=True)
+    with tab_secrets:
+        st.json(
+            {
+                "scanner": doctor.secret_scan_summary["scanner"],
+                "scanned_file_count": doctor.secret_scan_summary["scanned_file_count"],
+                "match_count": doctor.secret_scan_summary["match_count"],
+                "high_confidence_count": doctor.secret_scan_summary["high_confidence_count"],
+                "notes": doctor.secret_scan_summary["notes"],
+            }
+        )
+        st.dataframe(doctor.secret_scan_summary["matches"], use_container_width=True, hide_index=True)
+    with tab_export:
+        actor = st.text_input("Audit pack actor", value="streamlit-ci-doctor")
+        if st.button("Export Audit Pack", use_container_width=True):
+            export = run_async(state.ci_doctor.audit_pack(AuditPackRequest(actor=actor)))
+            st.success("Audit Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate the CI Doctor Audit Pack artifact path.")
+    with tab_json:
+        st.json(doctor.model_dump(mode="json"))
+
+elif view == "UI Verification":
+    st.subheader("UI Verification")
+    st.caption("Run Dashboard Smoke source checks and export a local UI Verification Pack under data/ui_verification/.")
+    smoke = state.ui_verification.dashboard_smoke()
+    col_ready, col_checks, col_views, col_endpoints = st.columns(4)
+    col_ready.metric("Dashboard Smoke", smoke.readiness_status.upper())
+    col_checks.metric("Checks", smoke.summary["check_count"])
+    col_views.metric("Views", smoke.summary["expected_view_count"])
+    col_endpoints.metric("Endpoints", smoke.summary["endpoint_reference_count"])
+
+    tab_smoke, tab_views, tab_artifacts, tab_mcp, tab_commands, tab_export, tab_json = st.tabs(
+        ["Dashboard Smoke", "Views / Endpoints", "Artifact Tabs", "MCP Proof", "Commands", "Verification Pack", "JSON"]
+    )
+    with tab_smoke:
+        st.dataframe(
+            [check.model_dump(mode="json") for check in smoke.checks],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(smoke.summary)
+    with tab_views:
+        st.dataframe(smoke.expected_views, use_container_width=True, hide_index=True)
+        st.dataframe(smoke.endpoint_references, use_container_width=True, hide_index=True)
+    with tab_artifacts:
+        st.dataframe(smoke.generated_artifact_tabs, use_container_width=True, hide_index=True)
+        st.dataframe([{"limitation": note} for note in smoke.limitations], use_container_width=True, hide_index=True)
+    with tab_mcp:
+        st.dataframe(smoke.mcp_proof_surfaces, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in smoke.local_run_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        actor = st.text_input("UI Verification Pack actor", value="streamlit-github-reviewer")
+        if st.button("Export UI Verification Pack", use_container_width=True):
+            export = state.ui_verification.verification_pack(
+                UiVerificationPackRequest(actor=actor)
+            )
+            st.success("UI Verification Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate Dashboard Smoke Markdown/JSON with screenshot placeholders.")
+    with tab_json:
+        st.json(smoke.model_dump(mode="json"))
+
+elif view == "Git Readiness":
+    st.subheader("Git Readiness")
+    st.caption("Inspect local branch hygiene and export a GitHub Push Readiness + Branch Hygiene Pack under data/git_packs/.")
+    readiness = state.git_readiness.readiness()
+    col_status, col_score, col_branch, col_changes = st.columns(4)
+    col_status.metric("Readiness", readiness.readiness_status.upper())
+    col_score.metric("Score", readiness.score)
+    col_branch.metric("Branch", readiness.git_repository.get("current_branch") or "detached")
+    col_changes.metric("Changed paths", readiness.worktree_summary["changed_path_count"])
+
+    tab_summary, tab_changes, tab_commands, tab_pack, tab_json = st.tabs(
+        ["Summary", "Changed Files", "Commands", "Push Plan", "JSON"]
+    )
+    with tab_summary:
+        st.json(
+            {
+                "git_repository": readiness.git_repository,
+                "summary": readiness.summary,
+                "required_publish_checks": readiness.required_publish_checks,
+                "suspicious_files": readiness.suspicious_files,
+            }
+        )
+        st.dataframe(
+            readiness.generated_artifact_directories,
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_changes:
+        st.dataframe(
+            [
+                {
+                    "group": group_name,
+                    "path": path,
+                }
+                for group_name, paths in readiness.changed_file_groups.items()
+                for path in paths
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [
+                {
+                    "commit_group": group["title"],
+                    "path": path,
+                    "review_note": group["review_note"],
+                }
+                for group in readiness.recommended_commit_groups
+                for path in group["paths"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in readiness.non_destructive_review_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [{"note": note} for note in readiness.mcp_publish_notes],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_pack:
+        actor = st.text_input("Push plan actor", value="streamlit-github-reviewer")
+        if st.button("Export Git Push Plan", use_container_width=True):
+            export = state.git_readiness.push_plan(GitPushPlanRequest(actor=actor))
+            st.success("Git push plan exported.")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export writes Markdown and JSON under ignored data/git_packs/.")
+    with tab_json:
+        st.json(readiness.model_dump(mode="json"))
+
+elif view == "Runtime Demo":
+    st.subheader("Runtime Demo")
+    st.caption("Verify the local FastAPI, Streamlit, and MCP CLI demo runtime and export under data/runtime_packs/.")
+    runtime = state.runtime_demo.readiness()
+    col_ready, col_fastapi, col_streamlit, col_tools = st.columns(4)
+    col_ready.metric("Runtime readiness", runtime.readiness_status.upper())
+    col_fastapi.metric("FastAPI port", runtime.summary["fastapi_port"])
+    col_streamlit.metric("Streamlit port", runtime.summary["streamlit_port"])
+    col_tools.metric("MCP tools", runtime.summary["mcp_tool_count"])
+
+    tab_commands, tab_checks, tab_urls, tab_mcp, tab_pack, tab_json = st.tabs(
+        ["Commands", "Checks", "Health / Smoke", "MCP CLI", "Runtime Demo Pack", "JSON"]
+    )
+    with tab_commands:
+        st.dataframe(runtime.start_commands, use_container_width=True, hide_index=True)
+        st.dataframe(runtime.stop_commands, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"command": command} for command in runtime.local_run_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_checks:
+        st.dataframe(runtime.env_requirements, use_container_width=True, hide_index=True)
+        st.dataframe(runtime.dependency_checks, use_container_width=True, hide_index=True)
+        st.dataframe(runtime.port_checks, use_container_width=True, hide_index=True)
+    with tab_urls:
+        st.dataframe(runtime.health_urls, use_container_width=True, hide_index=True)
+        st.dataframe(runtime.smoke_urls, use_container_width=True, hide_index=True)
+        st.dataframe(runtime.demo_flow_order, use_container_width=True, hide_index=True)
+    with tab_mcp:
+        st.dataframe(runtime.mcp_verification_commands, use_container_width=True, hide_index=True)
+        st.dataframe([{"limitation": note} for note in runtime.known_limitations], use_container_width=True, hide_index=True)
+    with tab_pack:
+        actor = st.text_input("Runtime pack actor", value="streamlit-runtime-reviewer")
+        if st.button("Export Runtime Demo Pack", use_container_width=True):
+            export = state.runtime_demo.demo_pack(RuntimeDemoPackRequest(actor=actor))
+            st.success("Runtime Demo Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export writes Markdown and JSON under ignored data/runtime_packs/.")
+    with tab_json:
+        st.json(runtime.model_dump(mode="json"))
+
+elif view == "Final Handoff":
+    st.subheader("Final Handoff")
+    st.caption("Run the README Consistency final audit and export Markdown/JSON under data/final_handoff/.")
+    audit = state.final_handoff.final_audit()
+    col_ready, col_score, col_checks, col_failures = st.columns(4)
+    col_ready.metric("Final audit", audit.readiness_status.upper())
+    col_score.metric("Score", audit.score)
+    col_checks.metric("Checks", audit.summary["check_count"])
+    col_failures.metric("Failures", audit.summary["fail_count"])
+
+    tab_audit, tab_inventory, tab_commands, tab_export, tab_json = st.tabs(
+        ["Final Audit", "Inventory", "Commands", "Final Handoff Pack", "JSON"]
+    )
+    with tab_audit:
+        st.dataframe(
+            [check.model_dump(mode="json") for check in audit.checks],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(audit.summary)
+        st.dataframe([{"limitation": note} for note in audit.limitations], use_container_width=True, hide_index=True)
+    with tab_inventory:
+        st.json(audit.endpoint_inventory_summary)
+        st.json(audit.mcp_inventory_summary)
+        st.json(audit.artifact_inventory_summary)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in audit.verification_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        actor = st.text_input("Final Handoff Pack actor", value="streamlit-final-handoff-reviewer")
+        if st.button("Export Final Handoff Pack", use_container_width=True):
+            export = run_async(
+                state.final_handoff.final_pack(
+                    FinalHandoffPackRequest(actor=actor)
+                )
+            )
+            st.success("Final Handoff Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate README Consistency audit Markdown/JSON with final handoff commands.")
+    with tab_json:
+        st.json(audit.model_dump(mode="json"))
+
+elif view == "Release Pack":
+    st.subheader("Release Candidate Publish Pack")
+    st.caption("Inspect the local release gate and export GitHub-ready Markdown/JSON under data/release_packs/.")
+    gate = run_async(state.release_candidate.quality_gate())
+    col_status, col_score, col_blockers, col_warnings = st.columns(4)
+    col_status.metric("Release gate", gate.status.upper())
+    col_score.metric("Score", gate.score)
+    col_blockers.metric("Blockers", len(gate.blockers))
+    col_warnings.metric("Warnings", len(gate.warnings))
+
+    tab_status, tab_commands, tab_inventory, tab_export, tab_json = st.tabs(
+        ["Status", "Commands", "Inventory", "Publish Pack", "Gate JSON"]
+    )
+    with tab_status:
+        st.dataframe([{"blocker": blocker} for blocker in gate.blockers], use_container_width=True, hide_index=True)
+        st.dataframe([{"warning": warning} for warning in gate.warnings], use_container_width=True, hide_index=True)
+        st.json(gate.publish_readiness)
+        st.json(gate.coverage)
+    with tab_commands:
+        st.dataframe(gate.verification_checklist, use_container_width=True, hide_index=True)
+    with tab_inventory:
+        st.json(gate.mcp_capability_inventory)
+        st.dataframe(gate.endpoint_inventory, use_container_width=True, hide_index=True)
+        st.dataframe(gate.artifact_coverage, use_container_width=True, hide_index=True)
+    with tab_export:
+        actor = st.text_input("Publish pack actor", value="streamlit-release-publisher")
+        if st.button("Export Publish Pack", use_container_width=True):
+            export = run_async(
+                state.release_candidate.publish_pack(
+                    ReleasePublishPackRequest(actor=actor)
+                )
+            )
+            st.success("Publish Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export to generate the Release Candidate Publish Pack artifact path.")
+    with tab_json:
+        st.json(gate.model_dump(mode="json"))
+
+elif view == "Workflow Templates / Composition":
+    st.subheader("Workflow Templates / Composition")
+    templates = state.workflows.list()
+    st.dataframe(
+        [
+            {
+                "id": template.id,
+                "name": template.name,
+                "required_role": template.required_role,
+                "default_sensitivity": template.default_sensitivity,
+                "skills": " -> ".join(template.ordered_skill_ids),
+                "expected_outputs": ", ".join(template.expected_outputs),
+            }
+            for template in templates
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    selected_template = st.selectbox("Workflow template", [template.id for template in templates])
+    template = state.workflows.get(selected_template)
+    sample_inputs = {
+        "support_triage": (ROOT / "sample_data" / "support_ticket.txt").read_text(encoding="utf-8"),
+        "rfp_answer_pack": (ROOT / "sample_data" / "rfp_question.txt").read_text(encoding="utf-8"),
+        "meeting_to_actions": (ROOT / "sample_data" / "meeting_notes.txt").read_text(encoding="utf-8"),
+    }
+    input_text = st.text_area(
+        "Input text",
+        value=sample_inputs.get(template.id, "Governed workflow simulation request."),
+        height=180,
+    )
+    col_role, col_sensitivity, col_environment = st.columns(3)
+    role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+    sensitivity = col_sensitivity.selectbox(
+        "Data sensitivity",
+        ["public", "internal", "confidential"],
+        index=["public", "internal", "confidential"].index(template.default_sensitivity),
+    )
+    environment = col_environment.selectbox("Environment", ["local", "staging", "production"])
+    if st.button("Simulate Workflow", use_container_width=True):
+        result = run_async(
+            state.workflows.simulate(
+                template.id,
+                WorkflowSimulationRequest(
+                    input_text=input_text,
+                    role=role,
+                    data_sensitivity=sensitivity,
+                    environment=environment,
+                ),
+                "streamlit-workflow-simulator",
+            )
+        )
+        col_status, col_selected, col_blocked = st.columns(3)
+        col_status.metric("Status", "BLOCKED" if result.blocked_steps else "COMPLETED")
+        col_selected.metric("Executed skills", len(result.selected_skills))
+        col_blocked.metric("Blocked steps", len(result.blocked_steps))
+        st.dataframe(
+            [step.model_dump(mode="json") for step in result.step_outputs],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(result.model_dump(mode="json"))
+
+elif view == "Workflow Review Queue":
+    st.subheader("Workflow Review Queue")
+    sample_template = {
+        "id": "reviewed_support_pack",
+        "name": "Reviewed Support Pack",
+        "description": "Classify and summarize a support request after workflow review approval.",
+        "ordered_skill_ids": ["classify_request", "summarize_document"],
+        "required_role": "agent",
+        "default_sensitivity": "internal",
+        "expected_outputs": ["category", "summary"],
+    }
+    template_text = st.text_area(
+        "Submitted template JSON",
+        value=json.dumps(sample_template, indent=2),
+        height=260,
+    )
+    if st.button("Submit Template For Review", use_container_width=True):
+        try:
+            template = WorkflowTemplate.model_validate(json.loads(template_text))
+            st.json(state.workflows.submit(template, "streamlit-workflow-reviewer").model_dump(mode="json"))
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+    reviews = state.workflows.reviews()
+    rows = [
+        {
+            "template_id": review.template_id,
+            "status": review.status,
+            "validation_status": review.validation.validation_status,
+            "required_role": review.validation.required_role,
+            "sensitivity": review.validation.sensitivity,
+            "missing_skills": ", ".join(review.validation.missing_skills),
+            "invalid_skills": ", ".join(review.validation.invalid_skills),
+            "policy_warnings": len(review.validation.policy_warnings),
+            "submitted_by": review.submitted_by,
+            "reviewed_by": review.reviewed_by,
+        }
+        for review in reviews
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    if reviews:
+        selected_review = st.selectbox("Review item", [review.template_id for review in reviews])
+        current = next(review for review in reviews if review.template_id == selected_review)
+        st.json(current.model_dump(mode="json"))
+        note = st.text_input("Review note", value=current.review_note or "")
+        col_approve, col_reject, col_evidence = st.columns(3)
+        if col_approve.button("Approve", use_container_width=True):
+            try:
+                st.json(
+                    state.workflows.approve(
+                        selected_review,
+                        "streamlit-workflow-reviewer",
+                        note or None,
+                    ).model_dump(mode="json")
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        if col_reject.button("Reject", use_container_width=True):
+            st.json(
+                state.workflows.reject(
+                    selected_review,
+                    "streamlit-workflow-reviewer",
+                    note or None,
+                ).model_dump(mode="json")
+            )
+            st.rerun()
+        if col_evidence.button("Export Review Evidence", use_container_width=True):
+            export = run_async(
+                state.workflows.export_review_evidence(
+                    selected_review,
+                    "streamlit-workflow-reviewer",
+                )
+            )
+            st.success("Workflow review evidence exported.")
+            st.json(export.model_dump(mode="json"))
+    else:
+        st.info("No submitted workflow templates yet.")
+
 elif view == "Demo Agent":
     st.subheader("Demo Agent")
     default_prompt = (
@@ -231,6 +1297,465 @@ elif view == "Evaluation Lab":
             hide_index=True,
         )
         st.json(result.model_dump(mode="json"))
+
+elif view == "Conformance / Replay":
+    st.subheader("Conformance / Replay")
+    if st.button("Run Conformance Suite", use_container_width=True):
+        report = run_async(state.conformance.generate())
+        col_status, col_promoted, col_failed = st.columns(3)
+        col_status.metric("Status", report.status.upper())
+        col_promoted.metric("Promoted skills", report.promoted_skill_count)
+        col_failed.metric("Failed skills", report.failed_skill_count)
+        st.dataframe(
+            [skill.model_dump(mode="json") for skill in report.skills],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(report.model_dump(mode="json"))
+
+    st.divider()
+    st.caption("Replay compares a recorded invocation with a deterministic local rerun.")
+    if st.button("Create Sample Invocation", use_container_width=True):
+        sample = state.conformance.sample_input("classify_request")
+        invocation = run_async(state.invocation_service.invoke("classify_request", sample, "streamlit-replay-demo"))
+        st.json(invocation.model_dump(mode="json"))
+    invocations = state.invocation_service.invocations
+    if invocations:
+        selected_invocation = st.selectbox(
+            "Invocation",
+            [f"{invocation.id} | {invocation.skill_id} | {invocation.status}" for invocation in invocations],
+        )
+        invocation_id = selected_invocation.split(" | ", 1)[0]
+        if st.button("Replay Invocation", use_container_width=True):
+            replay = run_async(state.invocation_service.replay(invocation_id))
+            st.metric("Same output", str(replay.same_output).upper())
+            st.json(replay.model_dump(mode="json"))
+    else:
+        st.info("No invocation history yet. Create a sample invocation or run conformance first.")
+
+elif view == "Security Evidence / Audit":
+    st.subheader("Security Evidence / Audit")
+    summary = run_async(state.evidence.security_review_summary())
+    col_status, col_denials, col_promoted, col_conformance = st.columns(4)
+    col_status.metric("Readiness", summary.readiness_status.upper())
+    col_denials.metric("Policy denials", summary.policy_denial_count)
+    col_promoted.metric("Promoted skills", summary.promoted_skill_count)
+    col_conformance.metric("Conformance passes", summary.conformance_pass_count)
+    st.dataframe(
+        [{"flag": flag} for flag in summary.high_risk_flags],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.dataframe(
+        [{"recommended_action": action} for action in summary.recommended_actions],
+        use_container_width=True,
+        hide_index=True,
+    )
+    if st.button("Export Evidence Bundle", use_container_width=True):
+        export = run_async(state.evidence.export("streamlit-security-reviewer"))
+        st.success("Evidence bundle exported.")
+        st.json(export.model_dump(mode="json"))
+    st.divider()
+    st.caption("Recent denied policy attempts and MCP exposure")
+    denied_attempts = [
+        {
+            "invocation_id": invocation.id,
+            "skill_id": invocation.skill_id,
+            "trace_id": invocation.trace_id,
+            "created_at": invocation.created_at,
+            "error": invocation.error,
+        }
+        for invocation in state.invocation_service.invocations
+        if invocation.policy_decision and invocation.policy_decision.decision == "deny"
+    ]
+    st.dataframe(denied_attempts, use_container_width=True, hide_index=True)
+    mcp_rows = [
+        {"kind": "tool", "id": tool.name}
+        for tool in state.mcp.list_tools()
+    ] + [
+        {"kind": "resource", "id": resource.uri}
+        for resource in state.mcp.list_resources()
+    ] + [
+        {"kind": "prompt", "id": prompt.id}
+        for prompt in state.mcp.list_prompts()
+    ]
+    st.dataframe(mcp_rows, use_container_width=True, hide_index=True)
+
+elif view == "Audit Query / Attestation":
+    st.subheader("Audit Query / Attestation")
+    col_action, col_type, col_actor = st.columns(3)
+    action = col_action.text_input("Action", value="")
+    evidence_type = col_type.text_input("Type", value="")
+    actor = col_actor.text_input("Actor", value="")
+    col_skill, col_workflow, col_status = st.columns(3)
+    skill_id = col_skill.text_input("Skill ID", value="")
+    workflow_template_id = col_workflow.text_input("Workflow template ID", value="")
+    status = col_status.text_input("Status", value="")
+    query_text = st.text_input("Free-text query", value="")
+    limit = st.slider("Result limit", min_value=10, max_value=250, value=100, step=10)
+    if st.button("Run Audit Query", use_container_width=True):
+        result = run_async(
+            state.audit_query.query(
+                AuditQueryRequest(
+                    action=action or None,
+                    type=evidence_type or None,
+                    actor=actor or None,
+                    skill_id=skill_id or None,
+                    workflow_template_id=workflow_template_id or None,
+                    status=status or None,
+                    query=query_text or None,
+                    limit=limit,
+                )
+            )
+        )
+        col_matches, col_traces, col_warnings = st.columns(3)
+        col_matches.metric("Matched evidence", len(result.matched_events))
+        col_traces.metric("Trace IDs", len(result.trace_ids))
+        col_warnings.metric("Warnings", len(result.warnings))
+        st.json(
+            {
+                "counts_by_action": result.counts_by_action,
+                "counts_by_status": result.counts_by_status,
+                "trace_ids": result.trace_ids,
+                "warnings": result.warnings,
+            }
+        )
+        st.dataframe(result.matched_events, use_container_width=True, hide_index=True)
+        with st.expander("Related evidence"):
+            st.json(
+                {
+                    "invocations": [item.model_dump(mode="json") for item in result.related_invocations],
+                    "release": result.related_release_evidence,
+                    "workflow": result.related_workflow_evidence,
+                }
+            )
+
+    st.divider()
+    st.caption("Export a procurement-ready compliance pack under data/attestations/.")
+    attestation_actor = st.text_input("Attestation actor", value="streamlit-compliance-reviewer")
+    if st.button("Export Compliance Attestation", use_container_width=True):
+        export = run_async(
+            state.attestations.export(ComplianceAttestationRequest(actor=attestation_actor))
+        )
+        st.success("Compliance attestation exported.")
+        st.json(export.model_dump(mode="json"))
+
+elif view == "Release Preview / Release Notes":
+    st.subheader("Release Preview / Release Notes")
+    preview = run_async(state.releases.preview("streamlit-release-manager"))
+    col_ready, col_skills, col_workflows, col_risks = st.columns(4)
+    col_ready.metric("Release readiness", preview.readiness_status.upper())
+    col_skills.metric("Promoted skills", preview.summary["promoted_skill_count"])
+    col_workflows.metric("Approved workflows", preview.summary["approved_workflow_template_count"])
+    col_risks.metric("Risk flags", len(preview.risk_flags))
+
+    st.dataframe(
+        [
+            {
+                "kind": "skill",
+                "change": item.change_type,
+                "id": item.id,
+                "name": item.name,
+                "details": ", ".join(item.details),
+            }
+            for item in preview.skills_added + preview.skills_changed + preview.skills_removed
+        ]
+        + [
+            {
+                "kind": "workflow_template",
+                "change": item.change_type,
+                "id": item.id,
+                "name": item.name,
+                "details": ", ".join(item.details),
+            }
+            for item in (
+                preview.workflow_templates_added
+                + preview.workflow_templates_changed
+                + preview.workflow_templates_removed
+            )
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    tab_status, tab_mcp, tab_tests, tab_json = st.tabs(
+        ["Status", "MCP Impact", "Regression Tests", "Preview JSON"]
+    )
+    with tab_status:
+        st.dataframe([{"risk_flag": flag} for flag in preview.risk_flags], use_container_width=True, hide_index=True)
+        st.json(preview.policy_conformance_status)
+        st.dataframe(
+            [
+                {"status": status, "id": skill["id"], "reason": skill["reason"]}
+                for status, skills in preview.excluded_skills.items()
+                for skill in skills
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_mcp:
+        st.json(preview.mcp_capabilities.model_dump(mode="json"))
+    with tab_tests:
+        st.dataframe(
+            [{"command": command} for command in preview.recommended_regression_tests],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_json:
+        st.json(preview.model_dump(mode="json"))
+
+    if st.button("Export Release Notes", use_container_width=True):
+        export = run_async(state.releases.export("streamlit-release-manager"))
+        st.success("Release notes exported.")
+        st.json(export.model_dump(mode="json"))
+
+elif view == "Capacity Forecast / Guardrails":
+    st.subheader("Capacity Forecast / Guardrails")
+    col_days, col_multiplier = st.columns(2)
+    forecast_days = col_days.slider("Forecast days", min_value=7, max_value=180, value=30, step=7)
+    traffic_multiplier = col_multiplier.slider(
+        "Traffic multiplier",
+        min_value=0.5,
+        max_value=10.0,
+        value=1.0,
+        step=0.5,
+    )
+    forecast = run_async(
+        state.capacity.forecast(
+            CapacityForecastRequest(
+                actor="streamlit-capacity-planner",
+                forecast_days=forecast_days,
+                traffic_multiplier=traffic_multiplier,
+            )
+        )
+    )
+    col_ready, col_invocations, col_tokens, col_cost = st.columns(4)
+    col_ready.metric("Capacity readiness", forecast.readiness_status.upper())
+    col_invocations.metric("Forecasted invocations", forecast.summary["total_forecasted_invocations"])
+    col_tokens.metric("Estimated tokens", forecast.summary["estimated_total_tokens"])
+    col_cost.metric("Estimated cost", f"${forecast.summary['estimated_cost']:.4f}")
+    st.dataframe(
+        [
+            {
+                "skill_id": skill.skill_id,
+                "forecasted_invocations": skill.forecasted_invocations,
+                "workflow_invocations": skill.workflow_invocations,
+                "direct_invocations": skill.direct_invocations,
+                "estimated_tokens": skill.estimated_input_tokens + skill.estimated_output_tokens,
+                "latency_p95_ms": skill.estimated_latency_p95_ms,
+                "recommended_rate_limit_per_minute": skill.recommended_rate_limit_per_minute,
+                "risk_flags": ", ".join(skill.risk_flags),
+            }
+            for skill in forecast.per_skill
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    tab_workflows, tab_risks, tab_guardrails, tab_json = st.tabs(
+        ["Top Workflows", "Risks", "Guardrails", "Forecast JSON"]
+    )
+    with tab_workflows:
+        st.dataframe(
+            [workflow.model_dump(mode="json") for workflow in forecast.top_workflows],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_risks:
+        st.dataframe(
+            [{"risk_flag": flag} for flag in forecast.bottleneck_risk_flags],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json({"release_evidence": forecast.release_evidence, "audit_evidence": forecast.audit_evidence})
+    with tab_guardrails:
+        st.caption("Validate guardrails or write the local JSON config under data/capacity/.")
+        max_invocations = st.number_input("Max invocations/minute", min_value=1, value=120)
+        max_tokens = st.number_input("Max tokens/day", min_value=1, value=250_000, step=10_000)
+        max_latency = st.number_input("Max latency p95 ms", min_value=1.0, value=1_500.0, step=100.0)
+        fallback = st.selectbox("Fallback behavior", ["queue", "deny", "degrade", "manual_review"])
+        write_config = st.checkbox("Write local guardrail config")
+        if st.button("Validate Guardrails", use_container_width=True):
+            result = state.capacity.guardrails(
+                CapacityGuardrailsRequest(
+                    actor="streamlit-capacity-planner",
+                    guardrails=CapacityGuardrails(
+                        max_invocations_per_minute=int(max_invocations),
+                        max_tokens_per_day=int(max_tokens),
+                        max_latency_p95_ms=float(max_latency),
+                        per_skill_quotas=forecast.recommended_rate_limits,
+                        fallback_behavior=fallback,
+                        policy_actions=["throttle", "alert", "require_review"],
+                    ),
+                    write_config=write_config,
+                )
+            )
+            st.json(result.model_dump(mode="json"))
+    with tab_json:
+        st.json(forecast.model_dump(mode="json"))
+
+    if st.button("Export Capacity Plan", use_container_width=True):
+        export = run_async(
+            state.capacity.plan_export(
+                CapacityPlanExportRequest(actor="streamlit-capacity-planner")
+            )
+        )
+        st.success("Capacity plan exported.")
+        st.json(export.model_dump(mode="json"))
+
+elif view == "Dependency Map / Blast Radius":
+    st.subheader("Dependency Map / Blast Radius")
+    dependency_map = run_async(state.dependencies.build_map())
+    col_ready, col_nodes, col_edges, col_central = st.columns(4)
+    col_ready.metric("Dependency readiness", dependency_map.readiness_status.upper())
+    col_nodes.metric("Nodes", len(dependency_map.nodes))
+    col_edges.metric("Edges", len(dependency_map.edges))
+    col_central.metric("High-centrality skills", len(dependency_map.high_centrality_skills))
+    st.dataframe(
+        [
+            {
+                "type": node.type,
+                "id": node.id,
+                "label": node.label,
+                "metadata": json.dumps(node.metadata, sort_keys=True),
+            }
+            for node in dependency_map.nodes
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    tab_summary, tab_edges, tab_blast, tab_report = st.tabs(
+        ["Summary", "Edges", "Blast Radius", "Report"]
+    )
+    with tab_summary:
+        st.json(
+            {
+                "counts_by_node_type": dependency_map.counts_by_node_type,
+                "summary": dependency_map.summary,
+                "high_centrality_skills": dependency_map.high_centrality_skills,
+                "orphaned_resources": dependency_map.orphaned_resources,
+                "orphaned_prompts": dependency_map.orphaned_prompts,
+                "excluded_skills": dependency_map.excluded_skills,
+                "warnings": dependency_map.warnings,
+            }
+        )
+    with tab_edges:
+        st.dataframe(
+            [edge.model_dump(mode="json") for edge in dependency_map.edges],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_blast:
+        change_type = st.selectbox(
+            "Changed item type",
+            ["skill_id", "prompt_id", "resource_uri", "workflow_template_id"],
+        )
+        defaults = {
+            "skill_id": "search_knowledge_base",
+            "prompt_id": "rfp_answer",
+            "resource_uri": "resource://policy/ai-governance",
+            "workflow_template_id": "support_triage",
+        }
+        changed_value = st.text_input("Changed item", value=defaults[change_type])
+        if st.button("Analyze Blast Radius", use_container_width=True):
+            payload = {"actor": "streamlit-dependency-reviewer", change_type: changed_value}
+            blast = run_async(state.dependencies.blast_radius(BlastRadiusRequest(**payload)))
+            col_status, col_skills, col_workflows, col_risks = st.columns(4)
+            col_status.metric("Readiness", blast.readiness_status.upper())
+            col_skills.metric("Skills", len(blast.impacted_skills))
+            col_workflows.metric("Workflows", len(blast.impacted_workflows))
+            col_risks.metric("Risk flags", len(blast.risk_flags))
+            st.json(blast.model_dump(mode="json"))
+    with tab_report:
+        st.caption("Writes Markdown and JSON under data/dependencies/.")
+        if st.button("Export Dependency Report", use_container_width=True):
+            export = run_async(
+                state.dependencies.report(
+                    DependencyReportRequest(actor="streamlit-dependency-reviewer")
+                )
+            )
+            st.success("Dependency report exported.")
+            st.json(export.model_dump(mode="json"))
+
+elif view == "Skill Incident Drill / Runbook":
+    st.subheader("Skill Incident Drill / Runbook")
+    scenario = st.selectbox(
+        "Drill scenario",
+        [
+            "schema_breakage",
+            "disabled_skill_invoked",
+            "policy_denial_spike",
+            "latency_capacity_breach",
+            "workflow_dependency_failure",
+        ],
+    )
+    drill = run_async(
+        state.incidents.drill(
+            SkillIncidentDrillRequest(
+                scenario=scenario,
+                actor="streamlit-incident-commander",
+            )
+        )
+    )
+    col_severity, col_ready, col_skills, col_workflows = st.columns(4)
+    col_severity.metric("Severity", drill.severity.upper())
+    col_ready.metric("Readiness", drill.readiness_status.upper())
+    col_skills.metric("Skills", len(drill.affected_skills))
+    col_workflows.metric("Workflows", len(drill.affected_workflows))
+    tab_summary, tab_actions, tab_evidence, tab_export = st.tabs(
+        ["Symptoms", "Actions", "Evidence", "Runbook"]
+    )
+    with tab_summary:
+        st.dataframe(
+            [{"symptom": symptom} for symptom in drill.simulated_symptoms],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(
+            {
+                "affected_skills": drill.affected_skills,
+                "affected_workflows": drill.affected_workflows,
+                "affected_prompts": drill.affected_prompts,
+                "affected_resources": drill.affected_resources,
+                "mcp_capabilities_affected": drill.mcp_capabilities_affected,
+                "excluded_skills": drill.excluded_skills,
+            }
+        )
+    with tab_actions:
+        st.dataframe(
+            [{"containment_action": action} for action in drill.containment_actions],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [{"rollback_or_canary_step": step} for step in drill.rollback_canary_plan],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [{"command": command} for command in drill.conformance_eval_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_evidence:
+        st.json(
+            {
+                "audit_evidence": drill.audit_evidence,
+                "capacity_links": drill.capacity_links,
+                "dependency_links": drill.dependency_links,
+            }
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/incident_runbooks/.")
+        if st.button("Export Incident Runbook", use_container_width=True):
+            export = run_async(
+                state.incidents.runbook(
+                    SkillIncidentRunbookRequest(
+                        scenario=scenario,
+                        actor="streamlit-incident-commander",
+                    )
+                )
+            )
+            st.success("Incident runbook exported.")
+            st.json(export.model_dump(mode="json"))
 
 elif view == "MCP Inspector":
     st.subheader("MCP Inspector")

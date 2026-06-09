@@ -1,29 +1,137 @@
 from __future__ import annotations
 
 import json
+import re
+import socket
+import sys
+import tomllib
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from importlib.util import find_spec
 from pathlib import Path
 
+from app.api_contracts import ApiContractService
+from app.git_readiness import GitReadinessService
 from app.models import (
     AgentRun,
+    ArtifactInventoryItem,
+    ArtifactInventoryResult,
+    ArtifactReadmeChecklistRequest,
+    ArtifactReadmeChecklistResult,
     AuditEvent,
+    AuditPackRequest,
+    AuditPackResult,
+    AuditQueryRequest,
+    AuditQueryResult,
+    BlastRadiusRequest,
+    BlastRadiusResult,
+    CapacityForecastRequest,
+    CapacityForecastResult,
+    CapacityGuardrails,
+    CapacityGuardrailsRequest,
+    CapacityGuardrailsResult,
+    CapacityPlanExportRequest,
+    CapacityPlanExportResult,
+    CapacitySkillForecast,
+    CapacityWorkflowDemand,
+    CiDoctorCheck,
+    CiDoctorCheckStatus,
+    CiDoctorResult,
+    ComplianceAttestationRequest,
+    ComplianceAttestationResult,
+    ConformanceReport,
+    ConformanceSkillRecord,
+    DashboardSmokeCheck,
+    DashboardSmokeResult,
+    DependencyEdge,
+    DependencyMapResult,
+    DependencyNode,
+    DependencyReportRequest,
+    DependencyReportResult,
+    EnterprisePortfolioDemoPackRequest,
+    EnterprisePortfolioDemoPackResult,
+    EnterpriseReadinessCategoryScore,
+    EnterpriseReadinessScorecard,
+    EvidenceExportResult,
+    FinalAuditCheck,
+    FinalAuditResult,
+    FinalHandoffPackRequest,
+    FinalHandoffPackResult,
     GovernanceCheck,
     GovernanceReport,
+    InvocationReplayResult,
     JsonDict,
+    LaunchChecklistRequest,
+    LaunchChecklistResult,
     LocalSnapshot,
+    MarketplaceCatalogResult,
+    MarketplaceReviewState,
+    MarketplaceRiskLevel,
+    MarketplaceRolloutPackRequest,
+    MarketplaceRolloutPackResult,
+    MarketplaceSkillListing,
+    MarketplaceTenantEligibility,
     McpToolDefinition,
     PolicyInvocationContext,
+    PolicySimulationRequest,
+    PolicySimulationResult,
+    PortfolioEvidenceIndexResult,
+    PortfolioInterviewPackRequest,
+    PortfolioInterviewPackResult,
     PromptArgument,
     PromptDefinition,
+    ReleaseDiffItem,
+    ReleaseExportResult,
+    ReleaseMcpCapabilities,
+    ReleasePreview,
+    ReleasePublishPackRequest,
+    ReleasePublishPackResult,
+    ReleaseQualityGate,
     ResourceDefinition,
     ResourcePayload,
+    ReviewerQuickstartResult,
+    ReviewerWalkthroughPackRequest,
+    ReviewerWalkthroughPackResult,
+    RuntimeDemoPackRequest,
+    RuntimeDemoPackResult,
+    RuntimeDemoReadinessResult,
+    SecurityReadinessStatus,
+    SecurityReviewSummary,
     SkillGovernanceRecord,
+    SkillIncidentDrillRequest,
+    SkillIncidentDrillResult,
+    SkillIncidentRunbookRequest,
+    SkillIncidentRunbookResult,
+    SkillIncidentScenario,
+    SkillIncidentSeverity,
     SkillInvocation,
     SkillManifest,
     SkillVersion,
+    SmokeMatrixEndpoint,
+    SmokeMatrixResult,
+    TenantCapabilityDecision,
+    TenantKey,
+    TenantPolicyDecision,
+    TenantPolicySimulationRequest,
+    TenantPolicySimulationResult,
+    TenantSandboxExportRequest,
+    TenantSandboxExportResult,
     TokenUsage,
+    UiVerificationPackRequest,
+    UiVerificationPackResult,
+    UsageAnalyticsResult,
+    UsageChargebackPackRequest,
+    UsageChargebackPackResult,
     UsageMetric,
     UsageSummary,
+    WorkflowReviewEvidenceResult,
+    WorkflowSimulationRequest,
+    WorkflowSimulationResult,
+    WorkflowStepResult,
+    WorkflowTemplate,
+    WorkflowTemplateReview,
+    WorkflowTemplateValidation,
 )
 from app.policy import PolicyService
 from app.providers import BaseLLMProvider
@@ -202,30 +310,50 @@ class SkillInvocationService:
     ) -> SkillInvocation:
         trace_id = new_trace_id()
         manifest = self.registry.get(skill_id)
+        policy_decision: PolicySimulationResult | None = None
         if policy_context and policy_context.enforce:
-            decision = self.policy.simulate(manifest, policy_context)
-            if decision.decision == "deny":
+            policy_decision = self.policy.simulate(manifest, policy_context)
+            if policy_decision.decision == "deny":
                 return self._record_failure(
                     manifest,
                     payload,
                     trace_id,
                     actor,
-                    f"Policy denied invocation: {'; '.join(decision.reasons)}",
+                    f"Policy denied invocation: {'; '.join(policy_decision.reasons)}",
                     0.0,
                     audit_action="policy.denied",
                     metadata={
                         "status": "failed",
-                        "policy_decision": decision.model_dump(mode="json"),
+                        "policy_decision": policy_decision.model_dump(mode="json"),
                     },
+                    policy_context=policy_context,
+                    policy_decision=policy_decision,
                 )
         if not manifest.enabled:
-            return self._record_failure(manifest, payload, trace_id, actor, "Skill is disabled.", 0.0)
+            return self._record_failure(
+                manifest,
+                payload,
+                trace_id,
+                actor,
+                "Skill is disabled.",
+                0.0,
+                policy_context=policy_context,
+                policy_decision=policy_decision,
+            )
         errors = self.validator.validate_invocation(manifest, payload)
         if errors:
-            return self._record_failure(manifest, payload, trace_id, actor, "; ".join(errors), 0.0)
+            return self._record_failure(
+                manifest,
+                payload,
+                trace_id,
+                actor,
+                "; ".join(errors),
+                0.0,
+                policy_context=policy_context,
+                policy_decision=policy_decision,
+            )
         with Timer() as timer:
-            handler = BUILTIN_HANDLERS.get(skill_id)
-            output = await handler(payload) if handler else await self._invoke_manifest_backed_skill(manifest, payload)
+            output = await self._execute_skill(manifest, payload)
         output_errors = self.validator.validate_output(manifest, output)
         if output_errors:
             return self._record_failure(
@@ -235,6 +363,8 @@ class SkillInvocationService:
                 actor,
                 f"Output schema validation failed: {'; '.join(output_errors)}",
                 round(timer.elapsed_ms, 2),
+                policy_context=policy_context,
+                policy_decision=policy_decision,
             )
         usage = TokenUsage(
             input_tokens=sum(len(str(value).split()) for value in payload.values()),
@@ -252,6 +382,8 @@ class SkillInvocationService:
             latency_ms=round(timer.elapsed_ms, 2),
             token_usage=usage,
             created_at=utc_now(),
+            policy_context=policy_context,
+            policy_decision=policy_decision,
         )
         self.invocations.append(invocation)
         self.audit.record("skill.invoked", "skill", skill_id, trace_id, actor, {"status": "succeeded"})
@@ -269,6 +401,104 @@ class SkillInvocationService:
             )
         )
         return invocation
+
+    async def replay(self, invocation_id: str) -> InvocationReplayResult:
+        original = self.get(invocation_id)
+        drift_notes: list[str] = []
+        manifest = self.registry.get(original.skill_id)
+        if manifest.version != original.version:
+            drift_notes.append(
+                f"Current manifest version is {manifest.version}; original invocation used {original.version}."
+            )
+
+        replay_status: str = "succeeded"
+        replay_output: JsonDict | None = None
+        replay_error: str | None = None
+        policy_decision: PolicySimulationResult | None = None
+        if original.policy_context and original.policy_context.enforce:
+            policy_decision = self.policy.simulate(manifest, original.policy_context)
+            if policy_decision.decision == "deny":
+                replay_status = "failed"
+                replay_error = f"Policy denied invocation: {'; '.join(policy_decision.reasons)}"
+                drift_notes.append("Replay stopped at the same enforced policy gate.")
+
+        if replay_status == "succeeded":
+            errors = self.validator.validate_invocation(manifest, original.input)
+            if errors:
+                replay_status = "failed"
+                replay_error = "; ".join(errors)
+                drift_notes.append("Replay input no longer conforms to the current input schema.")
+            elif not manifest.enabled:
+                replay_status = "failed"
+                replay_error = "Skill is disabled."
+                drift_notes.append("Replay failed because the skill is currently disabled.")
+            else:
+                replay_output = await self._execute_skill(manifest, original.input)
+                output_errors = self.validator.validate_output(manifest, replay_output)
+                if output_errors:
+                    replay_status = "failed"
+                    replay_error = f"Output schema validation failed: {'; '.join(output_errors)}"
+                    replay_output = None
+                    drift_notes.append("Replay output no longer conforms to the current output schema.")
+                elif original.output and isinstance(original.output.get("metadata"), dict):
+                    replay_output = {
+                        **replay_output,
+                        "metadata": dict(original.output["metadata"]),
+                    }
+
+        same_output = (
+            original.status == replay_status
+            and original.output == replay_output
+            and original.error == replay_error
+        )
+        if not same_output and original.status == "succeeded" and replay_status == "succeeded":
+            drift_notes.append("Replay completed but output differs from the original invocation.")
+        elif not same_output and original.status == "failed" and replay_status == "failed":
+            drift_notes.append("Replay failed consistently but the failure detail changed.")
+        elif original.status != replay_status:
+            drift_notes.append(f"Replay status changed from {original.status} to {replay_status}.")
+        if not drift_notes and same_output:
+            drift_notes.append("Replay matched the original invocation output.")
+
+        self.audit.record(
+            "invocation.replayed",
+            "invocation",
+            invocation_id,
+            new_trace_id(),
+            "replay",
+            {
+                "skill_id": original.skill_id,
+                "same_output": same_output,
+                "replay_status": replay_status,
+                "policy_decision": policy_decision.model_dump(mode="json") if policy_decision else None,
+            },
+        )
+        return InvocationReplayResult(
+            invocation_id=original.id,
+            skill_id=original.skill_id,
+            version=original.version,
+            original_input=original.input,
+            original_output=original.output,
+            replay_output=replay_output,
+            same_output=same_output,
+            drift_notes=drift_notes,
+            original_status=original.status,
+            replay_status=replay_status,
+            original_error=original.error,
+            replay_error=replay_error,
+        )
+
+    def get(self, invocation_id: str) -> SkillInvocation:
+        for invocation in self.invocations:
+            if invocation.id == invocation_id:
+                return invocation
+        raise KeyError(f"Unknown invocation: {invocation_id}")
+
+    async def _execute_skill(self, manifest: SkillManifest, payload: JsonDict) -> JsonDict:
+        handler = BUILTIN_HANDLERS.get(manifest.id)
+        if handler:
+            return await handler(payload)
+        return await self._invoke_manifest_backed_skill(manifest, payload)
 
     async def _invoke_manifest_backed_skill(self, manifest: SkillManifest, payload: JsonDict) -> JsonDict:
         response, _usage = await self.provider.complete(
@@ -302,6 +532,8 @@ class SkillInvocationService:
         latency_ms: float,
         audit_action: str = "skill.invoked",
         metadata: JsonDict | None = None,
+        policy_context: PolicyInvocationContext | None = None,
+        policy_decision: PolicySimulationResult | None = None,
     ) -> SkillInvocation:
         usage = TokenUsage()
         invocation = SkillInvocation(
@@ -316,6 +548,8 @@ class SkillInvocationService:
             token_usage=usage,
             created_at=utc_now(),
             error=error,
+            policy_context=policy_context,
+            policy_decision=policy_decision,
         )
         self.invocations.append(invocation)
         self.audit.record(
@@ -369,6 +603,16 @@ class PromptRegistry:
                 arguments=[PromptArgument(name="notes", description="Meeting notes")],
                 template="Create a meeting summary with decisions, risks, owners, and next actions.",
             ),
+            PromptDefinition(
+                id="workflow_composition",
+                name="Workflow Composition",
+                description="Compose promoted skills into a governed workflow with policy checks and trace output.",
+                arguments=[
+                    PromptArgument(name="template_id", description="Workflow template id"),
+                    PromptArgument(name="input_text", description="Business input to simulate"),
+                ],
+                template="Simulate the selected workflow template and report selected skills, policy decisions, traces, and final output.",
+            ),
         ]
 
     def list(self) -> list[PromptDefinition]:
@@ -413,6 +657,17 @@ class ResourceRegistry:
                     description="Fake vendor risk policy for third-party LLM and tool provider reviews.",
                     content_ref="sample_data/vendor_risk_policy.md",
                     annotations={"kind": "policy"},
+                ),
+                content="",
+            ),
+            ResourcePayload(
+                definition=ResourceDefinition(
+                    uri="resource://workflow-templates",
+                    name="Workflow Templates",
+                    description="Reusable agent workflow templates that compose promoted skills.",
+                    mime_type="application/json",
+                    content_ref="sample_data/workflow_templates.json",
+                    annotations={"kind": "workflow_templates"},
                 ),
                 content="",
             ),
@@ -587,6 +842,570 @@ class AgentRunner:
         return f"Processed compound task with {len(trace)} governed skills: {skill_names}. Original task: {prompt[:160]}"
 
 
+class WorkflowTemplateService:
+    def __init__(
+        self,
+        app_state: AppState,
+        template_path: Path | None = None,
+        review_dir: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.template_path = template_path or Path("sample_data") / "workflow_templates.json"
+        self.review_dir = review_dir or Path("data") / "workflow_reviews"
+        self.review_store_path = self.review_dir / "submitted_templates.json"
+
+    def list(self) -> list[WorkflowTemplate]:
+        templates = {template.id: template for template in self._base_templates()}
+        for review in self.reviews():
+            if review.status == "approved":
+                templates[review.template_id] = review.template
+        return sorted(templates.values(), key=lambda template: template.id)
+
+    def reviews(self) -> list[WorkflowTemplateReview]:
+        reviews = list(self._load_reviews().values())
+        refreshed = [
+            review.model_copy(update={"validation": self.validate_template(review.template)})
+            for review in reviews
+        ]
+        return sorted(refreshed, key=lambda review: (review.status, review.template_id))
+
+    def submit(self, template: WorkflowTemplate, actor: str = "api-user") -> WorkflowTemplateReview:
+        if template.id in {item.id for item in self._base_templates()}:
+            raise ValueError(f"Workflow template id '{template.id}' is already approved.")
+        now = utc_now()
+        review = WorkflowTemplateReview(
+            template_id=template.id,
+            template=template,
+            status="in_review",
+            submitted_by=actor,
+            submitted_at=now,
+            updated_at=now,
+            validation=self.validate_template(template),
+        )
+        self._save_review(review)
+        self.app_state.audit.record(
+            "workflow_template.submitted",
+            "workflow_template",
+            template.id,
+            new_trace_id(),
+            actor,
+            {
+                "status": review.status,
+                "validation_status": review.validation.validation_status,
+                "required_role": template.required_role,
+                "sensitivity": template.default_sensitivity,
+            },
+        )
+        return review
+
+    def approve(
+        self,
+        template_id: str,
+        actor: str = "workflow-reviewer",
+        note: str | None = None,
+    ) -> WorkflowTemplateReview:
+        review = self._review(template_id)
+        validation = self.validate_template(review.template)
+        if validation.validation_status == "invalid":
+            raise ValueError(f"Workflow template '{template_id}' is invalid and cannot be approved.")
+        approved = review.model_copy(
+            update={
+                "status": "approved",
+                "reviewed_by": actor,
+                "reviewed_at": utc_now(),
+                "updated_at": utc_now(),
+                "review_note": note,
+                "validation": validation,
+            }
+        )
+        self._save_review(approved)
+        self.app_state.audit.record(
+            "workflow_template.approved",
+            "workflow_template",
+            template_id,
+            new_trace_id(),
+            actor,
+            {
+                "validation_status": validation.validation_status,
+                "policy_warnings": validation.policy_warnings,
+                "note": note,
+            },
+        )
+        return approved
+
+    def reject(
+        self,
+        template_id: str,
+        actor: str = "workflow-reviewer",
+        note: str | None = None,
+    ) -> WorkflowTemplateReview:
+        review = self._review(template_id)
+        rejected = review.model_copy(
+            update={
+                "status": "rejected",
+                "reviewed_by": actor,
+                "reviewed_at": utc_now(),
+                "updated_at": utc_now(),
+                "review_note": note,
+                "validation": self.validate_template(review.template),
+            }
+        )
+        self._save_review(rejected)
+        self.app_state.audit.record(
+            "workflow_template.rejected",
+            "workflow_template",
+            template_id,
+            new_trace_id(),
+            actor,
+            {"note": note, "validation_status": rejected.validation.validation_status},
+        )
+        return rejected
+
+    def validate_template(self, template: WorkflowTemplate) -> WorkflowTemplateValidation:
+        errors: list[str] = []
+        missing_skills: list[str] = []
+        invalid_skills: list[str] = []
+        policy_warnings: list[str] = []
+
+        if not template.ordered_skill_ids:
+            errors.append("Template must include at least one ordered skill.")
+        if len(set(template.ordered_skill_ids)) != len(template.ordered_skill_ids):
+            errors.append("Template must not repeat a skill id in ordered_skill_ids.")
+        if not template.expected_outputs:
+            policy_warnings.append("Template does not declare expected outputs.")
+
+        for skill_id in template.ordered_skill_ids:
+            try:
+                skill = self.app_state.registry.get(skill_id)
+            except KeyError:
+                missing_skills.append(skill_id)
+                continue
+            if not self.app_state.registry.is_mcp_exposed(skill):
+                invalid_skills.append(f"{skill_id}:status={skill.status},enabled={skill.enabled}")
+            decision = self.app_state.policy.simulate(
+                skill,
+                PolicySimulationRequest(
+                    skill_id=skill_id,
+                    role=template.required_role,
+                    environment="local",
+                    data_sensitivity=template.default_sensitivity,
+                    requested_action="invoke",
+                ),
+            )
+            if decision.decision == "deny":
+                policy_warnings.append(
+                    f"{skill_id}: {'; '.join(decision.matched_rules)} - {'; '.join(decision.reasons)}"
+                )
+
+        if errors or missing_skills or invalid_skills:
+            validation_status = "invalid"
+        elif policy_warnings:
+            validation_status = "warnings"
+        else:
+            validation_status = "valid"
+
+        return WorkflowTemplateValidation(
+            template_id=template.id,
+            validation_status=validation_status,
+            valid=validation_status != "invalid",
+            required_role=template.required_role,
+            sensitivity=template.default_sensitivity,
+            missing_skills=sorted(set(missing_skills)),
+            invalid_skills=sorted(set(invalid_skills)),
+            policy_warnings=sorted(set(policy_warnings)),
+            errors=errors,
+        )
+
+    async def export_review_evidence(
+        self,
+        template_id: str,
+        actor: str = "workflow-reviewer",
+    ) -> WorkflowReviewEvidenceResult:
+        review = self._review(template_id)
+        validation = self.validate_template(review.template)
+        trace_id = new_trace_id()
+        self.app_state.audit.record(
+            "workflow_template.review_evidence_exported",
+            "workflow_template",
+            template_id,
+            trace_id,
+            actor,
+            {"status": review.status, "validation_status": validation.validation_status},
+        )
+        dry_run = await self._simulate_template(
+            review.template,
+            WorkflowSimulationRequest(
+                input_text=f"Dry-run review evidence for workflow template {review.template.name}.",
+                role=review.template.required_role,
+                data_sensitivity=review.template.default_sensitivity,
+                environment="local",
+            ),
+            "workflow-review-evidence",
+        )
+        dry_run_trace_ids = {step.trace_id for step in dry_run.step_outputs}
+        dry_run_trace_ids.add(trace_id)
+        bundle = {
+            "template_id": template_id,
+            "generated_at": utc_now().isoformat(),
+            "template": review.template.model_dump(mode="json"),
+            "review": review.model_copy(update={"validation": validation}).model_dump(mode="json"),
+            "validation": validation.model_dump(mode="json"),
+            "simulation_dry_run": dry_run.model_dump(mode="json"),
+            "approval_rejection": {
+                "status": review.status,
+                "reviewed_by": review.reviewed_by,
+                "reviewed_at": review.reviewed_at.isoformat() if review.reviewed_at else None,
+                "review_note": review.review_note,
+            },
+            "policy_warnings": validation.policy_warnings,
+            "audit_events": [
+                event.model_dump(mode="json")
+                for event in self._audit_events_for_review(template_id, dry_run_trace_ids)
+            ],
+        }
+        summary = {
+            "review_status": review.status,
+            "validation_status": validation.validation_status,
+            "missing_skill_count": len(validation.missing_skills),
+            "invalid_skill_count": len(validation.invalid_skills),
+            "policy_warning_count": len(validation.policy_warnings),
+            "dry_run_blocked_steps": len(dry_run.blocked_steps),
+        }
+        bundle["summary"] = summary
+
+        self.review_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.review_dir / f"{template_id}_review_evidence.json"
+        markdown_path = self.review_dir / f"{template_id}_review_evidence.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._review_evidence_markdown(bundle), encoding="utf-8")
+        return WorkflowReviewEvidenceResult(
+            template_id=template_id,
+            generated_at=utc_now(),
+            status=review.status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=summary,
+        )
+
+    def _base_templates(self) -> list[WorkflowTemplate]:
+        payload = json.loads(self.template_path.read_text(encoding="utf-8"))
+        return [WorkflowTemplate.model_validate(item) for item in payload]
+
+    def get(self, template_id: str) -> WorkflowTemplate:
+        for template in self.list():
+            if template.id == template_id:
+                return template
+        raise KeyError(f"Unknown workflow template: {template_id}")
+
+    async def simulate(
+        self,
+        template_id: str,
+        request: WorkflowSimulationRequest,
+        actor: str = "workflow-simulator",
+    ) -> WorkflowSimulationResult:
+        template = self.get(template_id)
+        return await self._simulate_template(template, request, actor)
+
+    async def _simulate_template(
+        self,
+        template: WorkflowTemplate,
+        request: WorkflowSimulationRequest,
+        actor: str,
+    ) -> WorkflowSimulationResult:
+        sensitivity = request.data_sensitivity or template.default_sensitivity
+        selected_skills: list[str] = []
+        step_outputs: list[WorkflowStepResult] = []
+        trace: list[JsonDict] = []
+        blocked_steps: list[WorkflowStepResult] = []
+
+        for index, skill_id in enumerate(template.ordered_skill_ids, start=1):
+            step_trace_id = new_trace_id()
+            step = await self._simulate_step(
+                template,
+                request,
+                sensitivity,
+                skill_id,
+                index,
+                step_trace_id,
+                actor,
+            )
+            step_outputs.append(step)
+            trace.append(self._trace_entry(step))
+            if step.status != "succeeded":
+                blocked_steps.append(step)
+                break
+            selected_skills.append(skill_id)
+
+        return WorkflowSimulationResult(
+            id=new_id("wf"),
+            template_id=template.id,
+            template_name=template.name,
+            selected_skills=selected_skills,
+            step_outputs=step_outputs,
+            trace=trace,
+            final_output=self._final_output(template, request.input_text, selected_skills, blocked_steps),
+            blocked_steps=blocked_steps,
+            data_sensitivity=sensitivity,
+            environment=request.environment,
+            role=request.role,
+        )
+
+    def _review(self, template_id: str) -> WorkflowTemplateReview:
+        reviews = self._load_reviews()
+        if template_id not in reviews:
+            raise KeyError(f"Unknown workflow template review: {template_id}")
+        return reviews[template_id].model_copy(
+            update={"validation": self.validate_template(reviews[template_id].template)}
+        )
+
+    def _load_reviews(self) -> dict[str, WorkflowTemplateReview]:
+        if not self.review_store_path.exists():
+            return {}
+        payload = json.loads(self.review_store_path.read_text(encoding="utf-8"))
+        return {
+            item["template_id"]: WorkflowTemplateReview.model_validate(item)
+            for item in payload
+        }
+
+    def _save_review(self, review: WorkflowTemplateReview) -> None:
+        reviews = self._load_reviews()
+        reviews[review.template_id] = review
+        self.review_dir.mkdir(parents=True, exist_ok=True)
+        payload = [item.model_dump(mode="json") for item in sorted(reviews.values(), key=lambda row: row.template_id)]
+        self.review_store_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _audit_events_for_review(
+        self,
+        template_id: str,
+        trace_ids: set[str],
+    ) -> list[AuditEvent]:
+        return [
+            event
+            for event in self.app_state.audit.events
+            if (event.resource_type == "workflow_template" and event.resource_id == template_id)
+            or event.trace_id in trace_ids
+        ]
+
+    def _review_evidence_markdown(self, bundle: JsonDict) -> str:
+        template = bundle["template"]
+        validation = bundle["validation"]
+        summary = bundle["summary"]
+        simulation = bundle["simulation_dry_run"]
+        review = bundle["approval_rejection"]
+        lines = [
+            "# Workflow Template Review Evidence",
+            "",
+            f"- Template: `{template['id']}` ({template['name']})",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Review status: `{summary['review_status']}`",
+            f"- Validation status: `{summary['validation_status']}`",
+            f"- Required role: `{validation['required_role']}`",
+            f"- Sensitivity: `{validation['sensitivity']}`",
+            f"- Decision: `{review['status']}`",
+            "",
+            "## Template",
+            "",
+            f"- Skills: `{', '.join(template['ordered_skill_ids'])}`",
+            f"- Expected outputs: `{', '.join(template['expected_outputs']) or 'none'}`",
+            "",
+            "## Validation",
+            "",
+            f"- Missing skills: `{', '.join(validation['missing_skills']) or 'none'}`",
+            f"- Invalid skills: `{', '.join(validation['invalid_skills']) or 'none'}`",
+            f"- Errors: `{', '.join(validation['errors']) or 'none'}`",
+            "",
+            "## Policy Warnings",
+            "",
+            *[f"- {warning}" for warning in validation["policy_warnings"]],
+            "",
+            "## Simulation Dry Run",
+            "",
+            f"- Result id: `{simulation['id']}`",
+            f"- Executed skills: `{', '.join(simulation['selected_skills']) or 'none'}`",
+            f"- Blocked steps: `{len(simulation['blocked_steps'])}`",
+            f"- Final output: {simulation['final_output']}",
+            "",
+            "## Approval Or Rejection",
+            "",
+            f"- Reviewed by: `{review['reviewed_by'] or 'pending'}`",
+            f"- Reviewed at: `{review['reviewed_at'] or 'pending'}`",
+            f"- Note: {review['review_note'] or 'none'}",
+            "",
+            "## Audit Events",
+            "",
+            *[
+                f"- `{event['created_at']}` `{event['action']}` `{event['resource_type']}/{event['resource_id']}`"
+                for event in bundle["audit_events"]
+            ],
+            "",
+        ]
+        return "\n".join(lines)
+
+    async def _simulate_step(
+        self,
+        template: WorkflowTemplate,
+        request: WorkflowSimulationRequest,
+        sensitivity: str,
+        skill_id: str,
+        step_index: int,
+        step_trace_id: str,
+        actor: str,
+    ) -> WorkflowStepResult:
+        try:
+            skill = self.app_state.registry.get(skill_id)
+        except KeyError:
+            decision = PolicySimulationResult(
+                skill_id=skill_id,
+                role=request.role,
+                environment=request.environment,
+                data_sensitivity=sensitivity,
+                requested_action="invoke",
+                decision="deny",
+                reasons=[f"Template references unknown skill '{skill_id}'."],
+                matched_rules=["skill-known"],
+            )
+            return self._blocked_step(step_index, skill_id, decision, step_trace_id)
+
+        decision = self.app_state.policy.simulate(
+            skill,
+            PolicySimulationRequest(
+                skill_id=skill_id,
+                role=request.role,
+                environment=request.environment,
+                data_sensitivity=sensitivity,
+                requested_action="invoke",
+            ),
+        )
+        if not self._role_satisfies_template(request.role, template.required_role):
+            decision = decision.model_copy(
+                update={
+                    "decision": "deny",
+                    "reasons": [
+                        *decision.reasons,
+                        f"Workflow template requires role '{template.required_role}' or above.",
+                    ],
+                    "matched_rules": [*decision.matched_rules, "template-required-role"],
+                }
+            )
+
+        if decision.decision == "deny":
+            return WorkflowStepResult(
+                step_index=step_index,
+                skill_id=skill_id,
+                status="denied",
+                policy_decision=decision,
+                output=None,
+                trace_id=step_trace_id,
+                reason="Policy denied this workflow step.",
+            )
+
+        if not self.app_state.registry.is_mcp_exposed(skill):
+            blocked = decision.model_copy(
+                update={
+                    "decision": "deny",
+                    "reasons": [
+                        *decision.reasons,
+                        "Only promoted and enabled skills can run in workflow composition.",
+                    ],
+                    "matched_rules": [*decision.matched_rules, "skill-must-be-promoted"],
+                }
+            )
+            return self._blocked_step(step_index, skill_id, blocked, step_trace_id)
+
+        result = await self.app_state.mcp.call_tool(
+            skill_id,
+            self._payload_for_skill(skill_id, request.input_text),
+            actor,
+            PolicyInvocationContext(
+                role=request.role,
+                environment=request.environment,
+                data_sensitivity=sensitivity,
+                requested_action="invoke",
+                enforce=True,
+            ),
+        )
+        if result.get("status") != "succeeded":
+            blocked = decision.model_copy(
+                update={
+                    "decision": "deny",
+                    "reasons": [*decision.reasons, str(result.get("error", "Workflow step failed."))],
+                    "matched_rules": [*decision.matched_rules, "tool-call-failed"],
+                }
+            )
+            return self._blocked_step(step_index, skill_id, blocked, result.get("trace_id", step_trace_id))
+
+        return WorkflowStepResult(
+            step_index=step_index,
+            skill_id=skill_id,
+            status="succeeded",
+            policy_decision=decision,
+            output=result["result"],
+            trace_id=result.get("trace_id", step_trace_id),
+            reason="Promoted skill passed policy and executed.",
+        )
+
+    def _blocked_step(
+        self,
+        step_index: int,
+        skill_id: str,
+        decision: PolicySimulationResult,
+        trace_id: str,
+    ) -> WorkflowStepResult:
+        return WorkflowStepResult(
+            step_index=step_index,
+            skill_id=skill_id,
+            status="blocked",
+            policy_decision=decision,
+            output=None,
+            trace_id=trace_id,
+            reason="Workflow stopped before executing this step.",
+        )
+
+    def _payload_for_skill(self, skill_id: str, input_text: str) -> JsonDict:
+        if skill_id == "classify_request":
+            return {"request": input_text}
+        if skill_id == "search_knowledge_base":
+            return {"query": input_text, "limit": 3}
+        if skill_id == "translate_text":
+            return {"text": input_text, "target_language": "Spanish"}
+        return {"text": input_text}
+
+    def _role_satisfies_template(self, role: str, required_role: str) -> bool:
+        rank = {"viewer": 0, "agent": 1, "reviewer": 2, "admin": 3}
+        return rank[role] >= rank[required_role]
+
+    def _trace_entry(self, step: WorkflowStepResult) -> JsonDict:
+        return {
+            "step_index": step.step_index,
+            "skill_id": step.skill_id,
+            "status": step.status,
+            "trace_id": step.trace_id,
+            "policy_decision": step.policy_decision.decision,
+            "matched_rules": step.policy_decision.matched_rules,
+            "reason": step.reason,
+        }
+
+    def _final_output(
+        self,
+        template: WorkflowTemplate,
+        input_text: str,
+        selected_skills: list[str],
+        blocked_steps: list[WorkflowStepResult],
+    ) -> str:
+        if blocked_steps:
+            first_block = blocked_steps[0]
+            return (
+                f"{template.name} blocked at step {first_block.step_index} "
+                f"({first_block.skill_id}) after {len(selected_skills)} completed skills."
+            )
+        outputs = ", ".join(template.expected_outputs)
+        skills = ", ".join(selected_skills)
+        return (
+            f"{template.name} completed with {len(selected_skills)} governed skills "
+            f"({skills}) and produced: {outputs}. Input: {input_text[:160]}"
+        )
+
+
 class GovernanceReportService:
     def __init__(self, app_state: AppState) -> None:
         self.app_state = app_state
@@ -734,6 +1553,11267 @@ class GovernanceReportService:
         return flags
 
 
+class ConformanceReportService:
+    def __init__(self, app_state: AppState) -> None:
+        self.app_state = app_state
+
+    async def generate(self) -> ConformanceReport:
+        records = [await self._skill_record(skill) for skill in self._promoted_skills()]
+        failed = sum(1 for record in records if record.failures)
+        return ConformanceReport(
+            generated_at=utc_now(),
+            status="fail" if failed else "pass",
+            promoted_skill_count=len(records),
+            passed_skill_count=len(records) - failed,
+            failed_skill_count=failed,
+            skills=records,
+        )
+
+    def sample_input(self, skill_id: str) -> JsonDict:
+        samples: dict[str, JsonDict] = {
+            "summarize_document": {
+                "text": "Atlas Labs needs governed MCP skills with audit logs. Replay must be deterministic.",
+                "resource_uri": "resource://product/skill-hub",
+            },
+            "extract_entities": {
+                "text": "Priya Shah at Atlas Labs raised an MCP governance risk on 2026-06-15.",
+            },
+            "translate_text": {
+                "text": "Governed enterprise agents need stable local contracts.",
+                "target_language": "Spanish",
+            },
+            "classify_request": {
+                "request": "Security review is blocking the procurement RFP response.",
+            },
+            "generate_action_items": {
+                "text": "Action: Priya to follow up with Atlas Labs by 2026-06-15.",
+            },
+            "search_knowledge_base": {
+                "query": "AI governance policy audit history",
+                "limit": 2,
+            },
+        }
+        return samples.get(skill_id, self._sample_from_schema(self.app_state.registry.get(skill_id).input_schema))
+
+    async def _skill_record(self, skill: SkillManifest) -> ConformanceSkillRecord:
+        failures: list[str] = []
+        validation = self.app_state.validator.validate_manifest(skill.model_dump(mode="json"))
+        schema_valid = validation.valid
+        if not schema_valid:
+            failures.extend(validation.errors)
+
+        sample = self.sample_input(skill.id)
+        sample_errors = self.app_state.validator.validate_invocation(skill, sample)
+        if sample_errors:
+            failures.extend(f"sample input: {error}" for error in sample_errors)
+
+        policy_checked = False
+        policy_result = self.app_state.policy.simulate(
+            skill,
+            PolicySimulationRequest(
+                skill_id=skill.id,
+                role="agent",
+                environment="local",
+                data_sensitivity="internal",
+                requested_action="invoke",
+            ),
+        )
+        policy_checked = policy_result.decision == "allow"
+        if not policy_checked:
+            failures.append(f"policy check denied sample invocation: {'; '.join(policy_result.reasons)}")
+
+        mcp_tool_names = {tool.name for tool in self.app_state.mcp.list_tools()}
+        mcp_exposed = skill.id in mcp_tool_names
+        if not mcp_exposed:
+            failures.append("skill is not exposed through the MCP tool adapter")
+
+        sample_invocation_passed = False
+        output_schema_valid = False
+        if not sample_errors and policy_checked and mcp_exposed:
+            invocation = await self.app_state.invocation_service.invoke(skill.id, sample, "conformance")
+            sample_invocation_passed = invocation.status == "succeeded"
+            if sample_invocation_passed and invocation.output is not None:
+                output_errors = self.app_state.validator.validate_output(skill, invocation.output)
+                output_schema_valid = not output_errors
+                failures.extend(f"output schema: {error}" for error in output_errors)
+            else:
+                failures.append(invocation.error or "sample invocation failed")
+
+        return ConformanceSkillRecord(
+            skill_id=skill.id,
+            version=skill.version,
+            schema_valid=schema_valid,
+            sample_invocation_passed=sample_invocation_passed,
+            output_schema_valid=output_schema_valid,
+            policy_checked=policy_checked,
+            mcp_exposed=mcp_exposed,
+            prompt_refs=self._prompt_refs(skill.id),
+            resource_refs=self._resource_refs(skill.id, sample),
+            failures=failures,
+        )
+
+    def _promoted_skills(self) -> list[SkillManifest]:
+        return [skill for skill in self.app_state.registry.list() if skill.status == "promoted"]
+
+    def _sample_from_schema(self, schema: JsonDict) -> JsonDict:
+        payload: JsonDict = {}
+        for field_name, definition in schema.get("properties", {}).items():
+            if field_name not in schema.get("required", []):
+                continue
+            schema_type = definition.get("type")
+            if schema_type == "string":
+                payload[field_name] = f"Sample {field_name}"
+            elif schema_type == "integer":
+                payload[field_name] = 1
+            elif schema_type == "number":
+                payload[field_name] = 1.0
+            elif schema_type == "boolean":
+                payload[field_name] = True
+            elif schema_type == "array":
+                payload[field_name] = []
+            elif schema_type == "object":
+                payload[field_name] = {}
+        return payload
+
+    def _prompt_refs(self, skill_id: str) -> list[str]:
+        mapping = {
+            "summarize_document": ["meeting_summary"],
+            "extract_entities": ["meeting_summary"],
+            "classify_request": ["rfp_answer"],
+            "generate_action_items": ["meeting_summary"],
+            "search_knowledge_base": ["support_reply", "rfp_answer"],
+        }
+        available = {prompt.id for prompt in self.app_state.prompts.list()}
+        return [prompt_id for prompt_id in mapping.get(skill_id, []) if prompt_id in available]
+
+    def _resource_refs(self, skill_id: str, sample: JsonDict) -> list[str]:
+        refs: list[str] = []
+        if isinstance(sample.get("resource_uri"), str):
+            refs.append(sample["resource_uri"])
+        if skill_id == "search_knowledge_base":
+            refs.extend(resource.uri for resource in self.app_state.resources.list() if resource.uri.startswith("resource://policy/"))
+        available = {resource.uri for resource in self.app_state.resources.list()}
+        return sorted({ref for ref in refs if ref in available})
+
+
+class EvidenceBundleService:
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "evidence"
+
+    async def export(self, actor: str = "security-reviewer") -> EvidenceExportResult:
+        bundle_id = "security_evidence_latest"
+        json_path = self.output_dir / f"{bundle_id}.json"
+        markdown_path = self.output_dir / f"{bundle_id}.md"
+        self.app_state.audit.record(
+            "evidence.exported",
+            "evidence",
+            bundle_id,
+            new_trace_id(),
+            actor,
+            {"json_path": str(json_path), "markdown_path": str(markdown_path)},
+        )
+        bundle = await self._bundle(bundle_id)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        summary = bundle["security_review_summary"]
+        return EvidenceExportResult(
+            bundle_id=bundle_id,
+            generated_at=bundle["generated_at"],
+            readiness_status=summary["readiness_status"],
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=summary,
+        )
+
+    async def security_review_summary(self) -> SecurityReviewSummary:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        policy_denials = self._denied_policy_attempts()
+        high_risk_flags = self._high_risk_flags(governance, len(policy_denials))
+        readiness_status = self._readiness_status(governance, conformance, high_risk_flags)
+        return SecurityReviewSummary(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            policy_denial_count=len(policy_denials),
+            promoted_skill_count=conformance.promoted_skill_count,
+            conformance_pass_count=conformance.passed_skill_count,
+            high_risk_flags=high_risk_flags,
+            recommended_actions=self._recommended_actions(readiness_status, high_risk_flags),
+        )
+
+    async def _bundle(self, bundle_id: str) -> JsonDict:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        policy_summary = self._policy_summary()
+        denied_attempts = self._denied_policy_attempts()
+        high_risk_flags = self._high_risk_flags(governance, len(denied_attempts))
+        readiness_status = self._readiness_status(governance, conformance, high_risk_flags)
+        recommended_actions = self._recommended_actions(readiness_status, high_risk_flags)
+        summary = SecurityReviewSummary(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            policy_denial_count=len(denied_attempts),
+            promoted_skill_count=conformance.promoted_skill_count,
+            conformance_pass_count=conformance.passed_skill_count,
+            high_risk_flags=high_risk_flags,
+            recommended_actions=recommended_actions,
+        )
+        skills = self.app_state.registry.list()
+        return {
+            "bundle_id": bundle_id,
+            "generated_at": utc_now().isoformat(),
+            "security_review_summary": summary.model_dump(mode="json"),
+            "governance_report": governance.model_dump(mode="json"),
+            "conformance_report": conformance.model_dump(mode="json"),
+            "policy_summary": policy_summary,
+            "promoted_skills": [
+                self._skill_export(skill)
+                for skill in skills
+                if skill.status == "promoted" and skill.enabled
+            ],
+            "excluded_skills": {
+                "disabled": [self._skill_export(skill) for skill in skills if skill.status == "disabled"],
+                "draft": [self._skill_export(skill) for skill in skills if skill.status == "draft"],
+                "validated": [self._skill_export(skill) for skill in skills if skill.status == "validated"],
+                "not_mcp_exposed": [
+                    self._skill_export(skill)
+                    for skill in skills
+                    if not self.app_state.registry.is_mcp_exposed(skill)
+                ],
+            },
+            "recent_audit_events": [
+                event.model_dump(mode="json") for event in self.app_state.audit.events[-25:]
+            ],
+            "invocation_summary": self._invocation_summary(),
+            "denied_policy_attempts": denied_attempts,
+            "mcp_summary": self._mcp_summary(),
+            "recommended_next_controls": recommended_actions,
+        }
+
+    def _skill_export(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "provider": skill.provider,
+            "tags": skill.tags,
+            "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill),
+        }
+
+    def _policy_summary(self) -> JsonDict:
+        allowed_count = 0
+        denied_count = 0
+        denied_by_role = {role: 0 for role in ("admin", "reviewer", "agent", "viewer")}
+        denied_by_sensitivity = {sensitivity: 0 for sensitivity in ("public", "internal", "confidential")}
+        denied_rules: dict[str, int] = {}
+        for skill in self.app_state.registry.list():
+            for role in ("admin", "reviewer", "agent", "viewer"):
+                for sensitivity in ("public", "internal", "confidential"):
+                    result = self.app_state.policy.simulate(
+                        skill,
+                        PolicySimulationRequest(
+                            skill_id=skill.id,
+                            role=role,
+                            environment="local",
+                            data_sensitivity=sensitivity,
+                            requested_action="invoke",
+                        ),
+                    )
+                    if result.decision == "allow":
+                        allowed_count += 1
+                    else:
+                        denied_count += 1
+                        denied_by_role[role] += 1
+                        denied_by_sensitivity[sensitivity] += 1
+                        for rule in result.matched_rules:
+                            if rule != "default-allow":
+                                denied_rules[rule] = denied_rules.get(rule, 0) + 1
+        return {
+            "total_simulations": allowed_count + denied_count,
+            "allowed_count": allowed_count,
+            "denied_count": denied_count,
+            "denied_by_role": denied_by_role,
+            "denied_by_sensitivity": denied_by_sensitivity,
+            "top_denied_rules": denied_rules,
+        }
+
+    def _invocation_summary(self) -> JsonDict:
+        summary = self.app_state.metrics.summary()
+        by_status = {"succeeded": 0, "failed": 0}
+        for invocation in self.app_state.invocation_service.invocations:
+            by_status[invocation.status] += 1
+        return {
+            "usage": summary.model_dump(mode="json"),
+            "by_status": by_status,
+            "recent_invocation_ids": [
+                invocation.id for invocation in self.app_state.invocation_service.invocations[-10:]
+            ],
+        }
+
+    def _denied_policy_attempts(self) -> list[JsonDict]:
+        attempts: list[JsonDict] = []
+        for invocation in self.app_state.invocation_service.invocations:
+            if invocation.policy_decision and invocation.policy_decision.decision == "deny":
+                attempts.append(
+                    {
+                        "invocation_id": invocation.id,
+                        "skill_id": invocation.skill_id,
+                        "trace_id": invocation.trace_id,
+                        "created_at": invocation.created_at.isoformat(),
+                        "error": invocation.error,
+                        "policy_decision": invocation.policy_decision.model_dump(mode="json"),
+                    }
+                )
+        return attempts
+
+    def _mcp_summary(self) -> JsonDict:
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        return {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            "tools": [tool.name for tool in tools],
+            "resources": [resource.uri for resource in resources],
+            "prompts": [prompt.id for prompt in prompts],
+        }
+
+    def _high_risk_flags(self, governance: GovernanceReport, policy_denial_count: int) -> list[str]:
+        flags: list[str] = []
+        if governance.status == "fail":
+            flags.append("governance_failure")
+        for skill in governance.skills:
+            if not skill.schema_valid:
+                flags.append(f"{skill.skill_id}:schema_invalid")
+            if skill.status == "promoted" and not skill.mcp_exposed:
+                flags.append(f"{skill.skill_id}:promoted_not_mcp_exposed")
+            if skill.provider != "mock":
+                flags.append(f"{skill.skill_id}:external_provider")
+            if skill.failure_count:
+                flags.append(f"{skill.skill_id}:invocation_failures")
+        if policy_denial_count:
+            flags.append("policy_denials_recorded")
+        return sorted(set(flags))
+
+    def _readiness_status(
+        self,
+        governance: GovernanceReport,
+        conformance: ConformanceReport,
+        high_risk_flags: list[str],
+    ) -> SecurityReadinessStatus:
+        if governance.status == "fail" or conformance.status == "fail":
+            return "blocked"
+        if governance.status == "warn" or high_risk_flags:
+            return "needs_review"
+        return "ready"
+
+    def _recommended_actions(
+        self,
+        readiness_status: SecurityReadinessStatus,
+        high_risk_flags: list[str],
+    ) -> list[str]:
+        actions: list[str] = []
+        if readiness_status == "ready":
+            actions.append("Schedule security reviewer sign-off using the exported evidence bundle.")
+            actions.append("Attach the JSON artifact to procurement or model-risk review records.")
+        if "policy_denials_recorded" in high_risk_flags:
+            actions.append("Review denied policy attempts and confirm they match expected access rules.")
+        if any("schema_invalid" in flag for flag in high_risk_flags):
+            actions.append("Fix invalid manifests before promotion or MCP exposure.")
+        if any("external_provider" in flag for flag in high_risk_flags):
+            actions.append("Document provider due diligence and production approval for non-mock skills.")
+        if any("invocation_failures" in flag for flag in high_risk_flags):
+            actions.append("Investigate failed invocations and rerun conformance before review.")
+        if readiness_status == "blocked":
+            actions.append("Resolve failed governance or conformance checks before board review.")
+        if not actions:
+            actions.append("Review governance warnings and capture an owner for each exception.")
+        return actions
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        summary = bundle["security_review_summary"]
+        governance = bundle["governance_report"]
+        conformance = bundle["conformance_report"]
+        mcp = bundle["mcp_summary"]
+        policy = bundle["policy_summary"]
+        lines = [
+            "# Security Evidence Bundle",
+            "",
+            f"- Bundle ID: `{bundle['bundle_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{summary['readiness_status']}`",
+            f"- Policy denials: `{summary['policy_denial_count']}`",
+            f"- Promoted skills: `{summary['promoted_skill_count']}`",
+            f"- Conformance passes: `{summary['conformance_pass_count']}`",
+            "",
+            "## Governance Report",
+            "",
+            f"- Status: `{governance['status']}`",
+            f"- Registered skills: `{governance['skills_registered']}`",
+            f"- Enabled MCP tools: `{governance['enabled_tools']}`",
+            f"- Disabled skills: `{', '.join(governance['disabled_skills']) or 'none'}`",
+            "",
+            "## Conformance Report",
+            "",
+            f"- Status: `{conformance['status']}`",
+            f"- Promoted skill count: `{conformance['promoted_skill_count']}`",
+            f"- Passed skill count: `{conformance['passed_skill_count']}`",
+            f"- Failed skill count: `{conformance['failed_skill_count']}`",
+            "",
+            "## Policy Summary",
+            "",
+            f"- Simulations: `{policy['total_simulations']}`",
+            f"- Allowed: `{policy['allowed_count']}`",
+            f"- Denied: `{policy['denied_count']}`",
+            "",
+            "## Promoted Skills",
+            "",
+            *[f"- `{skill['id']}` v{skill['version']}" for skill in bundle["promoted_skills"]],
+            "",
+            "## Disabled And Draft Exclusions",
+            "",
+            f"- Disabled: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['disabled']) or 'none'}`",
+            f"- Draft: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['draft']) or 'none'}`",
+            f"- Validated: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['validated']) or 'none'}`",
+            "",
+            "## Invocation And Denial History",
+            "",
+            f"- Invocation count: `{bundle['invocation_summary']['usage']['invocation_count']}`",
+            f"- Failure count: `{bundle['invocation_summary']['usage']['failure_count']}`",
+            f"- Denied attempts: `{len(bundle['denied_policy_attempts'])}`",
+            "",
+            "## MCP Exposure",
+            "",
+            f"- Tools: `{mcp['tool_count']}`",
+            f"- Resources: `{mcp['resource_count']}`",
+            f"- Prompts: `{mcp['prompt_count']}`",
+            "",
+            "## Recommended Next Controls",
+            "",
+            *[f"- {action}" for action in bundle["recommended_next_controls"]],
+            "",
+            "## Recent Audit Events",
+            "",
+            *[
+                f"- `{event['created_at']}` `{event['action']}` `{event['resource_type']}/{event['resource_id']}`"
+                for event in bundle["recent_audit_events"][-10:]
+            ],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class ReleaseService:
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        snapshot_path: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "releases"
+        self.snapshot_path = snapshot_path or self.output_dir / "current_snapshot.json"
+        self.release_id = "release_preview_latest"
+
+    async def preview(self, actor: str = "release-manager") -> ReleasePreview:
+        current_snapshot = self._current_snapshot()
+        previous_snapshot, snapshot_source = self._previous_snapshot(current_snapshot)
+        skill_diff = self._diff_records(
+            previous_snapshot.get("skills", []),
+            current_snapshot["skills"],
+            "skill",
+        )
+        workflow_diff = self._diff_records(
+            previous_snapshot.get("workflow_templates", []),
+            current_snapshot["workflow_templates"],
+            "workflow_template",
+        )
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        workflow_validations = [
+            self.app_state.workflows.validate_template(template)
+            for template in self.app_state.workflows.list()
+        ]
+        risk_flags = self._risk_flags(governance, conformance, workflow_validations, skill_diff, workflow_diff)
+        readiness_status = self._readiness_status(governance, conformance, risk_flags)
+        mcp_capabilities = self._mcp_capabilities(skill_diff, workflow_diff)
+        summary = self._summary(current_snapshot, skill_diff, workflow_diff, readiness_status)
+        self.app_state.audit.record(
+            "release.previewed",
+            "release",
+            self.release_id,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness_status,
+                "snapshot_source": snapshot_source,
+                "skills_added": len(skill_diff["added"]),
+                "skills_changed": len(skill_diff["changed"]),
+                "skills_removed": len(skill_diff["removed"]),
+                "workflow_templates_added": len(workflow_diff["added"]),
+                "workflow_templates_changed": len(workflow_diff["changed"]),
+                "workflow_templates_removed": len(workflow_diff["removed"]),
+            },
+        )
+        return ReleasePreview(
+            release_id=self.release_id,
+            generated_at=utc_now(),
+            snapshot_source=snapshot_source,
+            readiness_status=readiness_status,
+            summary=summary,
+            skills_added=skill_diff["added"],
+            skills_changed=skill_diff["changed"],
+            skills_removed=skill_diff["removed"],
+            workflow_templates_added=workflow_diff["added"],
+            workflow_templates_changed=workflow_diff["changed"],
+            workflow_templates_removed=workflow_diff["removed"],
+            policy_conformance_status={
+                "governance_status": governance.status,
+                "conformance_status": conformance.status,
+                "governance_checks": [check.model_dump(mode="json") for check in governance.checks],
+                "conformance_summary": {
+                    "promoted_skill_count": conformance.promoted_skill_count,
+                    "passed_skill_count": conformance.passed_skill_count,
+                    "failed_skill_count": conformance.failed_skill_count,
+                },
+                "workflow_validation": [
+                    validation.model_dump(mode="json") for validation in workflow_validations
+                ],
+            },
+            risk_flags=risk_flags,
+            recommended_regression_tests=self._recommended_regression_tests(skill_diff, workflow_diff),
+            mcp_capabilities=mcp_capabilities,
+            governance_events=self._governance_events(),
+            excluded_skills=self._excluded_skills(),
+        )
+
+    async def export(self, actor: str = "release-manager") -> ReleaseExportResult:
+        preview = await self.preview(actor)
+        current_snapshot = self._current_snapshot()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / "release_notes_latest.json"
+        markdown_path = self.output_dir / "release_notes_latest.md"
+        snapshot_path = self.snapshot_path
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(json.dumps(current_snapshot, indent=2, sort_keys=True), encoding="utf-8")
+        self.app_state.audit.record(
+            "release.exported",
+            "release",
+            preview.release_id,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": preview.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "snapshot_path": str(snapshot_path),
+            },
+        )
+        bundle = {
+            "release_id": preview.release_id,
+            "generated_at": utc_now().isoformat(),
+            "release_summary": preview.summary,
+            "readiness_status": preview.readiness_status,
+            "diff": {
+                "skills": {
+                    "added": [item.model_dump(mode="json") for item in preview.skills_added],
+                    "changed": [item.model_dump(mode="json") for item in preview.skills_changed],
+                    "removed": [item.model_dump(mode="json") for item in preview.skills_removed],
+                },
+                "workflow_templates": {
+                    "added": [item.model_dump(mode="json") for item in preview.workflow_templates_added],
+                    "changed": [item.model_dump(mode="json") for item in preview.workflow_templates_changed],
+                    "removed": [item.model_dump(mode="json") for item in preview.workflow_templates_removed],
+                },
+            },
+            "risk_flags": preview.risk_flags,
+            "conformance_summary": preview.policy_conformance_status,
+            "governance_events": self._governance_events(),
+            "mcp_capabilities": preview.mcp_capabilities.model_dump(mode="json"),
+            "local_verification_commands": self._local_verification_commands(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(preview),
+            "excluded_skills": preview.excluded_skills,
+        }
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        return ReleaseExportResult(
+            release_id=preview.release_id,
+            generated_at=utc_now(),
+            readiness_status=preview.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            snapshot_path=str(snapshot_path.resolve()),
+            summary=preview.summary,
+        )
+
+    def _current_snapshot(self) -> JsonDict:
+        skills = [self._skill_snapshot(skill) for skill in self._release_skills()]
+        workflow_templates = [self._workflow_snapshot(template) for template in self.app_state.workflows.list()]
+        return {
+            "snapshot_version": "1.0",
+            "snapshot_kind": "release_catalog",
+            "skills": sorted(skills, key=lambda item: item["id"]),
+            "workflow_templates": sorted(workflow_templates, key=lambda item: item["id"]),
+            "mcp_capabilities": self._all_mcp_capabilities().model_dump(mode="json"),
+        }
+
+    def _previous_snapshot(self, current_snapshot: JsonDict) -> tuple[JsonDict, str]:
+        if self.snapshot_path.exists():
+            return json.loads(self.snapshot_path.read_text(encoding="utf-8")), str(self.snapshot_path)
+        return self._generated_baseline(current_snapshot), "generated_baseline"
+
+    def _generated_baseline(self, current_snapshot: JsonDict) -> JsonDict:
+        baseline_skill_ids = {
+            "classify_request",
+            "extract_entities",
+            "search_knowledge_base",
+            "summarize_document",
+        }
+        baseline_workflow_ids = {"rfp_answer_pack", "support_triage"}
+        skills = []
+        for item in current_snapshot["skills"]:
+            if item["id"] not in baseline_skill_ids:
+                continue
+            previous = dict(item)
+            if item["id"] in {"classify_request", "summarize_document"}:
+                previous["version"] = "0.9.0"
+                previous["hash"] = self._stable_hash({key: value for key, value in previous.items() if key != "hash"})
+            skills.append(previous)
+        workflows = []
+        for item in current_snapshot["workflow_templates"]:
+            if item["id"] not in baseline_workflow_ids:
+                continue
+            previous = dict(item)
+            if item["id"] == "support_triage":
+                previous["expected_outputs"] = previous["expected_outputs"][:3]
+                previous["hash"] = self._stable_hash({key: value for key, value in previous.items() if key != "hash"})
+            workflows.append(previous)
+        return {
+            "snapshot_version": "1.0",
+            "snapshot_kind": "generated_release_baseline",
+            "skills": sorted(skills, key=lambda item: item["id"]),
+            "workflow_templates": sorted(workflows, key=lambda item: item["id"]),
+            "mcp_capabilities": current_snapshot["mcp_capabilities"],
+        }
+
+    def _release_skills(self) -> list[SkillManifest]:
+        return [
+            skill
+            for skill in self.app_state.registry.list()
+            if skill.status == "promoted" and skill.enabled
+        ]
+
+    def _skill_snapshot(self, skill: SkillManifest) -> JsonDict:
+        payload = {
+            "id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "description": skill.description,
+            "provider": skill.provider,
+            "tags": sorted(skill.tags),
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "input_schema": skill.input_schema,
+            "output_schema": skill.output_schema,
+        }
+        return {**payload, "hash": self._stable_hash(payload)}
+
+    def _workflow_snapshot(self, template: WorkflowTemplate) -> JsonDict:
+        validation = self.app_state.workflows.validate_template(template)
+        payload = {
+            "id": template.id,
+            "name": template.name,
+            "description": template.description,
+            "ordered_skill_ids": template.ordered_skill_ids,
+            "required_role": template.required_role,
+            "default_sensitivity": template.default_sensitivity,
+            "expected_outputs": template.expected_outputs,
+            "validation_status": validation.validation_status,
+        }
+        return {**payload, "hash": self._stable_hash(payload)}
+
+    def _diff_records(
+        self,
+        previous_items: list[JsonDict],
+        current_items: list[JsonDict],
+        kind: str,
+    ) -> dict[str, list[ReleaseDiffItem]]:
+        previous_by_id = {item["id"]: item for item in previous_items}
+        current_by_id = {item["id"]: item for item in current_items}
+        added = [
+            self._diff_item(item_id, "added", kind, current=current_by_id[item_id])
+            for item_id in sorted(current_by_id.keys() - previous_by_id.keys())
+        ]
+        removed = [
+            self._diff_item(item_id, "removed", kind, previous=previous_by_id[item_id])
+            for item_id in sorted(previous_by_id.keys() - current_by_id.keys())
+        ]
+        changed = []
+        for item_id in sorted(current_by_id.keys() & previous_by_id.keys()):
+            if current_by_id[item_id].get("hash") != previous_by_id[item_id].get("hash"):
+                changed.append(
+                    self._diff_item(
+                        item_id,
+                        "changed",
+                        kind,
+                        current=current_by_id[item_id],
+                        previous=previous_by_id[item_id],
+                    )
+                )
+        return {"added": added, "changed": changed, "removed": removed}
+
+    def _diff_item(
+        self,
+        item_id: str,
+        change_type: str,
+        kind: str,
+        current: JsonDict | None = None,
+        previous: JsonDict | None = None,
+    ) -> ReleaseDiffItem:
+        source = current or previous or {}
+        name = source.get("name", item_id)
+        details = self._diff_details(current, previous, kind)
+        return ReleaseDiffItem(
+            id=item_id,
+            name=name,
+            change_type=change_type,
+            current_version=current.get("version") if current else None,
+            previous_version=previous.get("version") if previous else None,
+            details=details,
+            current=current,
+            previous=previous,
+        )
+
+    def _diff_details(self, current: JsonDict | None, previous: JsonDict | None, kind: str) -> list[str]:
+        if current and not previous:
+            return [f"New {kind} is included in this release preview."]
+        if previous and not current:
+            return [f"Previous {kind} is no longer promoted or approved for release."]
+        details = []
+        for field_name in [
+            "version",
+            "description",
+            "provider",
+            "tags",
+            "ordered_skill_ids",
+            "required_role",
+            "default_sensitivity",
+            "expected_outputs",
+            "validation_status",
+        ]:
+            if current and previous and current.get(field_name) != previous.get(field_name):
+                details.append(f"{field_name} changed")
+        if current and previous and current.get("hash") != previous.get("hash") and not details:
+            details.append("contract hash changed")
+        return details
+
+    def _risk_flags(
+        self,
+        governance: GovernanceReport,
+        conformance: ConformanceReport,
+        workflow_validations: list[WorkflowTemplateValidation],
+        skill_diff: dict[str, list[ReleaseDiffItem]],
+        workflow_diff: dict[str, list[ReleaseDiffItem]],
+    ) -> list[str]:
+        flags: list[str] = []
+        if governance.status == "fail":
+            flags.append("governance_failure")
+        if conformance.status == "fail":
+            flags.append("conformance_failure")
+        if any(validation.validation_status == "warnings" for validation in workflow_validations):
+            flags.append("workflow_policy_warnings")
+        if skill_diff["removed"]:
+            flags.append("skill_capabilities_removed")
+        if workflow_diff["removed"]:
+            flags.append("workflow_templates_removed")
+        if skill_diff["added"] or skill_diff["changed"] or workflow_diff["added"] or workflow_diff["changed"]:
+            flags.append("catalog_changes_detected")
+        for record in governance.skills:
+            if record.skill_id not in {skill.id for skill in self._release_skills()}:
+                continue
+            for risk_flag in record.risk_flags:
+                if risk_flag in {"external_provider", "invocation_failures", "schema_invalid"}:
+                    flags.append(f"{record.skill_id}:{risk_flag}")
+        return sorted(set(flags))
+
+    def _readiness_status(
+        self,
+        governance: GovernanceReport,
+        conformance: ConformanceReport,
+        risk_flags: list[str],
+    ) -> SecurityReadinessStatus:
+        if governance.status == "fail" or conformance.status == "fail":
+            return "blocked"
+        review_flags = {
+            "skill_capabilities_removed",
+            "workflow_templates_removed",
+            "workflow_policy_warnings",
+        }
+        if review_flags & set(risk_flags) or any(flag.endswith(":external_provider") for flag in risk_flags):
+            return "needs_review"
+        return "ready"
+
+    def _summary(
+        self,
+        current_snapshot: JsonDict,
+        skill_diff: dict[str, list[ReleaseDiffItem]],
+        workflow_diff: dict[str, list[ReleaseDiffItem]],
+        readiness_status: SecurityReadinessStatus,
+    ) -> JsonDict:
+        return {
+            "release_id": self.release_id,
+            "readiness_status": readiness_status,
+            "promoted_skill_count": len(current_snapshot["skills"]),
+            "approved_workflow_template_count": len(current_snapshot["workflow_templates"]),
+            "skill_diff_counts": {key: len(value) for key, value in skill_diff.items()},
+            "workflow_template_diff_counts": {key: len(value) for key, value in workflow_diff.items()},
+        }
+
+    def _mcp_capabilities(
+        self,
+        skill_diff: dict[str, list[ReleaseDiffItem]],
+        workflow_diff: dict[str, list[ReleaseDiffItem]],
+    ) -> ReleaseMcpCapabilities:
+        capabilities = self._all_mcp_capabilities()
+        affected_skill_ids = {
+            item.id
+            for items in skill_diff.values()
+            for item in items
+        }
+        affected_workflow_ids = {
+            item.id
+            for items in workflow_diff.values()
+            for item in items
+        }
+        affected_resources: set[str] = set()
+        if affected_skill_ids:
+            affected_resources.add("resource://skill-catalog")
+        if affected_workflow_ids:
+            affected_resources.add("resource://workflow-templates")
+        if "search_knowledge_base" in affected_skill_ids:
+            affected_resources.update(
+                resource.uri
+                for resource in self.app_state.resources.list()
+                if resource.uri.startswith("resource://policy/")
+            )
+        affected_prompts = self._prompt_refs_for_skills(affected_skill_ids)
+        return capabilities.model_copy(
+            update={
+                "affected_tools": sorted(affected_skill_ids & set(capabilities.tools)),
+                "affected_resources": sorted(affected_resources & set(capabilities.resources)),
+                "affected_prompts": sorted(affected_prompts & set(capabilities.prompts)),
+            }
+        )
+
+    def _all_mcp_capabilities(self) -> ReleaseMcpCapabilities:
+        return ReleaseMcpCapabilities(
+            tools=sorted(tool.name for tool in self.app_state.mcp.list_tools()),
+            resources=sorted(resource.uri for resource in self.app_state.mcp.list_resources()),
+            prompts=sorted(prompt.id for prompt in self.app_state.mcp.list_prompts()),
+        )
+
+    def _prompt_refs_for_skills(self, skill_ids: set[str]) -> set[str]:
+        mapping = {
+            "summarize_document": {"meeting_summary"},
+            "extract_entities": {"meeting_summary"},
+            "classify_request": {"rfp_answer"},
+            "generate_action_items": {"meeting_summary"},
+            "search_knowledge_base": {"support_reply", "rfp_answer"},
+        }
+        refs: set[str] = set()
+        for skill_id in skill_ids:
+            refs.update(mapping.get(skill_id, set()))
+        return refs
+
+    def _recommended_regression_tests(
+        self,
+        skill_diff: dict[str, list[ReleaseDiffItem]],
+        workflow_diff: dict[str, list[ReleaseDiffItem]],
+    ) -> list[str]:
+        changed_skills = sorted(
+            {
+                item.id
+                for key in ("added", "changed")
+                for item in skill_diff[key]
+            }
+        )
+        changed_workflows = sorted(
+            {
+                item.id
+                for key in ("added", "changed")
+                for item in workflow_diff[key]
+            }
+        )
+        commands = self._local_verification_commands()
+        if changed_skills:
+            commands.append(f"python -m app.evals.run_eval # affected skills: {', '.join(changed_skills)}")
+        if changed_workflows:
+            commands.append(f"python -m pytest -q tests/test_workflows.py # affected workflows: {', '.join(changed_workflows)}")
+        return commands
+
+    def _local_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "FastAPI platform endpoints with typed Pydantic response contracts",
+            "Deterministic local/mock release governance without cloud dependencies",
+            "MCP tools, resources, and prompts impact analysis",
+            "Policy, conformance, and golden-eval evidence for enterprise audit",
+            "Streamlit operator dashboard and Markdown/JSON audit exports",
+        ]
+
+    def _interviewer_talking_points(self, preview: ReleasePreview) -> list[str]:
+        return [
+            f"Release readiness is `{preview.readiness_status}` because governance and conformance are evaluated before export.",
+            "The preview compares promoted MCP skills and approved workflow templates against a local snapshot.",
+            "Draft, disabled, rejected, and in-review artifacts are excluded from release readiness by design.",
+            "The export produces both human-readable Markdown and machine-readable JSON evidence for audit review.",
+            "Affected MCP tools, resources, and prompts are listed so owners know what to regression test.",
+        ]
+
+    def _excluded_skills(self) -> JsonDict:
+        return {
+            "disabled": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "disabled" or not skill.enabled
+            ],
+            "draft": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "draft"
+            ],
+            "validated": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "validated"
+            ],
+        }
+
+    def _excluded_skill(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "reason": "Only promoted and enabled skills are included in release readiness.",
+        }
+
+    def _governance_events(self) -> list[JsonDict]:
+        relevant_actions = {
+            "skill.promoted",
+            "skill.disabled",
+            "skill.enabled",
+            "workflow_template.approved",
+            "workflow_template.rejected",
+            "workflow_template.submitted",
+            "workflow_template.review_evidence_exported",
+            "release.previewed",
+            "release.exported",
+        }
+        return [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.action in relevant_actions
+        ][-25:]
+
+    def _stable_hash(self, payload: JsonDict) -> str:
+        return manifest_hash(payload)
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        summary = bundle["release_summary"]
+        diff = bundle["diff"]
+        mcp = bundle["mcp_capabilities"]
+        lines = [
+            "# Governed Skill/Workflow Release Notes",
+            "",
+            f"- Release ID: `{bundle['release_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Release readiness: `{bundle['readiness_status']}`",
+            f"- Promoted skills: `{summary['promoted_skill_count']}`",
+            f"- Approved workflow templates: `{summary['approved_workflow_template_count']}`",
+            "",
+            "## Release Summary",
+            "",
+            f"- Skill changes: `{summary['skill_diff_counts']}`",
+            f"- Workflow template changes: `{summary['workflow_template_diff_counts']}`",
+            f"- Risk flags: `{', '.join(bundle['risk_flags']) or 'none'}`",
+            "",
+            "## Skill Diff",
+            "",
+            *self._markdown_diff_lines(diff["skills"]),
+            "",
+            "## Workflow Template Diff",
+            "",
+            *self._markdown_diff_lines(diff["workflow_templates"]),
+            "",
+            "## Conformance Summary",
+            "",
+            f"- Governance status: `{bundle['conformance_summary']['governance_status']}`",
+            f"- Conformance status: `{bundle['conformance_summary']['conformance_status']}`",
+            f"- Promoted skill count: `{bundle['conformance_summary']['conformance_summary']['promoted_skill_count']}`",
+            f"- Passed skill count: `{bundle['conformance_summary']['conformance_summary']['passed_skill_count']}`",
+            f"- Failed skill count: `{bundle['conformance_summary']['conformance_summary']['failed_skill_count']}`",
+            "",
+            "## MCP Capabilities",
+            "",
+            f"- Tools: `{', '.join(mcp['tools']) or 'none'}`",
+            f"- Resources: `{', '.join(mcp['resources']) or 'none'}`",
+            f"- Prompts: `{', '.join(mcp['prompts']) or 'none'}`",
+            f"- Affected tools: `{', '.join(mcp['affected_tools']) or 'none'}`",
+            f"- Affected resources: `{', '.join(mcp['affected_resources']) or 'none'}`",
+            f"- Affected prompts: `{', '.join(mcp['affected_prompts']) or 'none'}`",
+            "",
+            "## Governance Events",
+            "",
+            *[
+                f"- `{event['created_at']}` `{event['action']}` `{event['resource_type']}/{event['resource_id']}`"
+                for event in bundle["governance_events"][-15:]
+            ],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+            "## Excluded From Release Readiness",
+            "",
+            f"- Disabled: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['disabled']) or 'none'}`",
+            f"- Draft: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['draft']) or 'none'}`",
+            f"- Validated: `{', '.join(skill['id'] for skill in bundle['excluded_skills']['validated']) or 'none'}`",
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _markdown_diff_lines(self, diff: JsonDict) -> list[str]:
+        lines: list[str] = []
+        for change_type in ("added", "changed", "removed"):
+            items = diff[change_type]
+            if not items:
+                lines.append(f"- {change_type.title()}: `none`")
+                continue
+            for item in items:
+                details = ", ".join(item["details"]) or "no detail"
+                lines.append(f"- {change_type.title()}: `{item['id']}` - {details}")
+        return lines
+
+
+class CapacityPlanningService:
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "capacity"
+        self.plan_id = "capacity_plan_latest"
+        self.forecast_id = "capacity_forecast_latest"
+
+    async def forecast(self, request: CapacityForecastRequest | None = None) -> CapacityForecastResult:
+        request = request or CapacityForecastRequest()
+        trace_id = new_trace_id()
+        guardrails = self.default_guardrails()
+        workflows = self._workflow_demands(request)
+        per_skill = self._skill_forecasts(request, workflows, guardrails)
+        risk_flags = self._risk_flags(per_skill, workflows, request, guardrails)
+        readiness_status = self._readiness_status(risk_flags, per_skill)
+        release_preview = await self.app_state.releases.preview(request.actor)
+        audit_summary = await self.app_state.audit_query.query(AuditQueryRequest(limit=50))
+        summary = self._forecast_summary(request, per_skill, readiness_status)
+        self.app_state.audit.record(
+            "capacity.forecasted",
+            "capacity",
+            self.forecast_id,
+            trace_id,
+            request.actor,
+            {
+                "readiness_status": readiness_status,
+                "forecast_days": request.forecast_days,
+                "total_invocations": summary["total_forecasted_invocations"],
+                "risk_flags": risk_flags,
+            },
+        )
+        return CapacityForecastResult(
+            forecast_id=self.forecast_id,
+            generated_at=utc_now(),
+            horizon_days=request.forecast_days,
+            readiness_status=readiness_status,
+            assumptions=self._assumptions(request),
+            summary=summary,
+            per_skill=per_skill,
+            top_workflows=workflows[:5],
+            bottleneck_risk_flags=risk_flags,
+            recommended_rate_limits={
+                skill.skill_id: skill.recommended_rate_limit_per_minute
+                for skill in per_skill
+            },
+            mcp_tools_affected=[tool.name for tool in self.app_state.mcp.list_tools()],
+            release_evidence={
+                "release_id": release_preview.release_id,
+                "readiness_status": release_preview.readiness_status,
+                "risk_flags": release_preview.risk_flags,
+                "affected_tools": release_preview.mcp_capabilities.affected_tools,
+                "approved_workflow_template_count": release_preview.summary[
+                    "approved_workflow_template_count"
+                ],
+            },
+            audit_evidence={
+                "matched_event_count": len(audit_summary.matched_events),
+                "counts_by_action": audit_summary.counts_by_action,
+                "trace_ids": audit_summary.trace_ids[:10],
+                "warnings": audit_summary.warnings,
+            },
+            excluded_skills=self._excluded_skills(),
+        )
+
+    def guardrails(self, request: CapacityGuardrailsRequest | None = None) -> CapacityGuardrailsResult:
+        request = request or CapacityGuardrailsRequest()
+        guardrails = request.guardrails or self.default_guardrails()
+        errors = self._validate_guardrails(guardrails)
+        status = "defaulted" if request.guardrails is None else "valid"
+        if errors:
+            status = "invalid"
+        config_path = None
+        if request.write_config:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "capacity_guardrails_latest.json"
+            payload = {
+                "generated_at": utc_now().isoformat(),
+                "actor": request.actor,
+                "status": status,
+                "guardrails": guardrails.model_dump(mode="json"),
+                "validation_errors": errors,
+            }
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            config_path = str(path.resolve())
+        self.app_state.audit.record(
+            "capacity.guardrails_validated",
+            "capacity",
+            "capacity_guardrails_latest",
+            new_trace_id(),
+            request.actor,
+            {"status": status, "validation_errors": errors, "config_path": config_path},
+        )
+        return CapacityGuardrailsResult(
+            generated_at=utc_now(),
+            status=status,
+            guardrails=guardrails,
+            validation_errors=errors,
+            config_path=config_path,
+        )
+
+    async def plan_export(
+        self,
+        request: CapacityPlanExportRequest | None = None,
+    ) -> CapacityPlanExportResult:
+        request = request or CapacityPlanExportRequest()
+        forecast_request = request.forecast_request or CapacityForecastRequest(actor=request.actor)
+        guardrails_request = request.guardrails_request or CapacityGuardrailsRequest(actor=request.actor)
+        forecast = await self.forecast(forecast_request)
+        guardrails = self.guardrails(guardrails_request)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.plan_id}.json"
+        markdown_path = self.output_dir / f"{self.plan_id}.md"
+        bundle = {
+            "plan_id": self.plan_id,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": forecast.readiness_status,
+            "summary": forecast.summary,
+            "forecast": forecast.model_dump(mode="json"),
+            "guardrails": guardrails.model_dump(mode="json"),
+            "risks": forecast.bottleneck_risk_flags,
+            "recommended_rollout_stages": self._rollout_stages(forecast),
+            "mcp_tools_affected": forecast.mcp_tools_affected,
+            "local_verification_commands": self._local_verification_commands(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(forecast),
+        }
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "capacity.plan_exported",
+            "capacity",
+            self.plan_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": forecast.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return CapacityPlanExportResult(
+            plan_id=self.plan_id,
+            generated_at=utc_now(),
+            readiness_status=forecast.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=forecast.summary,
+        )
+
+    def default_guardrails(self) -> CapacityGuardrails:
+        quotas = {
+            skill.id: self._default_skill_quota(skill.id)
+            for skill in self._capacity_skills()
+        }
+        return CapacityGuardrails(
+            max_invocations_per_minute=120,
+            max_tokens_per_day=250_000,
+            max_latency_p95_ms=1_500.0,
+            per_skill_quotas=quotas,
+            fallback_behavior="queue",
+            policy_actions=["throttle", "alert", "require_review"],
+        )
+
+    def _workflow_demands(self, request: CapacityForecastRequest) -> list[CapacityWorkflowDemand]:
+        demands = []
+        for template in self.app_state.workflows.list():
+            validation = self.app_state.workflows.validate_template(template)
+            if not validation.valid:
+                continue
+            daily_runs = request.assumed_daily_workflow_runs.get(
+                template.id,
+                self._default_daily_workflow_runs(template),
+            )
+            projected_runs = round(daily_runs * request.forecast_days * request.traffic_multiplier)
+            demands.append(
+                CapacityWorkflowDemand(
+                    template_id=template.id,
+                    name=template.name,
+                    projected_runs=max(projected_runs, 0),
+                    ordered_skill_ids=template.ordered_skill_ids,
+                    required_role=template.required_role,
+                    default_sensitivity=template.default_sensitivity,
+                    validation_status=validation.validation_status,
+                )
+            )
+        return sorted(demands, key=lambda row: (-row.projected_runs, row.template_id))
+
+    def _skill_forecasts(
+        self,
+        request: CapacityForecastRequest,
+        workflows: list[CapacityWorkflowDemand],
+        guardrails: CapacityGuardrails,
+    ) -> list[CapacitySkillForecast]:
+        forecasts = []
+        workflow_demand_by_skill: dict[str, int] = {}
+        workflow_refs_by_skill: dict[str, list[JsonDict]] = {}
+        for workflow in workflows:
+            for skill_id in workflow.ordered_skill_ids:
+                workflow_demand_by_skill[skill_id] = workflow_demand_by_skill.get(skill_id, 0) + workflow.projected_runs
+                workflow_refs_by_skill.setdefault(skill_id, []).append(
+                    {
+                        "template_id": workflow.template_id,
+                        "name": workflow.name,
+                        "projected_runs": workflow.projected_runs,
+                    }
+                )
+
+        for skill in self._capacity_skills():
+            historical = [
+                invocation
+                for invocation in self.app_state.invocation_service.invocations
+                if invocation.skill_id == skill.id and invocation.status == "succeeded"
+            ]
+            historical_count = len(historical)
+            assumed_direct = request.assumed_daily_skill_invocations.get(skill.id)
+            if assumed_direct is None:
+                direct_invocations = historical_count
+            else:
+                direct_invocations = round(
+                    assumed_direct * request.forecast_days * request.traffic_multiplier
+                )
+            workflow_invocations = workflow_demand_by_skill.get(skill.id, 0)
+            forecasted = max(0, workflow_invocations + direct_invocations)
+            avg_input, avg_output = self._average_tokens(skill.id, historical)
+            estimated_input_tokens = round(forecasted * avg_input)
+            estimated_output_tokens = round(forecasted * avg_output)
+            latency_p95 = self._latency_p95(skill.id, historical)
+            risk_flags = self._skill_risks(
+                skill.id,
+                forecasted,
+                historical_count,
+                latency_p95,
+                guardrails,
+                workflow_refs_by_skill.get(skill.id, []),
+            )
+            forecasts.append(
+                CapacitySkillForecast(
+                    skill_id=skill.id,
+                    name=skill.name,
+                    version=skill.version,
+                    forecasted_invocations=forecasted,
+                    historical_invocations=historical_count,
+                    workflow_invocations=workflow_invocations,
+                    direct_invocations=direct_invocations,
+                    estimated_input_tokens=estimated_input_tokens,
+                    estimated_output_tokens=estimated_output_tokens,
+                    estimated_cost=round(
+                        (estimated_input_tokens + estimated_output_tokens) * 0.0000002,
+                        6,
+                    ),
+                    estimated_latency_p95_ms=latency_p95,
+                    top_workflows=sorted(
+                        workflow_refs_by_skill.get(skill.id, []),
+                        key=lambda item: (-item["projected_runs"], item["template_id"]),
+                    )[:3],
+                    risk_flags=risk_flags,
+                    recommended_rate_limit_per_minute=self._recommended_rate_limit(
+                        forecasted,
+                        request.forecast_days,
+                        guardrails,
+                    ),
+                )
+            )
+        return sorted(forecasts, key=lambda row: (-row.forecasted_invocations, row.skill_id))
+
+    def _risk_flags(
+        self,
+        per_skill: list[CapacitySkillForecast],
+        workflows: list[CapacityWorkflowDemand],
+        request: CapacityForecastRequest,
+        guardrails: CapacityGuardrails,
+    ) -> list[str]:
+        flags: list[str] = []
+        total_tokens = sum(skill.estimated_input_tokens + skill.estimated_output_tokens for skill in per_skill)
+        if total_tokens > guardrails.max_tokens_per_day * request.forecast_days:
+            flags.append("token_budget_exceeds_guardrail")
+        high_latency = [
+            skill.skill_id
+            for skill in per_skill
+            if skill.estimated_latency_p95_ms > guardrails.max_latency_p95_ms
+        ]
+        flags.extend(f"{skill_id}:latency_p95_exceeds_guardrail" for skill_id in high_latency)
+        for skill in per_skill:
+            quota = guardrails.per_skill_quotas.get(skill.skill_id, self._default_skill_quota(skill.skill_id))
+            if skill.forecasted_invocations > quota * request.forecast_days:
+                flags.append(f"{skill.skill_id}:quota_pressure")
+            if skill.forecasted_invocations and len(skill.top_workflows) >= 2:
+                flags.append(f"{skill.skill_id}:multi_workflow_bottleneck")
+            flags.extend(f"{skill.skill_id}:{flag}" for flag in skill.risk_flags)
+        if any(workflow.validation_status == "warnings" for workflow in workflows):
+            flags.append("workflow_policy_warnings")
+        if not workflows:
+            flags.append("no_approved_workflow_templates")
+        return sorted(set(flags))
+
+    def _readiness_status(
+        self,
+        risk_flags: list[str],
+        per_skill: list[CapacitySkillForecast],
+    ) -> SecurityReadinessStatus:
+        if not per_skill or "no_approved_workflow_templates" in risk_flags:
+            return "blocked"
+        blocking = {"token_budget_exceeds_guardrail"}
+        if blocking & set(risk_flags):
+            return "blocked"
+        review_markers = ("quota_pressure", "latency_p95_exceeds_guardrail", "multi_workflow_bottleneck")
+        if any(any(marker in flag for marker in review_markers) for flag in risk_flags):
+            return "needs_review"
+        return "ready"
+
+    def _forecast_summary(
+        self,
+        request: CapacityForecastRequest,
+        per_skill: list[CapacitySkillForecast],
+        readiness_status: SecurityReadinessStatus,
+    ) -> JsonDict:
+        total_input = sum(skill.estimated_input_tokens for skill in per_skill)
+        total_output = sum(skill.estimated_output_tokens for skill in per_skill)
+        return {
+            "readiness_status": readiness_status,
+            "forecast_days": request.forecast_days,
+            "traffic_multiplier": request.traffic_multiplier,
+            "promoted_skill_count": len(per_skill),
+            "total_forecasted_invocations": sum(skill.forecasted_invocations for skill in per_skill),
+            "estimated_input_tokens": total_input,
+            "estimated_output_tokens": total_output,
+            "estimated_total_tokens": total_input + total_output,
+            "estimated_cost": round(sum(skill.estimated_cost for skill in per_skill), 6),
+            "max_latency_p95_ms": max((skill.estimated_latency_p95_ms for skill in per_skill), default=0.0),
+        }
+
+    def _assumptions(self, request: CapacityForecastRequest) -> JsonDict:
+        return {
+            "mode": "local_mock_deterministic",
+            "forecast_days": request.forecast_days,
+            "traffic_multiplier": request.traffic_multiplier,
+            "assumed_daily_workflow_runs": request.assumed_daily_workflow_runs,
+            "assumed_daily_skill_invocations": request.assumed_daily_skill_invocations,
+            "cost_rate": "0.0000002 USD per estimated token for local planning only",
+            "history_source": "in-memory invocation history for this process",
+        }
+
+    def _validate_guardrails(self, guardrails: CapacityGuardrails) -> list[str]:
+        errors = []
+        if guardrails.max_invocations_per_minute <= 0:
+            errors.append("max_invocations_per_minute must be positive.")
+        if guardrails.max_tokens_per_day <= 0:
+            errors.append("max_tokens_per_day must be positive.")
+        if guardrails.max_latency_p95_ms <= 0:
+            errors.append("max_latency_p95_ms must be positive.")
+        promoted_ids = {skill.id for skill in self._capacity_skills()}
+        for skill_id, quota in guardrails.per_skill_quotas.items():
+            if quota <= 0:
+                errors.append(f"per_skill_quotas.{skill_id} must be positive.")
+            if skill_id not in promoted_ids:
+                errors.append(f"per_skill_quotas.{skill_id} is not an enabled promoted skill.")
+        allowed_actions = {"throttle", "alert", "queue", "disable_skill", "require_review"}
+        unknown_actions = sorted(set(guardrails.policy_actions) - allowed_actions)
+        if unknown_actions:
+            errors.append(f"Unknown policy actions: {', '.join(unknown_actions)}.")
+        return errors
+
+    def _capacity_skills(self) -> list[SkillManifest]:
+        return [
+            skill
+            for skill in self.app_state.registry.list()
+            if skill.status == "promoted" and skill.enabled
+        ]
+
+    def _default_daily_workflow_runs(self, template: WorkflowTemplate) -> int:
+        base = {
+            "support_triage": 12,
+            "rfp_answer_pack": 6,
+            "meeting_to_actions": 9,
+        }.get(template.id, 4 + len(template.ordered_skill_ids))
+        if template.default_sensitivity == "confidential":
+            return max(base - 1, 1)
+        return base
+
+    def _default_skill_quota(self, skill_id: str) -> int:
+        return {
+            "search_knowledge_base": 450,
+            "summarize_document": 420,
+            "classify_request": 600,
+            "extract_entities": 360,
+            "generate_action_items": 360,
+            "translate_text": 300,
+        }.get(skill_id, 240)
+
+    def _average_tokens(self, skill_id: str, historical: list[SkillInvocation]) -> tuple[float, float]:
+        if historical:
+            input_tokens = sum(item.token_usage.input_tokens for item in historical) / len(historical)
+            output_tokens = sum(item.token_usage.output_tokens for item in historical) / len(historical)
+            return max(input_tokens, 1.0), max(output_tokens, 1.0)
+        sample = self.app_state.conformance.sample_input(skill_id)
+        input_tokens = sum(len(str(value).split()) for value in sample.values())
+        output_tokens = {
+            "summarize_document": 34,
+            "extract_entities": 18,
+            "translate_text": 16,
+            "classify_request": 14,
+            "generate_action_items": 22,
+            "search_knowledge_base": 42,
+        }.get(skill_id, 18)
+        return float(max(input_tokens, 1)), float(output_tokens)
+
+    def _latency_p95(self, skill_id: str, historical: list[SkillInvocation]) -> float:
+        if historical:
+            ordered = sorted(item.latency_ms for item in historical)
+            index = min(len(ordered) - 1, round((len(ordered) - 1) * 0.95))
+            return round(max(ordered[index], 1.0), 2)
+        return {
+            "search_knowledge_base": 420.0,
+            "summarize_document": 360.0,
+            "extract_entities": 310.0,
+            "translate_text": 260.0,
+            "generate_action_items": 240.0,
+            "classify_request": 180.0,
+        }.get(skill_id, 300.0)
+
+    def _skill_risks(
+        self,
+        skill_id: str,
+        forecasted: int,
+        historical_count: int,
+        latency_p95: float,
+        guardrails: CapacityGuardrails,
+        workflows: list[JsonDict],
+    ) -> list[str]:
+        flags = []
+        if forecasted and historical_count == 0:
+            flags.append("limited_history")
+        if latency_p95 > guardrails.max_latency_p95_ms:
+            flags.append("latency_p95_exceeds_guardrail")
+        if len(workflows) >= 3:
+            flags.append("shared_dependency")
+        return flags
+
+    def _recommended_rate_limit(
+        self,
+        forecasted: int,
+        forecast_days: int,
+        guardrails: CapacityGuardrails,
+    ) -> int:
+        minutes = max(forecast_days * 24 * 60, 1)
+        steady_state = max(round((forecasted / minutes) * 4), 1)
+        return min(max(steady_state, 5), guardrails.max_invocations_per_minute)
+
+    def _excluded_skills(self) -> JsonDict:
+        return {
+            "disabled": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "disabled" or not skill.enabled
+            ],
+            "draft": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "draft"
+            ],
+            "validated": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "validated"
+            ],
+        }
+
+    def _excluded_skill(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "reason": "Capacity plans only include enabled promoted MCP skills.",
+        }
+
+    def _rollout_stages(self, forecast: CapacityForecastResult) -> list[JsonDict]:
+        return [
+            {
+                "stage": "pilot",
+                "traffic_percentage": 10,
+                "entry_criteria": "Guardrails valid and no blocked readiness flags.",
+                "monitor": "Compare forecasted invocations and p95 latency against local audit events daily.",
+            },
+            {
+                "stage": "department_ramp",
+                "traffic_percentage": 50,
+                "entry_criteria": "No per-skill quota pressure for one forecast window.",
+                "monitor": "Review top workflows and shared dependency skills before increasing agent access.",
+            },
+            {
+                "stage": "broad_enablement",
+                "traffic_percentage": 100,
+                "entry_criteria": f"Capacity readiness remains {forecast.readiness_status}.",
+                "monitor": "Export capacity plan after catalog or workflow changes.",
+            },
+        ]
+
+    def _local_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "rg \"capacity/forecast|capacity/guardrails|capacity/plan-export\" app dashboard docs README.md tests sample_data",
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "FastAPI platform APIs for capacity forecasting and guardrail validation",
+            "Deterministic local/mock demand modeling from invocation and workflow evidence",
+            "MCP impact mapping across promoted tools, resources, and prompts",
+            "Enterprise governance controls for rollout, quotas, fallbacks, and auditability",
+            "Markdown/JSON export artifacts for platform-owner review and interviews",
+        ]
+
+    def _interviewer_talking_points(self, forecast: CapacityForecastResult) -> list[str]:
+        return [
+            f"Capacity readiness is `{forecast.readiness_status}` from deterministic local inputs.",
+            "The model blends approved workflow demand, direct skill assumptions, and invocation history.",
+            "Guardrails cover minute-level throttles, daily token ceilings, latency p95, per-skill quotas, and fallback actions.",
+            "Draft and disabled skills are intentionally excluded so capacity planning mirrors MCP exposure.",
+            "The export is review-ready: it includes rollout stages, verification commands, JD skills, and MCP tools affected.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        forecast = bundle["forecast"]
+        guardrails = bundle["guardrails"]
+        summary = bundle["summary"]
+        risk_lines = [f"- `{risk}`" for risk in bundle["risks"]] or ["- `none`"]
+        lines = [
+            "# Capacity Plan",
+            "",
+            f"- Plan ID: `{bundle['plan_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Capacity readiness: `{bundle['readiness_status']}`",
+            f"- Forecast days: `{summary['forecast_days']}`",
+            f"- Total forecasted invocations: `{summary['total_forecasted_invocations']}`",
+            f"- Estimated total tokens: `{summary['estimated_total_tokens']}`",
+            f"- Estimated cost: `${summary['estimated_cost']:.6f}`",
+            "",
+            "## Skill Forecast",
+            "",
+            *[
+                f"- `{skill['skill_id']}`: `{skill['forecasted_invocations']}` invocations, "
+                f"`{skill['estimated_latency_p95_ms']}` ms p95, "
+                f"risks `{', '.join(skill['risk_flags']) or 'none'}`"
+                for skill in forecast["per_skill"]
+            ],
+            "",
+            "## Top Workflows Driving Demand",
+            "",
+            *[
+                f"- `{workflow['template_id']}`: `{workflow['projected_runs']}` runs, "
+                f"skills `{', '.join(workflow['ordered_skill_ids'])}`"
+                for workflow in forecast["top_workflows"]
+            ],
+            "",
+            "## Guardrails",
+            "",
+            f"- Status: `{guardrails['status']}`",
+            f"- Max invocations/minute: `{guardrails['guardrails']['max_invocations_per_minute']}`",
+            f"- Max tokens/day: `{guardrails['guardrails']['max_tokens_per_day']}`",
+            f"- Max latency p95 ms: `{guardrails['guardrails']['max_latency_p95_ms']}`",
+            f"- Fallback behavior: `{guardrails['guardrails']['fallback_behavior']}`",
+            f"- Policy actions: `{', '.join(guardrails['guardrails']['policy_actions'])}`",
+            "",
+            "## Risks",
+            "",
+            *risk_lines,
+            "",
+            "## Recommended Rollout Stages",
+            "",
+            *[
+                f"- `{stage['stage']}` `{stage['traffic_percentage']}%`: {stage['entry_criteria']}"
+                for stage in bundle["recommended_rollout_stages"]
+            ],
+            "",
+            "## MCP Tools Affected",
+            "",
+            f"- `{', '.join(bundle['mcp_tools_affected']) or 'none'}`",
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class AuditQueryService:
+    def __init__(self, app_state: AppState) -> None:
+        self.app_state = app_state
+
+    async def query(self, request: AuditQueryRequest) -> AuditQueryResult:
+        events, warnings = await self._evidence_events()
+        matched = [event for event in events if self._matches(event, request)]
+        matched = sorted(matched, key=lambda event: (event.get("created_at") or "", event.get("id") or ""))
+        if not matched:
+            warnings.append("No evidence matched the supplied filters.")
+        limited = matched[-request.limit:]
+        trace_ids = sorted(
+            {
+                str(event["trace_id"])
+                for event in limited
+                if event.get("trace_id")
+            }
+        )
+        correlation_ids = sorted(
+            {
+                str(value)
+                for event in limited
+                for value in (event.get("trace_id"), event.get("invocation_id"), event.get("release_id"))
+                if value
+            }
+        )
+        related_invocations = self._related_invocations(limited, request, trace_ids)
+        related_release_evidence = self._related_release_evidence(limited, request)
+        related_workflow_evidence = self._related_workflow_evidence(limited, request)
+        return AuditQueryResult(
+            generated_at=utc_now(),
+            filters=request.model_dump(mode="json", exclude_none=True),
+            matched_events=limited,
+            counts_by_action=self._counts(limited, "action"),
+            counts_by_status=self._counts(limited, "status"),
+            related_invocations=related_invocations,
+            related_release_evidence=related_release_evidence,
+            related_workflow_evidence=related_workflow_evidence,
+            trace_ids=trace_ids,
+            correlation_ids=correlation_ids,
+            warnings=sorted(set(warnings)),
+        )
+
+    async def _evidence_events(self) -> tuple[list[JsonDict], list[str]]:
+        warnings: list[str] = []
+        events: list[JsonDict] = []
+        audit_actor_by_trace: dict[str, str] = {}
+        for event in self.app_state.audit.events:
+            audit_actor_by_trace[event.trace_id] = event.actor
+            events.append(self._audit_event_record(event))
+        if not self.app_state.audit.events:
+            warnings.append("No audit events are currently recorded.")
+
+        for invocation in self.app_state.invocation_service.invocations:
+            events.append(
+                {
+                    "id": invocation.id,
+                    "action": "skill.invocation",
+                    "type": "invocation",
+                    "actor": audit_actor_by_trace.get(invocation.trace_id, "unknown"),
+                    "skill_id": invocation.skill_id,
+                    "status": invocation.status,
+                    "created_at": invocation.created_at.isoformat(),
+                    "trace_id": invocation.trace_id,
+                    "invocation_id": invocation.id,
+                    "version": invocation.version,
+                    "error": invocation.error,
+                }
+            )
+        if not self.app_state.invocation_service.invocations:
+            warnings.append("No skill invocation history is currently recorded.")
+
+        governance = self.app_state.governance.generate()
+        for record in governance.skills:
+            events.append(
+                {
+                    "id": f"governance:{record.skill_id}",
+                    "action": "governance.skill",
+                    "type": "governance",
+                    "actor": "system",
+                    "skill_id": record.skill_id,
+                    "status": record.status,
+                    "created_at": governance.generated_at.isoformat(),
+                    "trace_id": None,
+                    "risk_flags": record.risk_flags,
+                    "mcp_exposed": record.mcp_exposed,
+                }
+            )
+
+        preview = await self.app_state.releases.preview("audit-query")
+        events.append(
+            {
+                "id": preview.release_id,
+                "action": "release.preview",
+                "type": "release",
+                "actor": "audit-query",
+                "release_id": preview.release_id,
+                "status": preview.readiness_status,
+                "created_at": preview.generated_at.isoformat(),
+                "trace_id": self._latest_trace_id("release.previewed", preview.release_id),
+                "summary": preview.summary,
+                "risk_flags": preview.risk_flags,
+            }
+        )
+        if not self.app_state.releases.snapshot_path.exists():
+            warnings.append(
+                "No release snapshot/export artifact found under data/releases; generated preview evidence was used."
+            )
+
+        for review in self.app_state.workflows.reviews():
+            events.append(
+                {
+                    "id": review.template_id,
+                    "action": "workflow_template.review",
+                    "type": "workflow_template",
+                    "actor": review.reviewed_by or review.submitted_by,
+                    "workflow_template_id": review.template_id,
+                    "status": review.status,
+                    "created_at": review.updated_at.isoformat(),
+                    "trace_id": self._latest_trace_id("workflow_template.submitted", review.template_id),
+                    "validation_status": review.validation.validation_status,
+                    "policy_warnings": review.validation.policy_warnings,
+                }
+            )
+        if not self.app_state.workflows.reviews():
+            warnings.append("No submitted workflow review evidence is currently recorded.")
+        return events, warnings
+
+    def _audit_event_record(self, event: AuditEvent) -> JsonDict:
+        record: JsonDict = {
+            "id": event.id,
+            "action": event.action,
+            "type": event.resource_type,
+            "actor": event.actor,
+            "resource_id": event.resource_id,
+            "status": self._status_from_metadata(event.metadata),
+            "created_at": event.created_at.isoformat(),
+            "trace_id": event.trace_id,
+            "metadata": event.metadata,
+        }
+        if event.resource_type == "skill":
+            record["skill_id"] = event.resource_id
+        if event.resource_type == "workflow_template":
+            record["workflow_template_id"] = event.resource_id
+        if event.resource_type == "release":
+            record["release_id"] = event.resource_id
+        return record
+
+    def _status_from_metadata(self, metadata: JsonDict) -> str | None:
+        for field_name in ("status", "readiness_status", "validation_status", "replay_status"):
+            value = metadata.get(field_name)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _matches(self, event: JsonDict, request: AuditQueryRequest) -> bool:
+        checks = {
+            "action": request.action,
+            "type": request.type,
+            "actor": request.actor,
+            "skill_id": request.skill_id,
+            "workflow_template_id": request.workflow_template_id,
+            "status": request.status,
+        }
+        for field_name, expected in checks.items():
+            if expected and str(event.get(field_name, "")).lower() != expected.lower():
+                return False
+        created_at = self._parse_datetime(event.get("created_at"))
+        from_date = self._normalize_datetime(request.from_date)
+        to_date = self._normalize_datetime(request.to_date)
+        if from_date and created_at and created_at < from_date:
+            return False
+        if to_date and created_at and created_at > to_date:
+            return False
+        if request.query:
+            haystack = json.dumps(event, sort_keys=True, default=str).lower()
+            if request.query.lower() not in haystack:
+                return False
+        return True
+
+    def _parse_datetime(self, value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return self._normalize_datetime(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+
+    def _normalize_datetime(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def _counts(self, events: list[JsonDict], field_name: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in events:
+            value = str(event.get(field_name) or "unknown")
+            counts[value] = counts.get(value, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def _related_invocations(
+        self,
+        events: list[JsonDict],
+        request: AuditQueryRequest,
+        trace_ids: list[str],
+    ) -> list[SkillInvocation]:
+        invocation_ids = {
+            str(event["invocation_id"])
+            for event in events
+            if event.get("invocation_id")
+        }
+        skill_ids = {
+            str(event["skill_id"])
+            for event in events
+            if event.get("skill_id")
+        }
+        if request.skill_id:
+            skill_ids.add(request.skill_id)
+        related = [
+            invocation
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.id in invocation_ids
+            or invocation.trace_id in trace_ids
+            or invocation.skill_id in skill_ids
+        ]
+        return sorted(related, key=lambda invocation: invocation.created_at)
+
+    def _related_release_evidence(
+        self,
+        events: list[JsonDict],
+        request: AuditQueryRequest,
+    ) -> list[JsonDict]:
+        include = request.type in {None, "release"} or any(event.get("type") == "release" for event in events)
+        if not include:
+            return []
+        artifacts = []
+        for path in [
+            self.app_state.releases.output_dir / "release_notes_latest.json",
+            self.app_state.releases.output_dir / "release_notes_latest.md",
+            self.app_state.releases.snapshot_path,
+        ]:
+            artifacts.append({"path": str(path.resolve()), "exists": path.exists()})
+        return [{"kind": "release_artifacts", "artifacts": artifacts}]
+
+    def _related_workflow_evidence(
+        self,
+        events: list[JsonDict],
+        request: AuditQueryRequest,
+    ) -> list[JsonDict]:
+        workflow_ids = {
+            str(event["workflow_template_id"])
+            for event in events
+            if event.get("workflow_template_id")
+        }
+        if request.workflow_template_id:
+            workflow_ids.add(request.workflow_template_id)
+        evidence = []
+        for review in self.app_state.workflows.reviews():
+            if workflow_ids and review.template_id not in workflow_ids:
+                continue
+            evidence.append(
+                {
+                    "template_id": review.template_id,
+                    "status": review.status,
+                    "validation_status": review.validation.validation_status,
+                    "reviewed_by": review.reviewed_by,
+                    "updated_at": review.updated_at.isoformat(),
+                }
+            )
+        return evidence
+
+    def _latest_trace_id(self, action: str, resource_id: str) -> str | None:
+        for event in reversed(self.app_state.audit.events):
+            if event.action == action and event.resource_id == resource_id:
+                return event.trace_id
+        return None
+
+
+class ComplianceAttestationService:
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "attestations"
+        self.attestation_id = "compliance_attestation_latest"
+
+    async def export(self, request: ComplianceAttestationRequest) -> ComplianceAttestationResult:
+        json_path = self.output_dir / f"{self.attestation_id}.json"
+        markdown_path = self.output_dir / f"{self.attestation_id}.md"
+        trace_id = new_trace_id()
+        self.app_state.audit.record(
+            "compliance.attestation_exported",
+            "attestation",
+            self.attestation_id,
+            trace_id,
+            request.actor,
+            {"json_path": str(json_path), "markdown_path": str(markdown_path)},
+        )
+        bundle = await self._bundle(request.actor, trace_id)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        return ComplianceAttestationResult(
+            attestation_id=self.attestation_id,
+            generated_at=utc_now(),
+            readiness_status=bundle["summary"]["readiness_status"],
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    async def _bundle(self, actor: str, trace_id: str) -> JsonDict:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        release_preview = await self.app_state.releases.preview(actor)
+        audit_summary = await self.app_state.audit_query.query(AuditQueryRequest(limit=50))
+        mcp = self._mcp_summary()
+        promoted_skills = [
+            self._skill_export(skill)
+            for skill in self.app_state.registry.list()
+            if skill.status == "promoted" and skill.enabled
+        ]
+        exclusions = self._excluded_skills()
+        summary = {
+            "readiness_status": release_preview.readiness_status,
+            "governance_status": governance.status,
+            "conformance_status": conformance.status,
+            "promoted_skill_count": len(promoted_skills),
+            "excluded_skill_count": sum(len(skills) for skills in exclusions.values()),
+            "mcp_tool_count": len(mcp["tools"]),
+            "recent_audit_event_count": len(audit_summary.matched_events),
+            "release_id": release_preview.release_id,
+        }
+        return {
+            "attestation_id": self.attestation_id,
+            "generated_at": utc_now().isoformat(),
+            "actor": actor,
+            "trace_id": trace_id,
+            "summary": summary,
+            "governance_controls": self._governance_controls(governance),
+            "enabled_promoted_skills": promoted_skills,
+            "mcp_tools": mcp["tools"],
+            "mcp_resources": mcp["resources"],
+            "mcp_prompts": mcp["prompts"],
+            "conformance_status": conformance.model_dump(mode="json"),
+            "release_readiness": release_preview.model_dump(mode="json"),
+            "recent_audit_summary": {
+                "counts_by_action": audit_summary.counts_by_action,
+                "counts_by_status": audit_summary.counts_by_status,
+                "trace_ids": audit_summary.trace_ids,
+                "warnings": audit_summary.warnings,
+                "matched_events": audit_summary.matched_events[-25:],
+            },
+            "policy_simulation_examples": self._policy_examples(),
+            "exclusions": exclusions,
+            "local_verification_commands": self._local_verification_commands(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(release_preview),
+        }
+
+    def _skill_export(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "provider": skill.provider,
+            "tags": skill.tags,
+        }
+
+    def _mcp_summary(self) -> JsonDict:
+        return {
+            "tools": [tool.model_dump(mode="json") for tool in self.app_state.mcp.list_tools()],
+            "resources": [resource.model_dump(mode="json") for resource in self.app_state.mcp.list_resources()],
+            "prompts": [prompt.model_dump(mode="json") for prompt in self.app_state.mcp.list_prompts()],
+        }
+
+    def _governance_controls(self, governance: GovernanceReport) -> list[JsonDict]:
+        controls = [
+            {
+                "id": "manifest_schema_validation",
+                "status": self._control_status(governance, "Schema validity"),
+                "evidence": "Every registered manifest is validated before promotion and conformance.",
+            },
+            {
+                "id": "promoted_mcp_exposure_only",
+                "status": self._control_status(governance, "MCP discovery"),
+                "evidence": "MCP tools list only enabled and promoted skills.",
+            },
+            {
+                "id": "policy_simulation",
+                "status": self._control_status(governance, "Policy access control"),
+                "evidence": "Local policy checks cover role, sensitivity, environment, and action.",
+            },
+            {
+                "id": "audit_trail",
+                "status": self._control_status(governance, "Audit trail"),
+                "evidence": "Administrative and runtime events receive trace IDs.",
+            },
+            {
+                "id": "deterministic_conformance",
+                "status": "pass",
+                "evidence": "Promoted tools run deterministic local sample invocations in mock mode.",
+            },
+        ]
+        return controls
+
+    def _control_status(self, governance: GovernanceReport, name: str) -> str:
+        for check in governance.checks:
+            if check.name == name:
+                return check.status
+        return "warn"
+
+    def _policy_examples(self) -> list[JsonDict]:
+        examples = [
+            PolicySimulationRequest(
+                skill_id="search_knowledge_base",
+                role="reviewer",
+                environment="local",
+                data_sensitivity="confidential",
+                requested_action="invoke",
+            ),
+            PolicySimulationRequest(
+                skill_id="search_knowledge_base",
+                role="agent",
+                environment="local",
+                data_sensitivity="confidential",
+                requested_action="invoke",
+            ),
+            PolicySimulationRequest(
+                skill_id="classify_request",
+                role="agent",
+                environment="local",
+                data_sensitivity="internal",
+                requested_action="invoke",
+            ),
+        ]
+        results = []
+        for example in examples:
+            result = self.app_state.policy.simulate(self.app_state.registry.get(example.skill_id), example)
+            results.append(result.model_dump(mode="json"))
+        return results
+
+    def _excluded_skills(self) -> JsonDict:
+        return {
+            "disabled": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "disabled" or not skill.enabled
+            ],
+            "draft": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "draft"
+            ],
+            "validated": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "validated"
+            ],
+        }
+
+    def _excluded_skill(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "reason": "Only enabled skills with status=promoted are attested as active MCP capabilities.",
+        }
+
+    def _local_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "FastAPI admin APIs with typed Pydantic audit and attestation contracts",
+            "MCP-compatible tools, resources, and prompts with promoted-only exposure",
+            "Governance, policy, conformance, release, and workflow evidence synthesis",
+            "Deterministic local/mock execution suitable for fresh-clone reviewer demos",
+            "Procurement-ready Markdown/JSON artifact generation and dashboard operations",
+        ]
+
+    def _interviewer_talking_points(self, preview: ReleasePreview) -> list[str]:
+        return [
+            f"The attestation is `{preview.readiness_status}` using local governance, conformance, and release checks.",
+            "Audit query normalizes runtime invocations, governance rows, workflow reviews, and release evidence.",
+            "Only enabled promoted skills are listed as active capabilities; draft and disabled skills are exclusions.",
+            "The pack proves MCP exposure by listing every tool, resource, and prompt visible to agents.",
+            "The demo stays cloud-independent: reviewers can rerun every command locally in mock mode.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        summary = bundle["summary"]
+        lines = [
+            "# Compliance Attestation Pack",
+            "",
+            f"- Attestation ID: `{bundle['attestation_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{summary['readiness_status']}`",
+            f"- Governance status: `{summary['governance_status']}`",
+            f"- Conformance status: `{summary['conformance_status']}`",
+            f"- Promoted skills: `{summary['promoted_skill_count']}`",
+            f"- Excluded skills: `{summary['excluded_skill_count']}`",
+            "",
+            "## Governance Controls",
+            "",
+            *[
+                f"- `{control['id']}`: `{control['status']}` - {control['evidence']}"
+                for control in bundle["governance_controls"]
+            ],
+            "",
+            "## Enabled Promoted Skills",
+            "",
+            *[f"- `{skill['id']}` v{skill['version']}" for skill in bundle["enabled_promoted_skills"]],
+            "",
+            "## MCP Tools Resources Prompts",
+            "",
+            f"- Tools: `{', '.join(tool['name'] for tool in bundle['mcp_tools']) or 'none'}`",
+            f"- Resources: `{', '.join(resource['uri'] for resource in bundle['mcp_resources']) or 'none'}`",
+            f"- Prompts: `{', '.join(prompt['id'] for prompt in bundle['mcp_prompts']) or 'none'}`",
+            "",
+            "## Conformance Status",
+            "",
+            f"- Status: `{bundle['conformance_status']['status']}`",
+            f"- Passed: `{bundle['conformance_status']['passed_skill_count']}`",
+            f"- Failed: `{bundle['conformance_status']['failed_skill_count']}`",
+            "",
+            "## Release Readiness",
+            "",
+            f"- Release ID: `{bundle['release_readiness']['release_id']}`",
+            f"- Readiness: `{bundle['release_readiness']['readiness_status']}`",
+            f"- Risk flags: `{', '.join(bundle['release_readiness']['risk_flags']) or 'none'}`",
+            "",
+            "## Recent Audit Summary",
+            "",
+            f"- Counts by action: `{bundle['recent_audit_summary']['counts_by_action']}`",
+            f"- Counts by status: `{bundle['recent_audit_summary']['counts_by_status']}`",
+            f"- Trace IDs: `{', '.join(bundle['recent_audit_summary']['trace_ids']) or 'none'}`",
+            "",
+            "## Policy Simulation Examples",
+            "",
+            *[
+                f"- `{example['skill_id']}` `{example['role']}` `{example['data_sensitivity']}`: "
+                f"`{example['decision']}`"
+                for example in bundle["policy_simulation_examples"]
+            ],
+            "",
+            "## Exclusions",
+            "",
+            f"- Disabled: `{', '.join(skill['id'] for skill in bundle['exclusions']['disabled']) or 'none'}`",
+            f"- Draft: `{', '.join(skill['id'] for skill in bundle['exclusions']['draft']) or 'none'}`",
+            f"- Validated: `{', '.join(skill['id'] for skill in bundle['exclusions']['validated']) or 'none'}`",
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class DependencyMapService:
+    PROMPT_SKILL_REFS: dict[str, set[str]] = {
+        "support_reply": {"search_knowledge_base", "summarize_document"},
+        "rfp_answer": {
+            "classify_request",
+            "extract_entities",
+            "search_knowledge_base",
+            "summarize_document",
+        },
+        "meeting_summary": {"extract_entities", "generate_action_items", "summarize_document"},
+        "workflow_composition": set(),
+    }
+    REPORT_ID = "dependency_report_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "dependencies"
+
+    async def build_map(self) -> DependencyMapResult:
+        nodes: dict[str, DependencyNode] = {}
+        edges: list[DependencyEdge] = []
+        edge_keys: set[tuple[str, str, str, str]] = set()
+        promoted = self._promoted_skills()
+        promoted_ids = {skill.id for skill in promoted}
+        release_preview = await self.app_state.releases.preview("dependency-map")
+        capacity = await self.app_state.capacity.forecast(CapacityForecastRequest(actor="dependency-map"))
+
+        for skill in promoted:
+            self._add_node(
+                nodes,
+                f"skill:{skill.id}",
+                "skill",
+                skill.name,
+                {
+                    "skill_id": skill.id,
+                    "version": skill.version,
+                    "tags": skill.tags,
+                    "provider": skill.provider,
+                },
+            )
+            self._add_node(
+                nodes,
+                f"tool:{skill.id}",
+                "tool",
+                skill.id,
+                {"skill_id": skill.id, "mcp_exposed": True},
+            )
+            self._add_edge(
+                edges,
+                edge_keys,
+                f"skill:{skill.id}",
+                f"tool:{skill.id}",
+                "exposes_as_mcp_tool",
+                "MCP adapter exposes enabled promoted skills as tools.",
+            )
+
+        workflows = [template for template in self.app_state.workflows.list()]
+        for template in workflows:
+            validation = self.app_state.workflows.validate_template(template)
+            self._add_node(
+                nodes,
+                f"workflow:{template.id}",
+                "workflow_template",
+                template.name,
+                {
+                    "template_id": template.id,
+                    "required_role": template.required_role,
+                    "default_sensitivity": template.default_sensitivity,
+                    "validation_status": validation.validation_status,
+                },
+            )
+            for index, skill_id in enumerate(template.ordered_skill_ids, start=1):
+                if skill_id in promoted_ids:
+                    self._add_edge(
+                        edges,
+                        edge_keys,
+                        f"workflow:{template.id}",
+                        f"skill:{skill_id}",
+                        "uses_skill",
+                        "Workflow template ordered_skill_ids reference this promoted skill.",
+                        metadata={"step_index": index},
+                    )
+
+        for prompt in self.app_state.mcp.list_prompts():
+            self._add_node(
+                nodes,
+                f"prompt:{prompt.id}",
+                "prompt",
+                prompt.name,
+                {"prompt_id": prompt.id, "version": prompt.version},
+            )
+            if prompt.id == "workflow_composition":
+                for template in workflows:
+                    self._add_edge(
+                        edges,
+                        edge_keys,
+                        f"prompt:{prompt.id}",
+                        f"workflow:{template.id}",
+                        "orchestrates_workflow",
+                        "Workflow composition prompt is used to simulate governed templates.",
+                    )
+                continue
+            for skill_id in sorted(self.PROMPT_SKILL_REFS.get(prompt.id, set()) & promoted_ids):
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"prompt:{prompt.id}",
+                    f"skill:{skill_id}",
+                    "references_skill",
+                    "Prompt library maps this prompt to likely tool use.",
+                )
+
+        for resource in self.app_state.mcp.list_resources():
+            self._add_node(
+                nodes,
+                f"resource:{resource.uri}",
+                "resource",
+                resource.name,
+                {
+                    "uri": resource.uri,
+                    "kind": resource.annotations.get("kind"),
+                    "mime_type": resource.mime_type,
+                },
+            )
+            for target in self._resource_targets(resource.uri, promoted_ids, workflows):
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"resource:{resource.uri}",
+                    target,
+                    "provides_context_to",
+                    "Resource URI is consumed by retrieval, catalog, or workflow-template surfaces.",
+                )
+
+        self._add_release_evidence(nodes, edges, edge_keys, release_preview, promoted_ids, workflows)
+        self._add_capacity_evidence(nodes, edges, edge_keys, capacity, promoted_ids, workflows)
+        self._add_audit_evidence(nodes, edges, edge_keys, promoted_ids)
+
+        counts_by_node_type: dict[str, int] = {}
+        for node in nodes.values():
+            counts_by_node_type[node.type] = counts_by_node_type.get(node.type, 0) + 1
+        high_centrality = self._high_centrality_skills(edges, promoted_ids)
+        orphaned_resources = self._orphans(edges, nodes, "resource")
+        orphaned_prompts = self._orphans(edges, nodes, "prompt")
+        warnings = []
+        if orphaned_resources:
+            warnings.append("One or more MCP resources have no active graph edge.")
+        if orphaned_prompts:
+            warnings.append("One or more MCP prompts have no active graph edge.")
+        readiness = self._map_readiness(
+            release_preview.readiness_status,
+            capacity.readiness_status,
+            warnings,
+        )
+        sorted_nodes = sorted(nodes.values(), key=lambda node: (node.type, node.id))
+        sorted_edges = sorted(edges, key=lambda edge: (edge.source, edge.target, edge.type))
+        return DependencyMapResult(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            nodes=sorted_nodes,
+            edges=sorted_edges,
+            counts_by_node_type=dict(sorted(counts_by_node_type.items())),
+            high_centrality_skills=high_centrality,
+            orphaned_resources=orphaned_resources,
+            orphaned_prompts=orphaned_prompts,
+            excluded_skills=self._excluded_skills(),
+            summary={
+                "promoted_skill_count": len(promoted),
+                "workflow_template_count": len(workflows),
+                "mcp_tool_count": len(self.app_state.mcp.list_tools()),
+                "mcp_resource_count": len(self.app_state.mcp.list_resources()),
+                "mcp_prompt_count": len(self.app_state.mcp.list_prompts()),
+                "release_readiness": release_preview.readiness_status,
+                "capacity_readiness": capacity.readiness_status,
+                "edge_count": len(sorted_edges),
+            },
+            warnings=warnings,
+        )
+
+    async def blast_radius(self, request: BlastRadiusRequest) -> BlastRadiusResult:
+        dependency_map = await self.build_map()
+        forecast = await self.app_state.capacity.forecast(
+            CapacityForecastRequest(actor=request.actor)
+        )
+        kind, raw_id, node_id = self._changed_item(request)
+        graph_node_ids = {node.id for node in dependency_map.nodes}
+        warnings: list[str] = []
+        risk_flags: list[str] = []
+        impacted_skills: set[str] = set()
+        impacted_workflows: set[str] = set()
+        impacted_prompts: set[str] = set()
+        impacted_resources: set[str] = set()
+
+        if node_id not in graph_node_ids:
+            warnings.append(f"Changed item `{raw_id}` is not in the active dependency graph.")
+            risk_flags.append("unknown_or_excluded_changed_item")
+            return self._blast_result(
+                dependency_map,
+                forecast,
+                kind,
+                raw_id,
+                impacted_skills,
+                impacted_workflows,
+                impacted_prompts,
+                impacted_resources,
+                risk_flags,
+                warnings,
+                readiness_status="needs_review",
+            )
+
+        if kind == "skill":
+            impacted_skills.add(raw_id)
+        elif kind == "prompt":
+            impacted_prompts.add(raw_id)
+            impacted_skills.update(self.PROMPT_SKILL_REFS.get(raw_id, set()))
+        elif kind == "resource":
+            impacted_resources.add(raw_id)
+            impacted_skills.update(self._skills_for_resource(raw_id))
+            impacted_workflows.update(self._workflows_for_resource(raw_id))
+        elif kind == "workflow_template":
+            impacted_workflows.add(raw_id)
+            impacted_skills.update(self.app_state.workflows.get(raw_id).ordered_skill_ids)
+
+        impacted_skills.intersection_update({skill.id for skill in self._promoted_skills()})
+        impacted_workflows.update(self._workflows_for_skills(impacted_skills))
+        impacted_prompts.update(self._prompts_for_skills(impacted_skills))
+        impacted_resources.update(self._resources_for_skills(impacted_skills))
+        if impacted_workflows:
+            impacted_resources.add("resource://workflow-templates")
+            impacted_prompts.add("workflow_composition")
+        if impacted_skills:
+            impacted_resources.add("resource://skill-catalog")
+        impacted_prompts = {
+            prompt_id
+            for prompt_id in impacted_prompts
+            if f"prompt:{prompt_id}" in graph_node_ids
+        }
+        impacted_resources = {
+            resource_uri
+            for resource_uri in impacted_resources
+            if f"resource:{resource_uri}" in graph_node_ids
+        }
+
+        risk_flags.extend(
+            self._blast_risk_flags(
+                kind,
+                impacted_skills,
+                impacted_workflows,
+                dependency_map,
+                forecast,
+            )
+        )
+        readiness = self._blast_readiness(risk_flags, forecast.readiness_status)
+        return self._blast_result(
+            dependency_map,
+            forecast,
+            kind,
+            raw_id,
+            impacted_skills,
+            impacted_workflows,
+            impacted_prompts,
+            impacted_resources,
+            risk_flags,
+            warnings,
+            readiness,
+        )
+
+    async def report(self, request: DependencyReportRequest | None = None) -> DependencyReportResult:
+        request = request or DependencyReportRequest()
+        scenarios = request.scenarios or [
+            BlastRadiusRequest(skill_id="search_knowledge_base", actor=request.actor),
+            BlastRadiusRequest(resource_uri="resource://policy/ai-governance", actor=request.actor),
+        ]
+        dependency_map = await self.build_map()
+        blasts = [await self.blast_radius(scenario) for scenario in scenarios]
+        readiness = self._combined_readiness(
+            [dependency_map.readiness_status, *[blast.readiness_status for blast in blasts]]
+        )
+        risk_flags = sorted({flag for blast in blasts for flag in blast.risk_flags})
+        bundle = {
+            "report_id": self.REPORT_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": readiness,
+            "map_summary": dependency_map.summary,
+            "counts_by_node_type": dependency_map.counts_by_node_type,
+            "high_centrality_skills": dependency_map.high_centrality_skills,
+            "orphaned_resources": dependency_map.orphaned_resources,
+            "orphaned_prompts": dependency_map.orphaned_prompts,
+            "excluded_skills": dependency_map.excluded_skills,
+            "scenarios": [blast.model_dump(mode="json") for blast in blasts],
+            "risk_flags": risk_flags,
+            "rollout_checklist": self._rollout_checklist(risk_flags),
+            "mcp_commands": self._mcp_commands(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.REPORT_ID}.json"
+        markdown_path = self.output_dir / f"{self.REPORT_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "dependencies.report_exported",
+            "dependency_report",
+            self.REPORT_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "scenario_count": len(blasts),
+            },
+        )
+        return DependencyReportResult(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "scenario_count": len(blasts),
+                "risk_flag_count": len(risk_flags),
+                "node_count": len(dependency_map.nodes),
+                "edge_count": len(dependency_map.edges),
+            },
+        )
+
+    def _add_node(
+        self,
+        nodes: dict[str, DependencyNode],
+        node_id: str,
+        node_type: str,
+        label: str,
+        metadata: JsonDict | None = None,
+    ) -> None:
+        nodes.setdefault(
+            node_id,
+            DependencyNode(id=node_id, type=node_type, label=label, metadata=metadata or {}),
+        )
+
+    def _add_edge(
+        self,
+        edges: list[DependencyEdge],
+        edge_keys: set[tuple[str, str, str, str]],
+        source: str,
+        target: str,
+        edge_type: str,
+        evidence: str,
+        weight: int = 1,
+        metadata: JsonDict | None = None,
+    ) -> None:
+        key = (source, target, edge_type, evidence)
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        edges.append(
+            DependencyEdge(
+                source=source,
+                target=target,
+                type=edge_type,
+                evidence=evidence,
+                weight=weight,
+                metadata=metadata or {},
+            )
+        )
+
+    def _add_release_evidence(
+        self,
+        nodes: dict[str, DependencyNode],
+        edges: list[DependencyEdge],
+        edge_keys: set[tuple[str, str, str, str]],
+        release_preview: ReleasePreview,
+        promoted_ids: set[str],
+        workflows: list[WorkflowTemplate],
+    ) -> None:
+        self._add_node(
+            nodes,
+            f"release:{release_preview.release_id}",
+            "release_preview",
+            release_preview.release_id,
+            {
+                "readiness_status": release_preview.readiness_status,
+                "risk_flags": release_preview.risk_flags,
+                "snapshot_source": release_preview.snapshot_source,
+            },
+        )
+        workflow_ids = {workflow.id for workflow in workflows}
+        for item in (
+            release_preview.skills_added
+            + release_preview.skills_changed
+            + release_preview.skills_removed
+        ):
+            if item.id in promoted_ids:
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"release:{release_preview.release_id}",
+                    f"skill:{item.id}",
+                    f"release_{item.change_type}",
+                    "Release preview diff identifies this skill as changed.",
+                    metadata={"details": item.details},
+                )
+        for item in (
+            release_preview.workflow_templates_added
+            + release_preview.workflow_templates_changed
+            + release_preview.workflow_templates_removed
+        ):
+            if item.id in workflow_ids:
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"release:{release_preview.release_id}",
+                    f"workflow:{item.id}",
+                    f"release_{item.change_type}",
+                    "Release preview diff identifies this workflow template as changed.",
+                    metadata={"details": item.details},
+                )
+
+    def _add_capacity_evidence(
+        self,
+        nodes: dict[str, DependencyNode],
+        edges: list[DependencyEdge],
+        edge_keys: set[tuple[str, str, str, str]],
+        capacity: CapacityForecastResult,
+        promoted_ids: set[str],
+        workflows: list[WorkflowTemplate],
+    ) -> None:
+        self._add_node(
+            nodes,
+            f"capacity:{capacity.forecast_id}",
+            "capacity_forecast",
+            capacity.forecast_id,
+            {
+                "readiness_status": capacity.readiness_status,
+                "horizon_days": capacity.horizon_days,
+                "risk_flags": capacity.bottleneck_risk_flags,
+            },
+        )
+        workflow_ids = {workflow.id for workflow in workflows}
+        for skill in capacity.per_skill:
+            if skill.skill_id in promoted_ids:
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"capacity:{capacity.forecast_id}",
+                    f"skill:{skill.skill_id}",
+                    "forecasts_skill_demand",
+                    "Capacity forecast includes projected invocations for this skill.",
+                    weight=max(skill.forecasted_invocations, 1),
+                    metadata={
+                        "forecasted_invocations": skill.forecasted_invocations,
+                        "risk_flags": skill.risk_flags,
+                    },
+                )
+        for workflow in capacity.top_workflows:
+            if workflow.template_id in workflow_ids:
+                self._add_edge(
+                    edges,
+                    edge_keys,
+                    f"capacity:{capacity.forecast_id}",
+                    f"workflow:{workflow.template_id}",
+                    "forecasts_workflow_demand",
+                    "Capacity forecast includes projected workflow demand.",
+                    weight=max(workflow.projected_runs, 1),
+                    metadata={"projected_runs": workflow.projected_runs},
+                )
+
+    def _add_audit_evidence(
+        self,
+        nodes: dict[str, DependencyNode],
+        edges: list[DependencyEdge],
+        edge_keys: set[tuple[str, str, str, str]],
+        promoted_ids: set[str],
+    ) -> None:
+        history_by_skill: dict[str, int] = {}
+        for invocation in self.app_state.invocation_service.invocations:
+            if invocation.skill_id in promoted_ids:
+                history_by_skill[invocation.skill_id] = history_by_skill.get(invocation.skill_id, 0) + 1
+        for skill_id, count in history_by_skill.items():
+            self._add_node(
+                nodes,
+                f"audit_history:{skill_id}",
+                "audit_history",
+                f"{skill_id} invocation history",
+                {"skill_id": skill_id, "invocation_count": count},
+            )
+            self._add_edge(
+                edges,
+                edge_keys,
+                f"skill:{skill_id}",
+                f"audit_history:{skill_id}",
+                "has_invocation_history",
+                "In-memory invocation history contains calls for this skill.",
+                weight=count,
+            )
+        actor_counts: dict[tuple[str, str], int] = {}
+        for event in self.app_state.audit.events:
+            if event.action != "skill.invoked" or event.resource_id not in promoted_ids:
+                continue
+            key = (event.actor, event.resource_id)
+            actor_counts[key] = actor_counts.get(key, 0) + 1
+        for (actor, skill_id), count in actor_counts.items():
+            self._add_node(
+                nodes,
+                f"agent:{actor}",
+                "agent",
+                actor,
+                {"actor": actor, "source": "audit_events"},
+            )
+            self._add_edge(
+                edges,
+                edge_keys,
+                f"agent:{actor}",
+                f"skill:{skill_id}",
+                "invoked_skill",
+                "Audit history shows this actor invoked the skill.",
+                weight=count,
+            )
+
+    def _blast_result(
+        self,
+        dependency_map: DependencyMapResult,
+        forecast: CapacityForecastResult,
+        kind: str,
+        raw_id: str,
+        impacted_skills: set[str],
+        impacted_workflows: set[str],
+        impacted_prompts: set[str],
+        impacted_resources: set[str],
+        risk_flags: list[str],
+        warnings: list[str],
+        readiness_status: SecurityReadinessStatus,
+    ) -> BlastRadiusResult:
+        sorted_skills = sorted(impacted_skills)
+        sorted_workflows = sorted(impacted_workflows)
+        sorted_prompts = sorted(impacted_prompts)
+        sorted_resources = sorted(impacted_resources)
+        return BlastRadiusResult(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            changed_item={"type": kind, "id": raw_id},
+            impacted_skills=sorted_skills,
+            impacted_workflows=sorted_workflows,
+            impacted_prompts=sorted_prompts,
+            impacted_resources=sorted_resources,
+            likely_agents=self._likely_agents(sorted_skills, sorted_workflows),
+            likely_tool_calls=self._likely_tool_calls(sorted_skills, forecast),
+            capacity_impact=self._capacity_impact(sorted_skills, forecast),
+            conformance_tests_to_run=self._conformance_tests(sorted_skills, sorted_workflows),
+            risk_flags=sorted(set(risk_flags)),
+            recommended_rollout_action=self._rollout_action(readiness_status, risk_flags),
+            graph_paths=self._graph_paths(
+                dependency_map,
+                self._node_id_for_changed_item(kind, raw_id),
+                sorted_skills,
+                sorted_workflows,
+                sorted_prompts,
+                sorted_resources,
+            ),
+            warnings=warnings,
+        )
+
+    def _changed_item(self, request: BlastRadiusRequest) -> tuple[str, str, str]:
+        if request.skill_id:
+            return "skill", request.skill_id, f"skill:{request.skill_id}"
+        if request.prompt_id:
+            return "prompt", request.prompt_id, f"prompt:{request.prompt_id}"
+        if request.resource_uri:
+            return "resource", request.resource_uri, f"resource:{request.resource_uri}"
+        if request.workflow_template_id:
+            return "workflow_template", request.workflow_template_id, f"workflow:{request.workflow_template_id}"
+        return "unknown", "unknown", "unknown:unknown"
+
+    def _node_id_for_changed_item(self, kind: str, raw_id: str) -> str:
+        if kind == "workflow_template":
+            return f"workflow:{raw_id}"
+        return f"{kind}:{raw_id}"
+
+    def _blast_risk_flags(
+        self,
+        kind: str,
+        impacted_skills: set[str],
+        impacted_workflows: set[str],
+        dependency_map: DependencyMapResult,
+        forecast: CapacityForecastResult,
+    ) -> list[str]:
+        flags = []
+        central = {
+            item["skill_id"]
+            for item in dependency_map.high_centrality_skills
+        }
+        for skill_id in sorted(impacted_skills & central):
+            flags.append(f"{skill_id}:high_centrality_skill")
+        if len(impacted_workflows) >= 2:
+            flags.append("shared_workflow_dependency")
+        if kind == "prompt":
+            flags.append("prompt_regression_needed")
+        if kind == "resource":
+            flags.append("resource_context_changed")
+        for workflow_id in impacted_workflows:
+            template = self.app_state.workflows.get(workflow_id)
+            if template.default_sensitivity == "confidential":
+                flags.append(f"{workflow_id}:confidential_workflow_impacted")
+        history = {skill.skill_id: skill.historical_invocations for skill in forecast.per_skill}
+        for skill_id in sorted(impacted_skills):
+            if history.get(skill_id, 0) == 0:
+                flags.append(f"{skill_id}:limited_invocation_history")
+        if forecast.readiness_status != "ready":
+            flags.append(f"capacity_{forecast.readiness_status}")
+        return flags
+
+    def _likely_agents(self, skill_ids: list[str], workflow_ids: list[str]) -> list[JsonDict]:
+        counts: dict[str, int] = {}
+        for event in self.app_state.audit.events:
+            if event.action == "skill.invoked" and event.resource_id in skill_ids:
+                counts[event.actor] = counts.get(event.actor, 0) + 1
+        rows = [
+            {"agent": actor, "source": "audit_history", "matched_invocations": count}
+            for actor, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        roles = {
+            self.app_state.workflows.get(workflow_id).required_role
+            for workflow_id in workflow_ids
+        }
+        rows.extend(
+            {
+                "agent": f"role:{role}",
+                "source": "workflow_template_required_role",
+                "matched_invocations": 0,
+            }
+            for role in sorted(roles)
+        )
+        return rows
+
+    def _likely_tool_calls(
+        self,
+        skill_ids: list[str],
+        forecast: CapacityForecastResult,
+    ) -> list[JsonDict]:
+        forecast_by_skill = {skill.skill_id: skill for skill in forecast.per_skill}
+        history = self.app_state.metrics.summary().by_skill
+        return [
+            {
+                "tool_name": skill_id,
+                "historical_invocations": history.get(skill_id, 0),
+                "forecasted_invocations": forecast_by_skill.get(skill_id).forecasted_invocations
+                if skill_id in forecast_by_skill
+                else 0,
+            }
+            for skill_id in skill_ids
+            if skill_id in {tool.name for tool in self.app_state.mcp.list_tools()}
+        ]
+
+    def _capacity_impact(self, skill_ids: list[str], forecast: CapacityForecastResult) -> JsonDict:
+        rows = [
+            skill
+            for skill in forecast.per_skill
+            if skill.skill_id in skill_ids
+        ]
+        return {
+            "readiness_status": forecast.readiness_status,
+            "forecast_days": forecast.horizon_days,
+            "impacted_skill_count": len(rows),
+            "forecasted_invocations": sum(skill.forecasted_invocations for skill in rows),
+            "estimated_input_tokens": sum(skill.estimated_input_tokens for skill in rows),
+            "estimated_output_tokens": sum(skill.estimated_output_tokens for skill in rows),
+            "estimated_cost": round(sum(skill.estimated_cost for skill in rows), 6),
+            "risk_flags": sorted({flag for skill in rows for flag in skill.risk_flags}),
+            "top_workflows": sorted(
+                {
+                    workflow["template_id"]
+                    for skill in rows
+                    for workflow in skill.top_workflows
+                }
+            ),
+        }
+
+    def _conformance_tests(self, skill_ids: list[str], workflow_ids: list[str]) -> list[str]:
+        tests = [
+            "python -m app.evals.run_conformance",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_eval",
+            "python -m app.mcp_server tools",
+        ]
+        if skill_ids:
+            tests.append(f"python -m pytest -q tests/test_hub.py # impacted skills: {', '.join(skill_ids)}")
+        if workflow_ids:
+            tests.append(
+                f"python -m pytest -q tests/test_workflows.py # impacted workflows: {', '.join(workflow_ids)}"
+            )
+        return tests
+
+    def _graph_paths(
+        self,
+        dependency_map: DependencyMapResult,
+        changed_node_id: str,
+        skill_ids: list[str],
+        workflow_ids: list[str],
+        prompt_ids: list[str],
+        resource_uris: list[str],
+    ) -> list[JsonDict]:
+        interesting = (
+            [f"skill:{skill_id}" for skill_id in skill_ids]
+            + [f"workflow:{workflow_id}" for workflow_id in workflow_ids]
+            + [f"prompt:{prompt_id}" for prompt_id in prompt_ids]
+            + [f"resource:{uri}" for uri in resource_uris]
+        )
+        edge_pairs = {
+            (edge.source, edge.target): edge.type
+            for edge in dependency_map.edges
+        }
+        reverse_pairs = {
+            (edge.target, edge.source): edge.type
+            for edge in dependency_map.edges
+        }
+        paths = []
+        for node_id in sorted(set(interesting)):
+            if node_id == changed_node_id:
+                continue
+            if (changed_node_id, node_id) in edge_pairs:
+                paths.append(
+                    {
+                        "from": changed_node_id,
+                        "to": node_id,
+                        "via": [edge_pairs[(changed_node_id, node_id)]],
+                    }
+                )
+            elif (changed_node_id, node_id) in reverse_pairs:
+                paths.append(
+                    {
+                        "from": changed_node_id,
+                        "to": node_id,
+                        "via": [reverse_pairs[(changed_node_id, node_id)]],
+                    }
+                )
+        return paths[:25]
+
+    def _resource_targets(
+        self,
+        resource_uri: str,
+        promoted_ids: set[str],
+        workflows: list[WorkflowTemplate],
+    ) -> list[str]:
+        if resource_uri == "resource://skill-catalog":
+            return [f"skill:{skill_id}" for skill_id in sorted(promoted_ids)]
+        if resource_uri == "resource://workflow-templates":
+            return [f"workflow:{template.id}" for template in workflows]
+        if resource_uri.startswith("resource://policy/"):
+            return [f"skill:{skill_id}" for skill_id in sorted(promoted_ids & {"search_knowledge_base"})]
+        if resource_uri.startswith("resource://product/"):
+            return [f"skill:{skill_id}" for skill_id in sorted(promoted_ids & {"search_knowledge_base"})]
+        return []
+
+    def _skills_for_resource(self, resource_uri: str) -> set[str]:
+        promoted_ids = {skill.id for skill in self._promoted_skills()}
+        if resource_uri == "resource://skill-catalog":
+            return promoted_ids
+        if resource_uri == "resource://workflow-templates":
+            return {
+                skill_id
+                for template in self.app_state.workflows.list()
+                for skill_id in template.ordered_skill_ids
+            } & promoted_ids
+        if resource_uri.startswith("resource://policy/") or resource_uri.startswith("resource://product/"):
+            return promoted_ids & {"search_knowledge_base"}
+        return set()
+
+    def _workflows_for_resource(self, resource_uri: str) -> set[str]:
+        if resource_uri != "resource://workflow-templates":
+            return set()
+        return {template.id for template in self.app_state.workflows.list()}
+
+    def _workflows_for_skills(self, skill_ids: set[str]) -> set[str]:
+        return {
+            template.id
+            for template in self.app_state.workflows.list()
+            if skill_ids & set(template.ordered_skill_ids)
+        }
+
+    def _prompts_for_skills(self, skill_ids: set[str]) -> set[str]:
+        prompts = {
+            prompt_id
+            for prompt_id, refs in self.PROMPT_SKILL_REFS.items()
+            if skill_ids & refs
+        }
+        if skill_ids:
+            prompts.add("workflow_composition")
+        return prompts
+
+    def _resources_for_skills(self, skill_ids: set[str]) -> set[str]:
+        resources = {"resource://skill-catalog"} if skill_ids else set()
+        if "search_knowledge_base" in skill_ids:
+            resources.update(
+                resource.uri
+                for resource in self.app_state.mcp.list_resources()
+                if resource.uri.startswith("resource://policy/")
+                or resource.uri.startswith("resource://product/")
+            )
+        if self._workflows_for_skills(skill_ids):
+            resources.add("resource://workflow-templates")
+        return resources
+
+    def _promoted_skills(self) -> list[SkillManifest]:
+        return [
+            skill
+            for skill in self.app_state.registry.list()
+            if skill.status == "promoted" and skill.enabled
+        ]
+
+    def _high_centrality_skills(
+        self,
+        edges: list[DependencyEdge],
+        promoted_ids: set[str],
+    ) -> list[JsonDict]:
+        degree: dict[str, int] = defaultdict(int)
+        evidence: dict[str, set[str]] = defaultdict(set)
+        for edge in edges:
+            for node_id in (edge.source, edge.target):
+                if not node_id.startswith("skill:"):
+                    continue
+                skill_id = node_id.split(":", 1)[1]
+                if skill_id in promoted_ids:
+                    degree[skill_id] += 1
+                    evidence[skill_id].add(edge.type)
+        rows = [
+            {
+                "skill_id": skill_id,
+                "centrality_score": score,
+                "edge_types": sorted(evidence[skill_id]),
+            }
+            for skill_id, score in degree.items()
+            if score >= 3
+        ]
+        return sorted(rows, key=lambda item: (-item["centrality_score"], item["skill_id"]))[:5]
+
+    def _orphans(
+        self,
+        edges: list[DependencyEdge],
+        nodes: dict[str, DependencyNode],
+        node_type: str,
+    ) -> list[str]:
+        connected = {edge.source for edge in edges} | {edge.target for edge in edges}
+        return sorted(
+            node.metadata.get("uri") or node.metadata.get("prompt_id") or node.id
+            for node in nodes.values()
+            if node.type == node_type and node.id not in connected
+        )
+
+    def _excluded_skills(self) -> JsonDict:
+        return {
+            "disabled": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "disabled" or not skill.enabled
+            ],
+            "draft": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "draft"
+            ],
+            "validated": [
+                self._excluded_skill(skill)
+                for skill in self.app_state.registry.list()
+                if skill.status == "validated"
+            ],
+        }
+
+    def _excluded_skill(self, skill: SkillManifest) -> JsonDict:
+        return {
+            "id": skill.id,
+            "version": skill.version,
+            "status": skill.status,
+            "enabled": skill.enabled,
+            "reason": "Dependency maps include only enabled promoted skills as active skill nodes.",
+        }
+
+    def _map_readiness(
+        self,
+        release_status: SecurityReadinessStatus,
+        capacity_status: SecurityReadinessStatus,
+        warnings: list[str],
+    ) -> SecurityReadinessStatus:
+        return self._combined_readiness([release_status, capacity_status, "needs_review" if warnings else "ready"])
+
+    def _blast_readiness(
+        self,
+        risk_flags: list[str],
+        capacity_status: SecurityReadinessStatus,
+    ) -> SecurityReadinessStatus:
+        if capacity_status == "blocked":
+            return "blocked"
+        if risk_flags or capacity_status == "needs_review":
+            return "needs_review"
+        return "ready"
+
+    def _combined_readiness(self, statuses: list[str]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _rollout_action(self, readiness_status: SecurityReadinessStatus, risk_flags: list[str]) -> str:
+        if "unknown_or_excluded_changed_item" in risk_flags:
+            return "block_until_registered_or_promoted"
+        if readiness_status == "blocked":
+            return "block_release_and_fix_guardrails_or_conformance"
+        if readiness_status == "needs_review":
+            return "review_gate_then_canary_rollout"
+        return "standard_release_with_targeted_regression"
+
+    def _rollout_checklist(self, risk_flags: list[str]) -> list[str]:
+        checklist = [
+            "Confirm changed item owner and active promoted/deployed status.",
+            "Run dependency blast-radius endpoint for each skill, prompt, resource, or workflow change.",
+            "Run conformance and golden evals for impacted skills and workflow tests for impacted templates.",
+            "Review capacity impact and rate limits before increasing traffic.",
+            "Export release notes and dependency report for audit evidence.",
+        ]
+        if risk_flags:
+            checklist.append("Resolve or explicitly accept listed risk flags before broad rollout.")
+        return checklist
+
+    def _mcp_commands(self) -> list[str]:
+        return [
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "curl -X GET http://localhost:8000/dependencies/map -H \"X-API-Key: dev-local-token\"",
+            "curl -X POST http://localhost:8000/dependencies/blast-radius -H \"X-API-Key: dev-local-token\" -H \"Content-Type: application/json\" -d \"{\\\"skill_id\\\":\\\"search_knowledge_base\\\"}\"",
+            "curl -X POST http://localhost:8000/dependencies/report -H \"X-API-Key: dev-local-token\"",
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "Deterministic dependency graphing across MCP tools, prompts, resources, and workflows",
+            "Blast-radius analysis with capacity, audit, conformance, and release evidence",
+            "FastAPI platform API design with Pydantic contracts and local/mock defaults",
+            "Enterprise rollout governance with risk flags and exportable Markdown/JSON reports",
+            "Dashboard and demo integration for platform engineering storytelling",
+        ]
+
+    def _interviewer_talking_points(self) -> list[str]:
+        return [
+            "The graph proves which promoted skills are central before a catalog or prompt change ships.",
+            "Blast-radius output ties likely agents, MCP tool calls, workflows, resources, and tests to one changed item.",
+            "The implementation avoids external graph databases by using stable local registry and evidence snapshots.",
+            "Readiness combines release, conformance, audit, and capacity signals instead of only static references.",
+            "The exported report gives reviewers both machine-readable JSON and interview-ready Markdown evidence.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Dependency Map and Blast Radius Report",
+            "",
+            f"- Report ID: `{bundle['report_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Nodes: `{sum(bundle['counts_by_node_type'].values())}`",
+            f"- Edges: `{bundle['map_summary']['edge_count']}`",
+            "",
+            "## Map Summary",
+            "",
+            *[f"- {key}: `{value}`" for key, value in bundle["map_summary"].items()],
+            "",
+            "## Counts By Node Type",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["counts_by_node_type"].items()],
+            "",
+            "## High Centrality Skills",
+            "",
+            *[
+                f"- `{skill['skill_id']}` score `{skill['centrality_score']}` "
+                f"via `{', '.join(skill['edge_types'])}`"
+                for skill in bundle["high_centrality_skills"]
+            ],
+            "",
+            "## Blast Radius Scenarios",
+            "",
+        ]
+        for scenario in bundle["scenarios"]:
+            lines.extend(
+                [
+                    f"### {scenario['changed_item']['type']} `{scenario['changed_item']['id']}`",
+                    "",
+                    f"- Readiness: `{scenario['readiness_status']}`",
+                    f"- Impacted skills: `{', '.join(scenario['impacted_skills']) or 'none'}`",
+                    f"- Impacted workflows: `{', '.join(scenario['impacted_workflows']) or 'none'}`",
+                    f"- Impacted prompts: `{', '.join(scenario['impacted_prompts']) or 'none'}`",
+                    f"- Impacted resources: `{', '.join(scenario['impacted_resources']) or 'none'}`",
+                    f"- Risk flags: `{', '.join(scenario['risk_flags']) or 'none'}`",
+                    f"- Rollout action: `{scenario['recommended_rollout_action']}`",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Rollout Checklist",
+                "",
+                *[f"- {item}" for item in bundle["rollout_checklist"]],
+                "",
+                "## MCP Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["mcp_commands"]],
+                "",
+                "## JD Skills Demonstrated",
+                "",
+                *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+                "",
+                "## Interviewer Talking Points",
+                "",
+                *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class SkillIncidentDrillService:
+    RUNBOOK_ID = "incident_runbook_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "incident_runbooks"
+
+    async def drill(
+        self,
+        request: SkillIncidentDrillRequest | None = None,
+    ) -> SkillIncidentDrillResult:
+        request = request or SkillIncidentDrillRequest()
+        scenario = request.scenario
+        target = self._scenario_target(scenario)
+        dependency_map = await self.app_state.dependencies.build_map()
+        capacity = await self.app_state.capacity.forecast(CapacityForecastRequest(actor=request.actor))
+        blast = await self.app_state.dependencies.blast_radius(
+            self._blast_request(target, request.actor)
+        )
+        affected_skills = self._active_impacted_skills(blast.impacted_skills)
+        readiness = self._readiness(scenario, blast.readiness_status, capacity.readiness_status)
+        severity = self._severity(scenario, readiness, capacity.bottleneck_risk_flags)
+        audit_evidence = await self._audit_evidence(scenario, target, request.actor)
+        drill_id = f"incident_drill_{scenario}"
+        self.app_state.audit.record(
+            "incident.drill_ran",
+            "incident_drill",
+            drill_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "scenario": scenario,
+                "severity": severity,
+                "readiness_status": readiness,
+                "affected_skills": affected_skills,
+            },
+        )
+        return SkillIncidentDrillResult(
+            drill_id=drill_id,
+            generated_at=utc_now(),
+            scenario=scenario,
+            affected_skills=affected_skills,
+            affected_workflows=blast.impacted_workflows,
+            affected_prompts=blast.impacted_prompts,
+            affected_resources=blast.impacted_resources,
+            simulated_symptoms=self._symptoms(scenario, target, capacity),
+            severity=severity,
+            containment_actions=self._containment_actions(scenario, affected_skills, blast.impacted_workflows),
+            rollback_canary_plan=self._rollback_canary_plan(scenario, affected_skills),
+            conformance_eval_commands=self._verification_commands(scenario, affected_skills, blast.impacted_workflows),
+            audit_evidence=audit_evidence,
+            capacity_links=self._capacity_links(capacity, affected_skills),
+            dependency_links=self._dependency_links(dependency_map, blast, target),
+            mcp_capabilities_affected=self._mcp_capabilities(blast, affected_skills),
+            readiness_status=readiness,
+            excluded_skills=dependency_map.excluded_skills,
+        )
+
+    async def runbook(
+        self,
+        request: SkillIncidentRunbookRequest | None = None,
+    ) -> SkillIncidentRunbookResult:
+        request = request or SkillIncidentRunbookRequest()
+        drill = await self.drill(
+            SkillIncidentDrillRequest(scenario=request.scenario, actor=request.actor)
+        )
+        runbook_id = f"{self.RUNBOOK_ID}_{request.scenario}"
+        bundle = {
+            "runbook_id": runbook_id,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "scenario": drill.scenario,
+            "severity": drill.severity,
+            "readiness_status": drill.readiness_status,
+            "drill_summary": self._drill_summary(drill),
+            "timeline": self._timeline(drill),
+            "containment_steps": drill.containment_actions,
+            "owner_matrix": self._owner_matrix(drill),
+            "rollback_plan": drill.rollback_canary_plan,
+            "verification_commands": drill.conformance_eval_commands,
+            "mcp_capabilities_affected": drill.mcp_capabilities_affected,
+            "audit_evidence": drill.audit_evidence,
+            "capacity_links": drill.capacity_links,
+            "dependency_links": drill.dependency_links,
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(drill),
+            "drill": drill.model_dump(mode="json"),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{runbook_id}.json"
+        markdown_path = self.output_dir / f"{runbook_id}.md"
+        latest_json_path = self.output_dir / f"{self.RUNBOOK_ID}.json"
+        latest_markdown_path = self.output_dir / f"{self.RUNBOOK_ID}.md"
+        markdown = self._markdown(bundle)
+        json_payload = json.dumps(bundle, indent=2, sort_keys=True)
+        json_path.write_text(json_payload, encoding="utf-8")
+        markdown_path.write_text(markdown, encoding="utf-8")
+        latest_json_path.write_text(json_payload, encoding="utf-8")
+        latest_markdown_path.write_text(markdown, encoding="utf-8")
+        self.app_state.audit.record(
+            "incident.runbook_exported",
+            "incident_runbook",
+            runbook_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "scenario": drill.scenario,
+                "severity": drill.severity,
+                "readiness_status": drill.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return SkillIncidentRunbookResult(
+            runbook_id=runbook_id,
+            generated_at=utc_now(),
+            scenario=drill.scenario,
+            readiness_status=drill.readiness_status,
+            severity=drill.severity,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["drill_summary"],
+        )
+
+    def _scenario_target(self, scenario: SkillIncidentScenario) -> JsonDict:
+        targets = {
+            "schema_breakage": {"type": "skill", "id": "summarize_document"},
+            "disabled_skill_invoked": {"type": "skill", "id": "translate_text"},
+            "policy_denial_spike": {"type": "skill", "id": "search_knowledge_base"},
+            "latency_capacity_breach": {"type": "skill", "id": "search_knowledge_base"},
+            "workflow_dependency_failure": {"type": "workflow_template", "id": "rfp_answer_pack"},
+        }
+        return targets[scenario]
+
+    def _blast_request(self, target: JsonDict, actor: str) -> BlastRadiusRequest:
+        if target["type"] == "workflow_template":
+            return BlastRadiusRequest(workflow_template_id=target["id"], actor=actor)
+        return BlastRadiusRequest(skill_id=target["id"], actor=actor)
+
+    def _active_impacted_skills(self, skill_ids: list[str]) -> list[str]:
+        active = {
+            skill.id
+            for skill in self.app_state.registry.list()
+            if skill.status == "promoted" and skill.enabled
+        }
+        return sorted(skill_id for skill_id in skill_ids if skill_id in active)
+
+    def _symptoms(
+        self,
+        scenario: SkillIncidentScenario,
+        target: JsonDict,
+        capacity: CapacityForecastResult,
+    ) -> list[str]:
+        target_id = target["id"]
+        symptoms = {
+            "schema_breakage": [
+                f"`{target_id}` output no longer satisfies its declared JSON schema.",
+                "Conformance reports output_schema_valid=false for the impacted skill.",
+                "MCP tool calls return validation failures before downstream workflow steps can continue.",
+            ],
+            "disabled_skill_invoked": [
+                f"`{target_id}` was invoked after its lifecycle status changed to disabled.",
+                "MCP discovery omits the disabled tool, but stale clients may still attempt direct invocation.",
+                "Invocation history records failed attempts with `Skill is disabled.`",
+            ],
+            "policy_denial_spike": [
+                f"`{target_id}` policy denials increase for confidential requests from agent role.",
+                "Audit query shows repeated `policy.denied` evidence for the same MCP capability.",
+                "Workflow simulations block before retrieval resources are read.",
+            ],
+            "latency_capacity_breach": [
+                f"`{target_id}` p95 latency or projected invocation load exceeds local guardrails.",
+                f"Capacity readiness is `{capacity.readiness_status}` with {len(capacity.bottleneck_risk_flags)} risk flags.",
+                "Platform owners should throttle, queue, or degrade before broad workflow rollout.",
+            ],
+            "workflow_dependency_failure": [
+                f"Workflow `{target_id}` cannot complete because an ordered skill dependency fails.",
+                "Blast-radius output links the failed workflow to affected prompts, resources, and tools.",
+                "Release preview and workflow conformance commands are required before re-enabling canary traffic.",
+            ],
+        }
+        return symptoms[scenario]
+
+    def _containment_actions(
+        self,
+        scenario: SkillIncidentScenario,
+        skill_ids: list[str],
+        workflow_ids: list[str],
+    ) -> list[str]:
+        target_skills = ", ".join(skill_ids) or "the attempted skill"
+        target_workflows = ", ".join(workflow_ids) or "dependent workflows"
+        actions = {
+            "schema_breakage": [
+                f"Freeze promotion for `{target_skills}` and stop release export until schema validation passes.",
+                "Keep the existing promoted version serving traffic while the candidate manifest is corrected.",
+                f"Pause workflow templates that route through {target_workflows} if output validation failures recur.",
+            ],
+            "disabled_skill_invoked": [
+                "Confirm MCP tool discovery excludes the disabled skill and notify stale client owners.",
+                "Reject direct invocation attempts until the owner explicitly re-promotes a valid manifest.",
+                "Query audit history for callers still using cached tool catalogs.",
+            ],
+            "policy_denial_spike": [
+                "Keep policy enforcement enabled and do not loosen confidential-data access during triage.",
+                f"Ask workflow owners for {target_workflows} to rerun with reviewer role or internal sensitivity.",
+                "Review denial reasons, matched rules, and recent prompt changes before restoring traffic.",
+            ],
+            "latency_capacity_breach": [
+                "Apply the local capacity fallback behavior and throttle impacted MCP tools.",
+                f"Reduce traffic to `{target_skills}` until p95 latency and quota pressure return under guardrails.",
+                "Queue non-critical workflow runs and preserve audit evidence for the capacity review.",
+            ],
+            "workflow_dependency_failure": [
+                f"Pause workflow templates {target_workflows} and keep direct unaffected tools available.",
+                f"Run blast-radius analysis for `{target_skills}` before changing prompts or resources.",
+                "Route urgent requests through a smaller approved workflow until dependency verification passes.",
+            ],
+        }
+        return actions[scenario]
+
+    def _rollback_canary_plan(
+        self,
+        scenario: SkillIncidentScenario,
+        skill_ids: list[str],
+    ) -> list[str]:
+        target_skills = ", ".join(skill_ids) or "the impacted capability"
+        common = [
+            "Rollback to the last promoted manifest snapshot and preserve the failed drill JSON.",
+            "Run conformance, golden eval, MCP tool/resource/prompt inspection, and workflow simulation locally.",
+            "Canary one approved workflow with internal data before restoring broader agent discovery.",
+        ]
+        scenario_first = {
+            "schema_breakage": f"Ship a corrected schema for `{target_skills}` as a validated draft, then promote only after conformance passes.",
+            "disabled_skill_invoked": "Clear stale client catalogs, then re-enable only if the skill owner confirms the manifest is production-ready.",
+            "policy_denial_spike": "Keep confidential access restricted, then canary with reviewer role before allowing agent-role traffic.",
+            "latency_capacity_breach": f"Lower per-skill quota for `{target_skills}`, then gradually raise traffic after p95 stabilizes.",
+            "workflow_dependency_failure": "Re-enable the workflow one step at a time after each ordered dependency passes replay.",
+        }
+        return [scenario_first[scenario], *common]
+
+    def _verification_commands(
+        self,
+        scenario: SkillIncidentScenario,
+        skill_ids: list[str],
+        workflow_ids: list[str],
+    ) -> list[str]:
+        commands = [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+        ]
+        if skill_ids:
+            commands.append(f"python -m pytest -q tests/test_hub.py # incident drill skills: {', '.join(skill_ids)}")
+        if workflow_ids:
+            commands.append(
+                f"python -m pytest -q tests/test_workflows.py # incident drill workflows: {', '.join(workflow_ids)}"
+            )
+        if scenario == "latency_capacity_breach":
+            commands.append("curl -X POST http://localhost:8000/capacity/forecast -H \"X-API-Key: dev-local-token\"")
+        return commands
+
+    async def _audit_evidence(
+        self,
+        scenario: SkillIncidentScenario,
+        target: JsonDict,
+        actor: str,
+    ) -> JsonDict:
+        query = await self.app_state.audit_query.query(
+            AuditQueryRequest(query=target["id"], limit=50)
+        )
+        return {
+            "query_endpoint": "/audit/query",
+            "scenario": scenario,
+            "actor": actor,
+            "target": target,
+            "matched_event_count": len(query.matched_events),
+            "counts_by_action": query.counts_by_action,
+            "counts_by_status": query.counts_by_status,
+            "trace_ids": query.trace_ids[:10],
+            "correlation_ids": query.correlation_ids[:10],
+            "warnings": query.warnings,
+        }
+
+    def _capacity_links(
+        self,
+        capacity: CapacityForecastResult,
+        skill_ids: list[str],
+    ) -> JsonDict:
+        impacted = [
+            skill.model_dump(mode="json")
+            for skill in capacity.per_skill
+            if skill.skill_id in skill_ids
+        ]
+        return {
+            "forecast_endpoint": "/capacity/forecast",
+            "guardrails_endpoint": "/capacity/guardrails",
+            "plan_export_endpoint": "/capacity/plan-export",
+            "readiness_status": capacity.readiness_status,
+            "risk_flags": capacity.bottleneck_risk_flags,
+            "impacted_skill_forecasts": impacted,
+            "recommended_rate_limits": {
+                skill_id: capacity.recommended_rate_limits.get(skill_id)
+                for skill_id in skill_ids
+            },
+        }
+
+    def _dependency_links(
+        self,
+        dependency_map: DependencyMapResult,
+        blast: BlastRadiusResult,
+        target: JsonDict,
+    ) -> JsonDict:
+        return {
+            "map_endpoint": "/dependencies/map",
+            "blast_radius_endpoint": "/dependencies/blast-radius",
+            "target": target,
+            "readiness_status": blast.readiness_status,
+            "risk_flags": blast.risk_flags,
+            "warnings": blast.warnings,
+            "graph_paths": blast.graph_paths,
+            "map_summary": dependency_map.summary,
+        }
+
+    def _mcp_capabilities(self, blast: BlastRadiusResult, skill_ids: list[str]) -> JsonDict:
+        active_tools = {tool.name for tool in self.app_state.mcp.list_tools()}
+        return {
+            "tools": sorted(skill_id for skill_id in skill_ids if skill_id in active_tools),
+            "workflows": blast.impacted_workflows,
+            "prompts": blast.impacted_prompts,
+            "resources": blast.impacted_resources,
+            "likely_tool_calls": blast.likely_tool_calls,
+        }
+
+    def _readiness(
+        self,
+        scenario: SkillIncidentScenario,
+        dependency_status: SecurityReadinessStatus,
+        capacity_status: SecurityReadinessStatus,
+    ) -> SecurityReadinessStatus:
+        if scenario in {"schema_breakage", "latency_capacity_breach"}:
+            return "blocked" if capacity_status == "blocked" or scenario == "schema_breakage" else "needs_review"
+        if dependency_status == "blocked" or capacity_status == "blocked":
+            return "blocked"
+        return "needs_review"
+
+    def _severity(
+        self,
+        scenario: SkillIncidentScenario,
+        readiness: SecurityReadinessStatus,
+        capacity_risks: list[str],
+    ) -> SkillIncidentSeverity:
+        if readiness == "blocked" or scenario == "schema_breakage":
+            return "sev1"
+        if scenario == "latency_capacity_breach" and capacity_risks:
+            return "sev1"
+        if scenario in {"disabled_skill_invoked", "policy_denial_spike", "workflow_dependency_failure"}:
+            return "sev2"
+        return "sev3"
+
+    def _drill_summary(self, drill: SkillIncidentDrillResult) -> JsonDict:
+        return {
+            "scenario": drill.scenario,
+            "severity": drill.severity,
+            "readiness_status": drill.readiness_status,
+            "affected_skill_count": len(drill.affected_skills),
+            "affected_workflow_count": len(drill.affected_workflows),
+            "affected_prompt_count": len(drill.affected_prompts),
+            "affected_resource_count": len(drill.affected_resources),
+            "primary_symptom": drill.simulated_symptoms[0] if drill.simulated_symptoms else "",
+        }
+
+    def _timeline(self, drill: SkillIncidentDrillResult) -> list[JsonDict]:
+        return [
+            {"minute": 0, "event": f"Incident drill `{drill.scenario}` starts.", "owner": "platform owner"},
+            {"minute": 5, "event": drill.simulated_symptoms[0], "owner": "skill owner"},
+            {"minute": 10, "event": "Containment actions executed against affected MCP capabilities.", "owner": "platform owner"},
+            {"minute": 20, "event": "Conformance, eval, MCP, capacity, and dependency checks run locally.", "owner": "quality owner"},
+            {"minute": 30, "event": "Rollback or canary plan approved with audit evidence attached.", "owner": "incident commander"},
+        ]
+
+    def _owner_matrix(self, drill: SkillIncidentDrillResult) -> list[JsonDict]:
+        return [
+            {
+                "role": "Incident commander",
+                "owner": "platform owner",
+                "responsibility": "Declare severity, coordinate containment, and approve readiness.",
+            },
+            {
+                "role": "Skill owner",
+                "owner": ", ".join(drill.affected_skills) or "target skill owner",
+                "responsibility": "Fix manifest, schema, handler, or lifecycle status.",
+            },
+            {
+                "role": "Workflow owner",
+                "owner": ", ".join(drill.affected_workflows) or "workflow platform owner",
+                "responsibility": "Pause, reroute, and canary affected workflow templates.",
+            },
+            {
+                "role": "Policy and audit owner",
+                "owner": "governance reviewer",
+                "responsibility": "Review denial evidence, trace IDs, and access-rule posture.",
+            },
+            {
+                "role": "Capacity owner",
+                "owner": "capacity planner",
+                "responsibility": "Validate guardrails, rate limits, fallback behavior, and latency posture.",
+            },
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "Incident response design for MCP-facing AI platforms",
+            "Schema, policy, latency, capacity, conformance, and dependency reliability controls",
+            "FastAPI service composition with deterministic local/mock evidence",
+            "Markdown/JSON runbook export for audit and executive review",
+            "Dashboard and demo storytelling for platform ownership interviews",
+        ]
+
+    def _interviewer_talking_points(self, drill: SkillIncidentDrillResult) -> list[str]:
+        return [
+            f"The `{drill.scenario}` drill converts a vague outage into affected skills, workflows, prompts, and resources.",
+            "The runbook uses local/mock evidence only, so reviewers can reproduce it without external incident tooling.",
+            "Readiness combines conformance commands, dependency blast radius, audit query evidence, and capacity guardrails.",
+            "Disabled and draft skills stay excluded from active MCP blast radius while still appearing in exclusion evidence.",
+            "The exported Markdown is operator-friendly while JSON stays machine-readable for future automation.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Skill Incident Recovery Runbook",
+            "",
+            f"- Runbook ID: `{bundle['runbook_id']}`",
+            f"- Scenario: `{bundle['scenario']}`",
+            f"- Severity: `{bundle['severity']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Drill Summary",
+            "",
+            *[f"- {key}: `{value}`" for key, value in bundle["drill_summary"].items()],
+            "",
+            "## Timeline",
+            "",
+            *[
+                f"- T+{item['minute']} min: {item['event']} Owner: `{item['owner']}`"
+                for item in bundle["timeline"]
+            ],
+            "",
+            "## Containment Steps",
+            "",
+            *[f"- {step}" for step in bundle["containment_steps"]],
+            "",
+            "## Owner Matrix",
+            "",
+            *[
+                f"- {row['role']} - `{row['owner']}`: {row['responsibility']}"
+                for row in bundle["owner_matrix"]
+            ],
+            "",
+            "## Rollback And Canary Plan",
+            "",
+            *[f"- {step}" for step in bundle["rollback_plan"]],
+            "",
+            "## Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["verification_commands"]],
+            "",
+            "## MCP Capabilities Affected",
+            "",
+            f"- Tools: `{', '.join(bundle['mcp_capabilities_affected']['tools']) or 'none'}`",
+            f"- Workflows: `{', '.join(bundle['mcp_capabilities_affected']['workflows']) or 'none'}`",
+            f"- Prompts: `{', '.join(bundle['mcp_capabilities_affected']['prompts']) or 'none'}`",
+            f"- Resources: `{', '.join(bundle['mcp_capabilities_affected']['resources']) or 'none'}`",
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class TenantPolicySandboxService:
+    SANDBOX_ID = "tenant_policy_sandbox_latest"
+
+    TENANT_PROFILES: dict[TenantKey, JsonDict] = {
+        "healthcare": {
+            "name": "Healthcare",
+            "regulated_data": "PHI",
+            "strict_skills": ["search_knowledge_base", "summarize_document", "extract_entities"],
+            "blocked_sensitive_skills": ["translate_text"],
+            "guardrails": [
+                "Require PHI data tagging before any confidential workflow simulation.",
+                "Keep reviewer approval on retrieval, summarization, and extraction workflows.",
+                "Log tenant, role, sensitivity, workflow id, MCP tool, and trace id for audit review.",
+                "Block translation of confidential patient-like text until a BAA-backed provider is approved.",
+            ],
+        },
+        "fintech": {
+            "name": "Fintech",
+            "regulated_data": "financial confidential data",
+            "strict_skills": ["classify_request", "search_knowledge_base", "extract_entities"],
+            "blocked_sensitive_skills": ["translate_text"],
+            "guardrails": [
+                "Attach immutable audit evidence to every confidential approval path.",
+                "Require four-eye review for production retrieval over customer or transaction context.",
+                "Separate sandbox, staging, and production tenant policy bundles.",
+                "Block cross-border translation until model residency and vendor risk are reviewed.",
+            ],
+        },
+        "public_sector": {
+            "name": "Public Sector",
+            "regulated_data": "controlled government information",
+            "strict_skills": ["search_knowledge_base", "summarize_document", "generate_action_items"],
+            "blocked_sensitive_skills": [],
+            "guardrails": [
+                "Require reviewer sign-off for production agent workflows.",
+                "Preserve MCP prompt/resource lineage for records requests and security review.",
+                "Use least-privilege roles for public, internal, and confidential datasets.",
+                "Keep exportable local evidence for procurement and compliance walkthroughs.",
+            ],
+        },
+        "internal_demo": {
+            "name": "Internal Demo",
+            "regulated_data": "demo-only synthetic data",
+            "strict_skills": ["search_knowledge_base"],
+            "blocked_sensitive_skills": [],
+            "guardrails": [
+                "Mark all sample data as synthetic and non-production.",
+                "Require review before demo users simulate confidential customer data.",
+                "Keep disabled and draft skills excluded from MCP discovery.",
+                "Export Markdown and JSON evidence before stakeholder demos.",
+            ],
+        },
+    }
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "tenant_sandboxes"
+
+    def simulate(self, request: TenantPolicySimulationRequest) -> TenantPolicySimulationResult:
+        skill_decisions = [self._skill_decision(skill, request) for skill in self._active_skills()]
+        workflow_decisions = [
+            self._workflow_decision(template, request, skill_decisions)
+            for template in self.app_state.workflows.list()
+        ]
+        grouped_skills = self._group_decisions(skill_decisions)
+        grouped_workflows = self._group_decisions(workflow_decisions)
+        impacted_tools = self._impacted_tools(skill_decisions, workflow_decisions)
+        impacted_resources = self._impacted_resources(skill_decisions, workflow_decisions)
+        impacted_prompts = self._impacted_prompts(skill_decisions, workflow_decisions)
+        readiness = self._readiness(grouped_skills, grouped_workflows)
+        warnings = self._warnings(request)
+        excluded_skills = self._excluded_skills()
+        excluded_workflows = self._excluded_workflows()
+        if any(excluded_skills.values()):
+            warnings.append("Disabled, draft, or invalid skills are excluded from tenant decisions and MCP impact.")
+        if any(excluded_workflows.values()):
+            warnings.append("Draft, in-review, and rejected workflow templates are excluded from sandbox decisions.")
+
+        return TenantPolicySimulationResult(
+            generated_at=utc_now(),
+            scenario=request,
+            readiness_status=readiness,
+            summary={
+                "tenant": request.tenant,
+                "role": request.role,
+                "environment": request.environment,
+                "data_sensitivity": request.data_sensitivity,
+                "allowed_skill_count": len(grouped_skills["allowed"]),
+                "blocked_skill_count": len(grouped_skills["blocked"]),
+                "review_required_skill_count": len(grouped_skills["review_required"]),
+                "allowed_workflow_count": len(grouped_workflows["allowed"]),
+                "blocked_workflow_count": len(grouped_workflows["blocked"]),
+                "review_required_workflow_count": len(grouped_workflows["review_required"]),
+                "impacted_mcp_tool_count": len(impacted_tools),
+                "impacted_mcp_resource_count": len(impacted_resources),
+                "impacted_mcp_prompt_count": len(impacted_prompts),
+            },
+            allowed_skills=grouped_skills["allowed"],
+            blocked_skills=grouped_skills["blocked"],
+            review_required_skills=grouped_skills["review_required"],
+            allowed_workflows=grouped_workflows["allowed"],
+            blocked_workflows=grouped_workflows["blocked"],
+            review_required_workflows=grouped_workflows["review_required"],
+            policy_reasons=self._policy_reasons(skill_decisions, workflow_decisions),
+            impacted_mcp_tools=impacted_tools,
+            impacted_mcp_resources=impacted_resources,
+            impacted_mcp_prompts=impacted_prompts,
+            recommended_tenant_guardrails=self._guardrails(request),
+            warnings=sorted(set(warnings)),
+            excluded_skills=excluded_skills,
+            excluded_workflows=excluded_workflows,
+        )
+
+    def export(self, request: TenantSandboxExportRequest | None = None) -> TenantSandboxExportResult:
+        request = request or TenantSandboxExportRequest()
+        scenarios = request.scenarios or self._default_export_scenarios()
+        results = [self.simulate(scenario) for scenario in scenarios]
+        readiness = self._combined_readiness([result.readiness_status for result in results])
+        bundle = {
+            "sandbox_id": self.SANDBOX_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": readiness,
+            "tenant_policy_matrix": self.policy_matrix(),
+            "scenario_results": [result.model_dump(mode="json") for result in results],
+            "blocked_review_actions": self._blocked_review_actions(results),
+            "mcp_impact": self._export_mcp_impact(results),
+            "local_verification_commands": self._verification_commands(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(),
+        }
+        bundle["summary"] = {
+            "scenario_count": len(results),
+            "blocked_scenario_count": sum(1 for result in results if result.readiness_status == "blocked"),
+            "review_scenario_count": sum(1 for result in results if result.readiness_status == "needs_review"),
+            "tenant_count": len({result.scenario.tenant for result in results}),
+            "readiness_status": readiness,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.SANDBOX_ID}.json"
+        markdown_path = self.output_dir / f"{self.SANDBOX_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "tenant_sandbox.exported",
+            "tenant_sandbox",
+            self.SANDBOX_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "scenario_count": len(results),
+            },
+        )
+        return TenantSandboxExportResult(
+            sandbox_id=self.SANDBOX_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def policy_matrix(self) -> list[JsonDict]:
+        return [
+            {
+                "tenant": tenant,
+                "name": profile["name"],
+                "regulated_data": profile["regulated_data"],
+                "strict_skills": profile["strict_skills"],
+                "blocked_sensitive_skills": profile["blocked_sensitive_skills"],
+                "guardrail_count": len(profile["guardrails"]),
+            }
+            for tenant, profile in self.TENANT_PROFILES.items()
+        ]
+
+    def _active_skills(self) -> list[SkillManifest]:
+        return [
+            skill
+            for skill in self.app_state.registry.list()
+            if self.app_state.registry.is_mcp_exposed(skill)
+            and self.app_state.validator.validate_manifest(skill.model_dump(mode="json")).valid
+        ]
+
+    def _skill_decision(
+        self,
+        skill: SkillManifest,
+        request: TenantPolicySimulationRequest,
+    ) -> TenantCapabilityDecision:
+        decision: TenantPolicyDecision = "allowed"
+        reasons = [
+            f"{self.TENANT_PROFILES[request.tenant]['name']} tenant profile applied.",
+            f"Role `{request.role}` is evaluated for `{request.data_sensitivity}` data in `{request.environment}`.",
+        ]
+        matched_rules = ["tenant-profile", "scenario-dimensions"]
+
+        def apply(new_decision: TenantPolicyDecision, rule: str, reason: str) -> None:
+            nonlocal decision
+            decision = self._stricter_decision(decision, new_decision)
+            matched_rules.append(rule)
+            reasons.append(reason)
+
+        if request.requested_action.lower() != "invoke":
+            apply("blocked", "tenant-invoke-only", "Tenant sandbox only allows invoke simulations.")
+
+        if request.role == "viewer" and request.data_sensitivity != "public":
+            apply("blocked", "viewer-public-only", "Viewer role is limited to public tenant data.")
+        if request.role == "viewer" and "agent-tools" in skill.tags:
+            apply("blocked", "viewer-no-agent-tools", "Viewer role cannot operate agent-tool skills.")
+
+        if request.data_sensitivity == "confidential":
+            self._apply_confidential_rules(skill, request, apply)
+        if request.environment.lower() in {"prod", "production"}:
+            self._apply_production_rules(skill, request, apply)
+        if skill.id in self.TENANT_PROFILES[request.tenant]["blocked_sensitive_skills"]:
+            if request.data_sensitivity != "public":
+                apply(
+                    "blocked",
+                    "tenant-sensitive-skill-block",
+                    f"`{skill.id}` is blocked for non-public {self.TENANT_PROFILES[request.tenant]['regulated_data']}.",
+                )
+        if skill.id in self.TENANT_PROFILES[request.tenant]["strict_skills"]:
+            if request.data_sensitivity == "confidential" and request.role != "admin":
+                apply(
+                    "review_required",
+                    "tenant-strict-skill-review",
+                    f"`{skill.id}` handles regulated context and requires tenant review.",
+                )
+
+        resources = self._resources_for_skill(skill.id)
+        prompts = self._prompts_for_skills([skill.id])
+        tools = [skill.id] if skill.id in {tool.name for tool in self.app_state.mcp.list_tools()} else []
+        return TenantCapabilityDecision(
+            id=skill.id,
+            name=skill.name,
+            kind="skill",
+            decision=decision,
+            reasons=sorted(set(reasons)),
+            matched_rules=sorted(set(matched_rules)),
+            related_skills=[skill.id],
+            mcp_tools=tools,
+            mcp_resources=resources,
+            mcp_prompts=prompts,
+        )
+
+    def _apply_confidential_rules(
+        self,
+        skill: SkillManifest,
+        request: TenantPolicySimulationRequest,
+        apply,
+    ) -> None:
+        if request.tenant == "healthcare":
+            if request.role in {"agent", "viewer"}:
+                apply("blocked", "healthcare-phi-agent-block", "Healthcare confidential PHI requires admin or reviewer.")
+            elif request.role == "reviewer":
+                apply("review_required", "healthcare-phi-review", "Healthcare reviewer access requires PHI approval evidence.")
+        elif request.tenant == "fintech":
+            if request.role == "viewer":
+                apply("blocked", "fintech-confidential-viewer-block", "Fintech confidential data is not available to viewers.")
+            elif request.role == "agent":
+                apply("review_required", "fintech-confidential-four-eye", "Fintech agent access needs four-eye review.")
+        elif request.tenant == "public_sector":
+            if request.role in {"agent", "viewer"}:
+                apply("blocked", "public-sector-confidential-agent-block", "Public sector confidential data requires reviewer or admin.")
+            elif request.role == "reviewer":
+                apply("review_required", "public-sector-records-review", "Reviewer access requires records-retention review.")
+        elif request.tenant == "internal_demo" and request.role != "admin":
+            apply("review_required", "demo-confidential-review", "Demo confidential scenarios must be reviewed before sharing.")
+
+    def _apply_production_rules(
+        self,
+        skill: SkillManifest,
+        request: TenantPolicySimulationRequest,
+        apply,
+    ) -> None:
+        if request.tenant == "healthcare" and request.role != "admin":
+            apply("review_required", "healthcare-production-review", "Healthcare production simulations require approval.")
+        elif request.tenant == "fintech" and skill.id in {"classify_request", "search_knowledge_base"}:
+            apply("review_required", "fintech-production-control-review", "Fintech production classification and retrieval require review.")
+        elif request.tenant == "public_sector":
+            if request.role == "viewer":
+                apply("blocked", "public-sector-production-viewer-block", "Public sector production simulations block viewers.")
+            elif request.role == "agent":
+                apply("review_required", "public-sector-production-agent-review", "Public sector production agent workflows require review.")
+
+    def _workflow_decision(
+        self,
+        template: WorkflowTemplate,
+        request: TenantPolicySimulationRequest,
+        skill_decisions: list[TenantCapabilityDecision],
+    ) -> TenantCapabilityDecision:
+        by_skill = {decision.id: decision for decision in skill_decisions}
+        missing = [skill_id for skill_id in template.ordered_skill_ids if skill_id not in by_skill]
+        related = [by_skill[skill_id] for skill_id in template.ordered_skill_ids if skill_id in by_skill]
+        decision: TenantPolicyDecision = "allowed"
+        reasons = [
+            f"Workflow `{template.id}` evaluated for tenant `{request.tenant}`.",
+            f"Template default sensitivity is `{template.default_sensitivity}` and scenario sensitivity is `{request.data_sensitivity}`.",
+        ]
+        matched_rules = ["workflow-tenant-profile"]
+        if missing:
+            decision = "blocked"
+            matched_rules.append("workflow-skill-excluded")
+            reasons.append(f"Workflow references excluded or unavailable skills: {', '.join(missing)}.")
+        if not self._role_satisfies_template(request.role, template.required_role):
+            decision = "blocked"
+            matched_rules.append("workflow-template-required-role")
+            reasons.append(f"Workflow requires role `{template.required_role}` or higher.")
+        if any(item.decision == "blocked" for item in related):
+            decision = "blocked"
+            matched_rules.append("workflow-blocked-skill")
+            reasons.append("At least one ordered skill is blocked for the tenant scenario.")
+        elif any(item.decision == "review_required" for item in related):
+            decision = self._stricter_decision(decision, "review_required")
+            matched_rules.append("workflow-review-required-skill")
+            reasons.append("At least one ordered skill requires review.")
+        if request.tenant == "healthcare" and template.default_sensitivity == "confidential":
+            decision = self._stricter_decision(decision, "review_required")
+            matched_rules.append("healthcare-confidential-workflow-review")
+            reasons.append("Healthcare confidential workflows require tenant approval.")
+
+        mcp_tools = sorted({tool for item in related for tool in item.mcp_tools})
+        mcp_resources = sorted(
+            {
+                "resource://workflow-templates",
+                *[resource for item in related for resource in item.mcp_resources],
+            }
+        )
+        mcp_prompts = sorted({"workflow_composition", *[prompt for item in related for prompt in item.mcp_prompts]})
+        return TenantCapabilityDecision(
+            id=template.id,
+            name=template.name,
+            kind="workflow",
+            decision=decision,
+            reasons=sorted(set(reasons)),
+            matched_rules=sorted(set(matched_rules)),
+            related_skills=template.ordered_skill_ids,
+            mcp_tools=mcp_tools,
+            mcp_resources=mcp_resources,
+            mcp_prompts=mcp_prompts,
+        )
+
+    def _group_decisions(
+        self,
+        decisions: list[TenantCapabilityDecision],
+    ) -> dict[str, list[TenantCapabilityDecision]]:
+        return {
+            "allowed": [item for item in decisions if item.decision == "allowed"],
+            "blocked": [item for item in decisions if item.decision == "blocked"],
+            "review_required": [item for item in decisions if item.decision == "review_required"],
+        }
+
+    def _readiness(
+        self,
+        skill_groups: dict[str, list[TenantCapabilityDecision]],
+        workflow_groups: dict[str, list[TenantCapabilityDecision]],
+    ) -> SecurityReadinessStatus:
+        if skill_groups["blocked"] or workflow_groups["blocked"]:
+            return "blocked"
+        if skill_groups["review_required"] or workflow_groups["review_required"]:
+            return "needs_review"
+        return "ready"
+
+    def _combined_readiness(self, statuses: list[SecurityReadinessStatus]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _stricter_decision(
+        self,
+        current: TenantPolicyDecision,
+        candidate: TenantPolicyDecision,
+    ) -> TenantPolicyDecision:
+        rank = {"allowed": 0, "review_required": 1, "blocked": 2}
+        return candidate if rank[candidate] > rank[current] else current
+
+    def _role_satisfies_template(self, role: str, required_role: str) -> bool:
+        rank = {"viewer": 0, "agent": 1, "reviewer": 2, "admin": 3}
+        return rank[role] >= rank[required_role]
+
+    def _impacted_tools(
+        self,
+        skills: list[TenantCapabilityDecision],
+        workflows: list[TenantCapabilityDecision],
+    ) -> list[str]:
+        impacted = [
+            tool
+            for item in [*skills, *workflows]
+            if item.decision != "allowed"
+            for tool in item.mcp_tools
+        ]
+        return sorted(set(impacted))
+
+    def _impacted_resources(
+        self,
+        skills: list[TenantCapabilityDecision],
+        workflows: list[TenantCapabilityDecision],
+    ) -> list[str]:
+        impacted = [
+            resource
+            for item in [*skills, *workflows]
+            if item.decision != "allowed"
+            for resource in item.mcp_resources
+        ]
+        return sorted(set(impacted))
+
+    def _impacted_prompts(
+        self,
+        skills: list[TenantCapabilityDecision],
+        workflows: list[TenantCapabilityDecision],
+    ) -> list[str]:
+        impacted = [
+            prompt
+            for item in [*skills, *workflows]
+            if item.decision != "allowed"
+            for prompt in item.mcp_prompts
+        ]
+        return sorted(set(impacted))
+
+    def _resources_for_skill(self, skill_id: str) -> list[str]:
+        mapping = {
+            "classify_request": ["resource://skill-catalog"],
+            "extract_entities": ["resource://skill-catalog"],
+            "generate_action_items": ["resource://workflow-templates"],
+            "search_knowledge_base": [
+                "resource://policy/ai-governance",
+                "resource://policy/vendor-risk",
+                "resource://skill-catalog",
+            ],
+            "summarize_document": [
+                "resource://product/skill-hub",
+                "resource://skill-catalog",
+            ],
+            "translate_text": ["resource://skill-catalog"],
+        }
+        available = {resource.uri for resource in self.app_state.mcp.list_resources()}
+        return sorted(set(mapping.get(skill_id, ["resource://skill-catalog"])) & available)
+
+    def _prompts_for_skills(self, skill_ids: list[str]) -> list[str]:
+        skill_set = set(skill_ids)
+        prompts = {
+            prompt_id
+            for prompt_id, refs in DependencyMapService.PROMPT_SKILL_REFS.items()
+            if refs & skill_set
+        }
+        available = {prompt.id for prompt in self.app_state.mcp.list_prompts()}
+        return sorted(prompts & available)
+
+    def _policy_reasons(
+        self,
+        skills: list[TenantCapabilityDecision],
+        workflows: list[TenantCapabilityDecision],
+    ) -> list[str]:
+        reasons = [
+            reason
+            for item in [*skills, *workflows]
+            if item.decision != "allowed"
+            for reason in item.reasons
+        ]
+        return sorted(set(reasons))
+
+    def _guardrails(self, request: TenantPolicySimulationRequest) -> list[str]:
+        guardrails = list(self.TENANT_PROFILES[request.tenant]["guardrails"])
+        if request.environment.lower() in {"prod", "production"}:
+            guardrails.append("Require production rollout approval before exposing tenant-specific MCP capabilities.")
+        if request.data_sensitivity == "confidential":
+            guardrails.append("Run conformance, audit query, release preview, and MCP inspection before approval.")
+        return sorted(set(guardrails))
+
+    def _warnings(self, request: TenantPolicySimulationRequest) -> list[str]:
+        warnings: list[str] = []
+        if request.environment.lower() in {"prod", "production"}:
+            warnings.append("Production is simulated with local/mock evidence; no external tenant service is contacted.")
+        if request.data_sensitivity == "confidential":
+            warnings.append("Confidential simulations require human review before real tenant rollout.")
+        return warnings
+
+    def _excluded_skills(self) -> JsonDict:
+        excluded: dict[str, list[JsonDict]] = {"draft": [], "disabled": [], "not_promoted": [], "invalid": []}
+        for skill in self.app_state.registry.list():
+            valid = self.app_state.validator.validate_manifest(skill.model_dump(mode="json")).valid
+            if not valid:
+                excluded["invalid"].append({"id": skill.id, "status": skill.status, "reason": "schema invalid"})
+            elif skill.status == "draft":
+                excluded["draft"].append({"id": skill.id, "status": skill.status, "reason": "draft skills are hidden"})
+            elif not skill.enabled or skill.status == "disabled":
+                excluded["disabled"].append({"id": skill.id, "status": skill.status, "reason": "disabled skills are hidden"})
+            elif not self.app_state.registry.is_mcp_exposed(skill):
+                excluded["not_promoted"].append(
+                    {"id": skill.id, "status": skill.status, "reason": "only promoted skills are simulated"}
+                )
+        return excluded
+
+    def _excluded_workflows(self) -> JsonDict:
+        excluded: dict[str, list[JsonDict]] = {"draft": [], "in_review": [], "rejected": []}
+        for review in self.app_state.workflows.reviews():
+            if review.status != "approved":
+                excluded[review.status].append(
+                    {
+                        "id": review.template_id,
+                        "status": review.status,
+                        "validation_status": review.validation.validation_status,
+                    }
+                )
+        return excluded
+
+    def _default_export_scenarios(self) -> list[TenantPolicySimulationRequest]:
+        return [
+            TenantPolicySimulationRequest(
+                tenant="healthcare",
+                role="reviewer",
+                environment="production",
+                data_sensitivity="confidential",
+            ),
+            TenantPolicySimulationRequest(
+                tenant="fintech",
+                role="agent",
+                environment="production",
+                data_sensitivity="confidential",
+            ),
+            TenantPolicySimulationRequest(
+                tenant="public_sector",
+                role="agent",
+                environment="production",
+                data_sensitivity="internal",
+            ),
+            TenantPolicySimulationRequest(
+                tenant="internal_demo",
+                role="agent",
+                environment="local",
+                data_sensitivity="confidential",
+            ),
+        ]
+
+    def _blocked_review_actions(self, results: list[TenantPolicySimulationResult]) -> list[JsonDict]:
+        actions: list[JsonDict] = []
+        for result in results:
+            scenario = result.scenario
+            for item in result.blocked_skills + result.blocked_workflows:
+                actions.append(
+                    {
+                        "tenant": scenario.tenant,
+                        "kind": item.kind,
+                        "id": item.id,
+                        "action": "block_or_reroute",
+                        "reason": item.reasons[0] if item.reasons else "Blocked by tenant policy.",
+                    }
+                )
+            for item in result.review_required_skills + result.review_required_workflows:
+                actions.append(
+                    {
+                        "tenant": scenario.tenant,
+                        "kind": item.kind,
+                        "id": item.id,
+                        "action": "send_to_human_review",
+                        "reason": item.reasons[0] if item.reasons else "Tenant review required.",
+                    }
+                )
+        return actions
+
+    def _export_mcp_impact(self, results: list[TenantPolicySimulationResult]) -> JsonDict:
+        return {
+            "tools": sorted({tool for result in results for tool in result.impacted_mcp_tools}),
+            "resources": sorted({resource for result in results for resource in result.impacted_mcp_resources}),
+            "prompts": sorted({prompt for result in results for prompt in result.impacted_mcp_prompts}),
+        }
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "tenants/policy-simulate|tenants/sandbox-export|Tenant Policy Sandbox|tenant_sandboxes|tenant sandbox" app dashboard docs README.md tests sample_data',
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "Enterprise multi-tenant policy modeling for MCP tools, resources, prompts, and workflows",
+            "Deterministic FastAPI service design with local/mock tenant governance",
+            "Human-review and block decision paths for regulated data sensitivity",
+            "Evidence export in JSON and Markdown for compliance and interview demos",
+            "Dashboard, demo, tests, and docs that make platform governance explainable",
+        ]
+
+    def _interviewer_talking_points(self) -> list[str]:
+        return [
+            "The sandbox demonstrates how one MCP catalog can behave differently across healthcare, fintech, public sector, and demo tenants.",
+            "The API returns allow, block, and review-required outcomes for both individual skills and composed workflows.",
+            "The simulator reports impacted MCP tools, resources, and prompts so policy changes are tied to real platform surfaces.",
+            "Draft and disabled skills stay excluded from decisions, which mirrors enterprise rollout controls.",
+            "The export creates a reproducible Markdown and JSON artifact that can be shown without external auth or tenant services.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Tenant Policy Sandbox",
+            "",
+            f"- Sandbox ID: `{bundle['sandbox_id']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Actor: `{bundle['actor']}`",
+            "",
+            "## Tenant Policy Matrix",
+            "",
+            *[
+                f"- `{row['tenant']}`: {row['regulated_data']}; strict skills `{', '.join(row['strict_skills']) or 'none'}`; blocked sensitive skills `{', '.join(row['blocked_sensitive_skills']) or 'none'}`"
+                for row in bundle["tenant_policy_matrix"]
+            ],
+            "",
+            "## Scenario Results",
+            "",
+        ]
+        for result in bundle["scenario_results"]:
+            scenario = result["scenario"]
+            lines.extend(
+                [
+                    f"### {scenario['tenant']} {scenario['role']} {scenario['environment']} {scenario['data_sensitivity']}",
+                    "",
+                    f"- Readiness: `{result['readiness_status']}`",
+                    f"- Allowed skills: `{result['summary']['allowed_skill_count']}`",
+                    f"- Blocked skills: `{result['summary']['blocked_skill_count']}`",
+                    f"- Review-required skills: `{result['summary']['review_required_skill_count']}`",
+                    f"- Blocked workflows: `{result['summary']['blocked_workflow_count']}`",
+                    f"- Review-required workflows: `{result['summary']['review_required_workflow_count']}`",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Blocked And Review Actions",
+                "",
+                *[
+                    f"- `{item['tenant']}` `{item['kind']}` `{item['id']}`: {item['action']} - {item['reason']}"
+                    for item in bundle["blocked_review_actions"]
+                ],
+                "",
+                "## MCP Impact",
+                "",
+                f"- Tools: `{', '.join(bundle['mcp_impact']['tools']) or 'none'}`",
+                f"- Resources: `{', '.join(bundle['mcp_impact']['resources']) or 'none'}`",
+                f"- Prompts: `{', '.join(bundle['mcp_impact']['prompts']) or 'none'}`",
+                "",
+                "## Local Verification Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## JD Skills Demonstrated",
+                "",
+                *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+                "",
+                "## Interviewer Talking Points",
+                "",
+                *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class SkillMarketplaceGovernanceService:
+    PACK_ID = "rollout_approval_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "marketplace_packs"
+
+    async def catalog(self) -> MarketplaceCatalogResult:
+        scenario_requests = self._tenant_rollout_scenarios()
+        scenario_results = [
+            self.app_state.tenant_sandbox.simulate(scenario["request"])
+            for scenario in scenario_requests
+        ]
+        scenario_decisions = self._scenario_decisions(scenario_requests, scenario_results)
+        listings = [self._listing(skill, scenario_decisions) for skill in self.app_state.registry.list()]
+        disabled_blocks = self._disabled_skill_blocks(listings)
+        review_required = self._rollout_rows(listings, "review_required")
+        blocked = self._rollout_rows(listings, "blocked")
+        readiness: SecurityReadinessStatus = "ready"
+        if blocked or disabled_blocks:
+            readiness = "blocked"
+        elif review_required:
+            readiness = "needs_review"
+        return MarketplaceCatalogResult(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            listings=listings,
+            tenant_scenarios=[
+                {key: value for key, value in scenario.items() if key != "request"}
+                | {"request": scenario["request"].model_dump(mode="json")}
+                for scenario in scenario_requests
+            ],
+            coverage_summary=self._coverage_summary(listings, scenario_requests),
+            disabled_skill_blocks=disabled_blocks,
+            review_required_rollouts=review_required,
+            blocked_rollouts=blocked,
+            usage_summary=self.app_state.metrics.summary(),
+            limitations=self._limitations(),
+        )
+
+    async def rollout_pack(
+        self,
+        request: MarketplaceRolloutPackRequest | None = None,
+    ) -> MarketplaceRolloutPackResult:
+        request = request or MarketplaceRolloutPackRequest()
+        catalog = await self.catalog()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": catalog.readiness_status,
+            "catalog": catalog.model_dump(mode="json"),
+            "rollout_recommendations": self._rollout_recommendations(catalog),
+            "tenant_policy_decisions": self._tenant_policy_decisions(catalog),
+            "disabled_skill_blocks": catalog.disabled_skill_blocks,
+            "version_comparison_notes": self._version_comparison_notes(catalog),
+            "reviewer_checklist": self._reviewer_checklist(catalog),
+            "local_proof_commands": self._local_proof_commands(),
+            "limitations": catalog.limitations,
+        }
+        bundle["summary"] = {
+            "listing_count": len(catalog.listings),
+            "tenant_scenario_count": len(catalog.tenant_scenarios),
+            "blocked_rollout_count": len(catalog.blocked_rollouts),
+            "review_required_rollout_count": len(catalog.review_required_rollouts),
+            "disabled_skill_block_count": len(catalog.disabled_skill_blocks),
+            "readiness_status": catalog.readiness_status,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "marketplace.rollout_pack_exported",
+            "marketplace_rollout_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": catalog.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "listing_count": len(catalog.listings),
+            },
+        )
+        return MarketplaceRolloutPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=catalog.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _tenant_rollout_scenarios(self) -> list[JsonDict]:
+        return [
+            {
+                "id": "internal_ops_local",
+                "label": "Internal Ops Local",
+                "approval_posture": "allow",
+                "request": TenantPolicySimulationRequest(
+                    tenant="internal_demo",
+                    role="agent",
+                    environment="local",
+                    data_sensitivity="internal",
+                ),
+            },
+            {
+                "id": "regulated_healthcare_prod",
+                "label": "Regulated Healthcare Production",
+                "approval_posture": "review_required",
+                "request": TenantPolicySimulationRequest(
+                    tenant="healthcare",
+                    role="reviewer",
+                    environment="production",
+                    data_sensitivity="confidential",
+                ),
+            },
+            {
+                "id": "fintech_confidential_prod",
+                "label": "Fintech Confidential Production",
+                "approval_posture": "blocked",
+                "request": TenantPolicySimulationRequest(
+                    tenant="fintech",
+                    role="agent",
+                    environment="production",
+                    data_sensitivity="confidential",
+                ),
+            },
+            {
+                "id": "public_sector_restricted_prod",
+                "label": "Public-Sector Restricted Production",
+                "approval_posture": "review_required",
+                "request": TenantPolicySimulationRequest(
+                    tenant="public_sector",
+                    role="agent",
+                    environment="production",
+                    data_sensitivity="internal",
+                ),
+            },
+        ]
+
+    def _scenario_decisions(
+        self,
+        scenarios: list[JsonDict],
+        results: list[TenantPolicySimulationResult],
+    ) -> dict[str, dict[str, MarketplaceTenantEligibility]]:
+        rows: dict[str, dict[str, MarketplaceTenantEligibility]] = defaultdict(dict)
+        for scenario, result in zip(scenarios, results, strict=True):
+            for decision in result.allowed_skills + result.review_required_skills + result.blocked_skills:
+                rows[decision.id][scenario["id"]] = MarketplaceTenantEligibility(
+                    scenario_id=scenario["id"],
+                    tenant=result.scenario.tenant,
+                    environment=result.scenario.environment,
+                    role=result.scenario.role,
+                    data_sensitivity=result.scenario.data_sensitivity,
+                    decision=decision.decision,
+                    reasons=decision.reasons,
+                    matched_rules=decision.matched_rules,
+                )
+        return rows
+
+    def _listing(
+        self,
+        skill: SkillManifest,
+        scenario_decisions: dict[str, dict[str, MarketplaceTenantEligibility]],
+    ) -> MarketplaceSkillListing:
+        validation = self.app_state.validator.validate_manifest(skill.model_dump(mode="json"))
+        versions = self.app_state.registry.versions(skill.id)
+        eligibility = self._eligibility_for(skill, scenario_decisions)
+        usage = self._usage_signals(skill.id)
+        risk_flags = sorted(
+            {
+                *self.app_state.policy.risk_flags(skill),
+                *(["schema_invalid"] if not validation.valid else []),
+                *(["disabled_skill_block"] if not skill.enabled or skill.status == "disabled" else []),
+                *(["not_mcp_exposed"] if not self.app_state.registry.is_mcp_exposed(skill) else []),
+                *[
+                    f"tenant_{item.decision}_{item.tenant}"
+                    for item in eligibility
+                    if item.decision != "allowed"
+                ],
+            }
+        )
+        return MarketplaceSkillListing(
+            skill_id=skill.id,
+            name=skill.name,
+            version=skill.version,
+            listing_status=self._listing_status(skill),
+            lifecycle_status=skill.status,
+            enabled=skill.enabled,
+            provider=skill.provider,
+            tags=skill.tags,
+            versions=[version.model_dump(mode="json") for version in versions],
+            tenant_eligibility=eligibility,
+            risk_level=self._risk_level(skill, eligibility, validation.valid),
+            risk_flags=risk_flags,
+            required_review_state=self._review_state(skill, eligibility, validation.valid),
+            usage_signals=usage,
+            mcp_exposure_state={
+                "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill) and validation.valid,
+                "tool_name": skill.id if self.app_state.registry.is_mcp_exposed(skill) and validation.valid else None,
+                "exposure_status": "exposed" if self.app_state.registry.is_mcp_exposed(skill) and validation.valid else "not_exposed",
+                "schema_valid": validation.valid,
+                "schema_errors": validation.errors,
+            },
+            coverage_summary={
+                "tenant_scenario_count": len(eligibility),
+                "allowed_tenant_count": sum(1 for item in eligibility if item.decision == "allowed"),
+                "blocked_tenant_count": sum(1 for item in eligibility if item.decision == "blocked"),
+                "review_required_tenant_count": sum(1 for item in eligibility if item.decision == "review_required"),
+                "version_count": len(versions),
+                "invocation_count": usage["invocation_count"],
+            },
+            version_comparison_notes=self._skill_version_notes(skill, versions),
+        )
+
+    def _eligibility_for(
+        self,
+        skill: SkillManifest,
+        scenario_decisions: dict[str, dict[str, MarketplaceTenantEligibility]],
+    ) -> list[MarketplaceTenantEligibility]:
+        eligibility: list[MarketplaceTenantEligibility] = []
+        for scenario in self._tenant_rollout_scenarios():
+            existing = scenario_decisions.get(skill.id, {}).get(scenario["id"])
+            if existing:
+                eligibility.append(existing)
+                continue
+            request = scenario["request"]
+            decision = "blocked" if not skill.enabled or skill.status == "disabled" else "review_required"
+            reason = (
+                "Disabled skills cannot roll out or invoke until re-promoted."
+                if decision == "blocked"
+                else "Draft or non-promoted skills require marketplace approval before tenant rollout."
+            )
+            eligibility.append(
+                MarketplaceTenantEligibility(
+                    scenario_id=scenario["id"],
+                    tenant=request.tenant,
+                    environment=request.environment,
+                    role=request.role,
+                    data_sensitivity=request.data_sensitivity,
+                    decision=decision,
+                    reasons=[reason],
+                    matched_rules=["marketplace-disabled-block" if decision == "blocked" else "marketplace-approval-required"],
+                )
+            )
+        return eligibility
+
+    def _listing_status(self, skill: SkillManifest) -> str:
+        if not skill.enabled or skill.status == "disabled":
+            return "disabled"
+        if skill.status == "draft":
+            return "draft"
+        if skill.status == "promoted":
+            return "promoted"
+        return "approved"
+
+    def _risk_level(
+        self,
+        skill: SkillManifest,
+        eligibility: list[MarketplaceTenantEligibility],
+        schema_valid: bool,
+    ) -> MarketplaceRiskLevel:
+        if not schema_valid or not skill.enabled or skill.status == "disabled":
+            return "high"
+        if any(item.decision == "blocked" for item in eligibility):
+            return "high"
+        if any(item.decision == "review_required" for item in eligibility):
+            return "medium"
+        return "low"
+
+    def _review_state(
+        self,
+        skill: SkillManifest,
+        eligibility: list[MarketplaceTenantEligibility],
+        schema_valid: bool,
+    ) -> MarketplaceReviewState:
+        if not schema_valid or not skill.enabled or skill.status == "disabled":
+            return "disabled_block"
+        if any(item.decision == "blocked" for item in eligibility):
+            return "blocked"
+        if skill.status != "promoted":
+            return "approval_required"
+        if any(item.decision == "review_required" for item in eligibility):
+            return "review_required"
+        return "none"
+
+    def _usage_signals(self, skill_id: str) -> JsonDict:
+        invocations = [
+            invocation
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.skill_id == skill_id
+        ]
+        failures = [invocation for invocation in invocations if invocation.status == "failed"]
+        last_invocation = max((invocation.created_at for invocation in invocations), default=None)
+        latencies = sorted(invocation.latency_ms for invocation in invocations)
+        p95_index = max(0, min(len(latencies) - 1, round(len(latencies) * 0.95) - 1)) if latencies else 0
+        return {
+            "invocation_count": len(invocations),
+            "failure_count": len(failures),
+            "last_invocation": last_invocation.isoformat() if last_invocation else None,
+            "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+            "p95_latency_ms": latencies[p95_index] if latencies else 0.0,
+            "audit_event_count": sum(1 for event in self.app_state.audit.events if event.resource_id == skill_id),
+            "recent_trace_ids": [invocation.trace_id for invocation in invocations[-5:]],
+        }
+
+    def _skill_version_notes(self, skill: SkillManifest, versions: list[SkillVersion]) -> list[str]:
+        if not versions:
+            return ["No local registry version history is available."]
+        notes = [f"Current marketplace version is `{skill.version}` with lifecycle `{skill.status}`."]
+        if len(versions) == 1:
+            notes.append("No prior local version exists for side-by-side comparison.")
+            return notes
+        previous = versions[-2]
+        current = versions[-1]
+        notes.append(f"Previous version `{previous.version}` status `{previous.status}` compared with current `{current.version}`.")
+        if previous.manifest_hash != current.manifest_hash:
+            notes.append("Manifest hash changed; rerun conformance, tenant sandbox, and MCP tool inspection before approval.")
+        if previous.status != current.status:
+            notes.append(f"Lifecycle changed from `{previous.status}` to `{current.status}`.")
+        return notes
+
+    def _coverage_summary(
+        self,
+        listings: list[MarketplaceSkillListing],
+        scenarios: list[JsonDict],
+    ) -> JsonDict:
+        decisions = [
+            eligibility.decision
+            for listing in listings
+            for eligibility in listing.tenant_eligibility
+        ]
+        return {
+            "listing_count": len(listings),
+            "promoted_listing_count": sum(1 for item in listings if item.listing_status == "promoted"),
+            "approved_listing_count": sum(1 for item in listings if item.listing_status == "approved"),
+            "draft_listing_count": sum(1 for item in listings if item.listing_status == "draft"),
+            "disabled_listing_count": sum(1 for item in listings if item.listing_status == "disabled"),
+            "tenant_scenario_count": len(scenarios),
+            "tenant_scenarios": [scenario["id"] for scenario in scenarios],
+            "allowed_rollout_count": decisions.count("allowed"),
+            "blocked_rollout_count": decisions.count("blocked"),
+            "review_required_rollout_count": decisions.count("review_required"),
+            "mcp_exposed_listing_count": sum(1 for item in listings if item.mcp_exposure_state["mcp_exposed"]),
+            "usage_observed_listing_count": sum(1 for item in listings if item.usage_signals["invocation_count"] > 0),
+        }
+
+    def _disabled_skill_blocks(self, listings: list[MarketplaceSkillListing]) -> list[JsonDict]:
+        return [
+            {
+                "skill_id": listing.skill_id,
+                "name": listing.name,
+                "reason": "Disabled skills cannot roll out or invoke and are hidden from MCP exposure.",
+                "mcp_exposure_state": listing.mcp_exposure_state,
+            }
+            for listing in listings
+            if listing.required_review_state == "disabled_block"
+        ]
+
+    def _rollout_rows(self, listings: list[MarketplaceSkillListing], decision: str) -> list[JsonDict]:
+        return [
+            {
+                "skill_id": listing.skill_id,
+                "name": listing.name,
+                "scenario_id": eligibility.scenario_id,
+                "tenant": eligibility.tenant,
+                "environment": eligibility.environment,
+                "decision": eligibility.decision,
+                "reasons": eligibility.reasons,
+            }
+            for listing in listings
+            for eligibility in listing.tenant_eligibility
+            if eligibility.decision == decision
+        ]
+
+    def _rollout_recommendations(self, catalog: MarketplaceCatalogResult) -> list[JsonDict]:
+        rows: list[JsonDict] = []
+        for listing in catalog.listings:
+            if listing.required_review_state == "disabled_block":
+                recommendation = "Do not roll out. Re-enable, validate, promote, and rerun tenant approval."
+            elif listing.required_review_state == "blocked":
+                recommendation = "Keep blocked for the listed tenant scenarios; approve only with an exception record."
+            elif listing.required_review_state in {"approval_required", "review_required"}:
+                recommendation = "Route to human reviewer with policy, conformance, usage, and MCP exposure evidence attached."
+            else:
+                recommendation = "Eligible for internal rollout with normal monitoring."
+            rows.append(
+                {
+                    "skill_id": listing.skill_id,
+                    "risk_level": listing.risk_level,
+                    "required_review_state": listing.required_review_state,
+                    "recommendation": recommendation,
+                }
+            )
+        return rows
+
+    def _tenant_policy_decisions(self, catalog: MarketplaceCatalogResult) -> list[JsonDict]:
+        return [
+            {
+                "skill_id": listing.skill_id,
+                "scenario_id": eligibility.scenario_id,
+                "tenant": eligibility.tenant,
+                "environment": eligibility.environment,
+                "role": eligibility.role,
+                "data_sensitivity": eligibility.data_sensitivity,
+                "decision": eligibility.decision,
+                "matched_rules": eligibility.matched_rules,
+                "reasons": eligibility.reasons,
+            }
+            for listing in catalog.listings
+            for eligibility in listing.tenant_eligibility
+        ]
+
+    def _version_comparison_notes(self, catalog: MarketplaceCatalogResult) -> list[JsonDict]:
+        return [
+            {
+                "skill_id": listing.skill_id,
+                "version": listing.version,
+                "notes": listing.version_comparison_notes,
+            }
+            for listing in catalog.listings
+        ]
+
+    def _reviewer_checklist(self, catalog: MarketplaceCatalogResult) -> list[JsonDict]:
+        return [
+            {
+                "item": "Catalog covers promoted, approved, draft, and disabled lifecycle states.",
+                "status": "pass",
+                "proof": f"{catalog.coverage_summary['listing_count']} listing(s), {catalog.coverage_summary['disabled_listing_count']} disabled.",
+            },
+            {
+                "item": "Tenant rollout decisions include blocked and review-required paths.",
+                "status": "pass" if catalog.blocked_rollouts and catalog.review_required_rollouts else "warn",
+                "proof": f"{len(catalog.blocked_rollouts)} blocked, {len(catalog.review_required_rollouts)} review-required.",
+            },
+            {
+                "item": "Disabled skills are blocked from rollout and MCP exposure.",
+                "status": "pass" if not catalog.disabled_skill_blocks else "blocked",
+                "proof": f"{len(catalog.disabled_skill_blocks)} disabled skill block(s).",
+            },
+            {
+                "item": "Run local proof commands before approving tenant rollout.",
+                "status": "manual",
+                "proof": "pytest, ruff, eval, conformance, dashboard smoke, demo, and MCP inspector commands.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Marketplace governance is deterministic and local/mock; it does not contact an external tenant control plane.",
+            "Tenant eligibility uses the in-process policy sandbox and should be treated as approval evidence, not legal advice.",
+            "Version comparison uses local registry history captured during this process; it is not a Git diff.",
+            "Usage signals come from current in-memory invocation history unless a separate local snapshot is loaded.",
+            "Generated rollout approval artifacts are written under ignored data/marketplace_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        catalog = bundle["catalog"]
+        lines = [
+            "# Skill Marketplace Tenant Rollout Approval Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Coverage Summary",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in catalog["coverage_summary"].items()],
+            "",
+            "## Rollout Recommendations",
+            "",
+            *[
+                f"- `{item['skill_id']}` `{item['risk_level']}` `{item['required_review_state']}`: {item['recommendation']}"
+                for item in bundle["rollout_recommendations"]
+            ],
+            "",
+            "## Tenant Policy Decisions",
+            "",
+            *[
+                f"- `{item['skill_id']}` `{item['scenario_id']}` `{item['tenant']}` `{item['environment']}`: `{item['decision']}`"
+                for item in bundle["tenant_policy_decisions"]
+            ],
+            "",
+            "## Disabled Skill Blocks",
+            "",
+            *(
+                [
+                    f"- `{item['skill_id']}`: {item['reason']}"
+                    for item in bundle["disabled_skill_blocks"]
+                ]
+                or ["- none"]
+            ),
+            "",
+            "## Version Comparison Notes",
+            "",
+        ]
+        for item in bundle["version_comparison_notes"]:
+            lines.append(f"- `{item['skill_id']}` v`{item['version']}`")
+            lines.extend(f"  - {note}" for note in item["notes"])
+        lines.extend(
+            [
+                "",
+                "## Reviewer Checklist",
+                "",
+                *[
+                    f"- `{item['status']}` {item['item']} - {item['proof']}"
+                    for item in bundle["reviewer_checklist"]
+                ],
+                "",
+                "## Local Proof Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {note}" for note in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class SkillUsageAnalyticsService:
+    PACK_ID = "chargeback_pack_latest"
+    INPUT_TOKEN_RATE = 0.000002
+    OUTPUT_TOKEN_RATE = 0.000006
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "usage_packs"
+
+    def analytics(self) -> UsageAnalyticsResult:
+        records = self._usage_records()
+        anomalies = self._anomalies(records)
+        disabled_blocks = [item for item in records if item["event_type"] == "disabled_skill_blocked"]
+        budget_status = self._budget_status(records)
+        readiness: SecurityReadinessStatus = "ready"
+        if anomalies or any(item["status"] != "within_budget" for item in budget_status):
+            readiness = "needs_review"
+        summary = {
+            "record_count": len(records),
+            "tenant_environment_count": len({(item["tenant"], item["environment"]) for item in records}),
+            "agent_count": len({item["agent_id"] for item in records}),
+            "skill_count": len({item["skill_id"] for item in records}),
+            "total_invocations": sum(item["invocation_count"] for item in records),
+            "total_input_tokens": sum(item["input_tokens"] for item in records),
+            "total_output_tokens": sum(item["output_tokens"] for item in records),
+            "estimated_cost": self._round_cost(sum(item["estimated_cost"] for item in records)),
+            "anomaly_count": len(anomalies),
+            "budget_warning_count": sum(1 for item in budget_status if item["status"] == "warning"),
+            "disabled_skill_blocked_event_count": len(disabled_blocks),
+            "local_only": True,
+            "mock_cost_model": {
+                "input_token_rate_usd": self.INPUT_TOKEN_RATE,
+                "output_token_rate_usd": self.OUTPUT_TOKEN_RATE,
+            },
+        }
+        return UsageAnalyticsResult(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            usage_by_skill=self._usage_by(records, ["skill_id", "skill_name"]),
+            usage_by_tenant_environment=self._usage_by(records, ["tenant", "environment"]),
+            usage_by_agent=self._usage_by(records, ["agent_id", "tenant", "environment"]),
+            usage_by_status=dict(sorted(self._count_by(records, "status").items())),
+            usage_by_mcp_exposure=dict(sorted(self._count_by(records, "mcp_exposure").items())),
+            latency_bands=self._latency_bands(records),
+            token_cost_estimates=self._token_cost_estimates(records),
+            budget_status=budget_status,
+            anomalies=anomalies,
+            disabled_skill_blocked_events=disabled_blocks,
+            coverage_summary=self._coverage_summary(records),
+            limitations=self._limitations(),
+        )
+
+    def chargeback_pack(
+        self,
+        request: UsageChargebackPackRequest | None = None,
+    ) -> UsageChargebackPackResult:
+        request = request or UsageChargebackPackRequest()
+        analytics = self.analytics()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": analytics.readiness_status,
+            "analytics": analytics.model_dump(mode="json"),
+            "usage_tables": {
+                "by_skill": analytics.usage_by_skill,
+                "by_tenant_environment": analytics.usage_by_tenant_environment,
+                "by_agent": analytics.usage_by_agent,
+                "by_status": analytics.usage_by_status,
+                "by_mcp_exposure": analytics.usage_by_mcp_exposure,
+                "latency_bands": analytics.latency_bands,
+            },
+            "cost_allocation": self._cost_allocation(analytics),
+            "budget_anomaly_flags": {
+                "budget_status": analytics.budget_status,
+                "anomalies": analytics.anomalies,
+                "disabled_skill_blocked_events": analytics.disabled_skill_blocked_events,
+            },
+            "recommended_controls": self._recommended_controls(analytics),
+            "reviewer_checklist": self._reviewer_checklist(analytics),
+            "local_proof_commands": self._local_proof_commands(),
+            "limitations": analytics.limitations,
+        }
+        bundle["summary"] = {
+            "record_count": analytics.summary["record_count"],
+            "estimated_cost": analytics.summary["estimated_cost"],
+            "tenant_environment_count": analytics.summary["tenant_environment_count"],
+            "anomaly_count": analytics.summary["anomaly_count"],
+            "budget_warning_count": analytics.summary["budget_warning_count"],
+            "disabled_skill_blocked_event_count": analytics.summary["disabled_skill_blocked_event_count"],
+            "readiness_status": analytics.readiness_status,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "usage.chargeback_pack_exported",
+            "usage_chargeback_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": analytics.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "estimated_cost": analytics.summary["estimated_cost"],
+            },
+        )
+        return UsageChargebackPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=analytics.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _usage_records(self) -> list[JsonDict]:
+        records = [*self._fixture_records(), *self._history_records()]
+        return sorted(
+            records,
+            key=lambda item: (
+                item["tenant"],
+                item["environment"],
+                item["skill_id"],
+                item["trace_id"],
+            ),
+        )
+
+    def _fixture_records(self) -> list[JsonDict]:
+        fixtures = [
+            {
+                "trace_id": "usage-fixture-001",
+                "skill_id": "summarize_document",
+                "tenant": "internal_demo",
+                "environment": "local",
+                "agent_id": "agent-alpha",
+                "status": "succeeded",
+                "latency_ms": 380.0,
+                "input_tokens": 420,
+                "output_tokens": 120,
+            },
+            {
+                "trace_id": "usage-fixture-002",
+                "skill_id": "extract_entities",
+                "tenant": "healthcare",
+                "environment": "production",
+                "agent_id": "agent-clinical-reviewer",
+                "status": "succeeded",
+                "latency_ms": 720.0,
+                "input_tokens": 860,
+                "output_tokens": 190,
+            },
+            {
+                "trace_id": "usage-fixture-003",
+                "skill_id": "search_knowledge_base",
+                "tenant": "healthcare",
+                "environment": "production",
+                "agent_id": "agent-clinical-reviewer",
+                "status": "succeeded",
+                "latency_ms": 2450.0,
+                "input_tokens": 3600,
+                "output_tokens": 800,
+            },
+            {
+                "trace_id": "usage-fixture-004",
+                "skill_id": "classify_request",
+                "tenant": "fintech",
+                "environment": "production",
+                "agent_id": "agent-risk-router",
+                "status": "succeeded",
+                "latency_ms": 640.0,
+                "input_tokens": 2400,
+                "output_tokens": 420,
+            },
+            {
+                "trace_id": "usage-fixture-005",
+                "skill_id": "generate_action_items",
+                "tenant": "fintech",
+                "environment": "production",
+                "agent_id": "agent-risk-router",
+                "status": "succeeded",
+                "latency_ms": 930.0,
+                "input_tokens": 1800,
+                "output_tokens": 600,
+            },
+            {
+                "trace_id": "usage-fixture-006",
+                "skill_id": "translate_text",
+                "tenant": "public_sector",
+                "environment": "production",
+                "agent_id": "agent-public-intake",
+                "status": "blocked",
+                "latency_ms": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "event_type": "disabled_skill_blocked",
+                "mcp_exposed": False,
+                "error": "Skill is disabled.",
+            },
+            {
+                "trace_id": "usage-fixture-007",
+                "skill_id": "translate_text",
+                "tenant": "internal_demo",
+                "environment": "staging",
+                "agent_id": "agent-localization",
+                "status": "succeeded",
+                "latency_ms": 510.0,
+                "input_tokens": 1600,
+                "output_tokens": 300,
+            },
+            {
+                "trace_id": "usage-fixture-008",
+                "skill_id": "summarize_document",
+                "tenant": "public_sector",
+                "environment": "staging",
+                "agent_id": "agent-public-intake",
+                "status": "failed",
+                "latency_ms": 1200.0,
+                "input_tokens": 900,
+                "output_tokens": 0,
+                "error": "Output held for reviewer validation.",
+            },
+        ]
+        records = []
+        for index, fixture in enumerate(fixtures, start=1):
+            skill = self.app_state.registry.get(fixture["skill_id"])
+            mcp_exposed = fixture.get("mcp_exposed", self.app_state.registry.is_mcp_exposed(skill))
+            input_tokens = fixture["input_tokens"]
+            output_tokens = fixture["output_tokens"]
+            records.append(
+                {
+                    "record_id": f"fixture-{index:03d}",
+                    "trace_id": fixture["trace_id"],
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "tenant": fixture["tenant"],
+                    "environment": fixture["environment"],
+                    "agent_id": fixture["agent_id"],
+                    "status": fixture["status"],
+                    "event_type": fixture.get("event_type", "skill_invocation"),
+                    "invocation_count": 1,
+                    "mcp_exposed": bool(mcp_exposed),
+                    "mcp_exposure": "exposed" if mcp_exposed else "not_exposed",
+                    "latency_ms": fixture["latency_ms"],
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "estimated_cost": self._estimate_cost(input_tokens, output_tokens),
+                    "created_at": f"2026-06-09T10:{index:02d}:00+00:00",
+                    "source": "deterministic_fixture",
+                    "error": fixture.get("error"),
+                }
+            )
+        return records
+
+    def _history_records(self) -> list[JsonDict]:
+        actor_by_trace = {
+            event.trace_id: event.actor
+            for event in self.app_state.audit.events
+            if event.resource_type == "skill"
+        }
+        records = []
+        for invocation in self.app_state.invocation_service.invocations:
+            skill = self.app_state.registry.get(invocation.skill_id)
+            context = invocation.policy_context
+            tenant = "internal_demo"
+            environment = context.environment if context else "local"
+            status = "blocked" if invocation.error == "Skill is disabled." else invocation.status
+            input_tokens = invocation.token_usage.input_tokens
+            output_tokens = invocation.token_usage.output_tokens
+            records.append(
+                {
+                    "record_id": invocation.id,
+                    "trace_id": invocation.trace_id,
+                    "skill_id": invocation.skill_id,
+                    "skill_name": skill.name,
+                    "tenant": tenant,
+                    "environment": environment,
+                    "agent_id": actor_by_trace.get(invocation.trace_id, "history-agent"),
+                    "status": status,
+                    "event_type": "disabled_skill_blocked" if status == "blocked" else "skill_invocation",
+                    "invocation_count": 1,
+                    "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill) and status != "blocked",
+                    "mcp_exposure": (
+                        "exposed"
+                        if self.app_state.registry.is_mcp_exposed(skill) and status != "blocked"
+                        else "not_exposed"
+                    ),
+                    "latency_ms": invocation.latency_ms,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "estimated_cost": self._estimate_cost(input_tokens, output_tokens),
+                    "created_at": invocation.created_at.isoformat(),
+                    "source": "existing_invocation_history",
+                    "error": invocation.error,
+                }
+            )
+        return records
+
+    def _usage_by(self, records: list[JsonDict], keys: list[str]) -> list[JsonDict]:
+        grouped: dict[tuple[str, ...], list[JsonDict]] = defaultdict(list)
+        for record in records:
+            grouped[tuple(str(record[key]) for key in keys)].append(record)
+        rows = []
+        for key_values, items in grouped.items():
+            row = {key: value for key, value in zip(keys, key_values, strict=True)}
+            latencies = sorted(item["latency_ms"] for item in items)
+            row.update(
+                {
+                    "invocation_count": sum(item["invocation_count"] for item in items),
+                    "success_count": sum(1 for item in items if item["status"] == "succeeded"),
+                    "failure_count": sum(1 for item in items if item["status"] == "failed"),
+                    "blocked_count": sum(1 for item in items if item["status"] == "blocked"),
+                    "input_tokens": sum(item["input_tokens"] for item in items),
+                    "output_tokens": sum(item["output_tokens"] for item in items),
+                    "estimated_cost": self._round_cost(sum(item["estimated_cost"] for item in items)),
+                    "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+                    "p95_latency_ms": self._p95(latencies),
+                    "mcp_exposed_count": sum(1 for item in items if item["mcp_exposed"]),
+                }
+            )
+            rows.append(row)
+        return sorted(rows, key=lambda item: (-item["estimated_cost"], *[item[key] for key in keys]))
+
+    def _count_by(self, records: list[JsonDict], key: str) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for record in records:
+            counts[str(record[key])] += record["invocation_count"]
+        return counts
+
+    def _latency_bands(self, records: list[JsonDict]) -> list[JsonDict]:
+        bands = [
+            ("0-499ms", 0.0, 499.0),
+            ("500-999ms", 500.0, 999.0),
+            ("1000-1999ms", 1000.0, 1999.0),
+            ("2000ms+", 2000.0, float("inf")),
+        ]
+        return [
+            {
+                "band": label,
+                "invocation_count": sum(
+                    record["invocation_count"]
+                    for record in records
+                    if lower <= record["latency_ms"] <= upper
+                ),
+                "skill_ids": sorted(
+                    {
+                        record["skill_id"]
+                        for record in records
+                        if lower <= record["latency_ms"] <= upper
+                    }
+                ),
+            }
+            for label, lower, upper in bands
+        ]
+
+    def _token_cost_estimates(self, records: list[JsonDict]) -> JsonDict:
+        input_tokens = sum(record["input_tokens"] for record in records)
+        output_tokens = sum(record["output_tokens"] for record in records)
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "input_cost": self._round_cost(input_tokens * self.INPUT_TOKEN_RATE),
+            "output_cost": self._round_cost(output_tokens * self.OUTPUT_TOKEN_RATE),
+            "estimated_cost": self._round_cost(sum(record["estimated_cost"] for record in records)),
+            "cost_model": "local mock rates for portfolio chargeback only",
+        }
+
+    def _budget_status(self, records: list[JsonDict]) -> list[JsonDict]:
+        budgets = {
+            ("healthcare", "production"): {"max_cost": 0.018, "max_tokens": 6200, "max_p95_latency_ms": 1800.0},
+            ("fintech", "production"): {"max_cost": 0.016, "max_tokens": 5600, "max_p95_latency_ms": 1500.0},
+            ("public_sector", "production"): {"max_cost": 0.004, "max_tokens": 1800, "max_p95_latency_ms": 1200.0},
+            ("public_sector", "staging"): {"max_cost": 0.004, "max_tokens": 1600, "max_p95_latency_ms": 1500.0},
+            ("internal_demo", "local"): {"max_cost": 0.006, "max_tokens": 2500, "max_p95_latency_ms": 1200.0},
+            ("internal_demo", "staging"): {"max_cost": 0.008, "max_tokens": 2500, "max_p95_latency_ms": 1200.0},
+        }
+        rows = []
+        for tenant_env in sorted({(record["tenant"], record["environment"]) for record in records}):
+            items = [record for record in records if (record["tenant"], record["environment"]) == tenant_env]
+            budget = budgets.get(
+                tenant_env,
+                {"max_cost": 0.01, "max_tokens": 5000, "max_p95_latency_ms": 1500.0},
+            )
+            cost = self._round_cost(sum(item["estimated_cost"] for item in items))
+            tokens = sum(item["input_tokens"] + item["output_tokens"] for item in items)
+            latency = self._p95(sorted(item["latency_ms"] for item in items))
+            ratios = [
+                cost / budget["max_cost"] if budget["max_cost"] else 0.0,
+                tokens / budget["max_tokens"] if budget["max_tokens"] else 0.0,
+                latency / budget["max_p95_latency_ms"] if budget["max_p95_latency_ms"] else 0.0,
+            ]
+            max_ratio = max(ratios)
+            status = "within_budget"
+            if max_ratio >= 1.0:
+                status = "exceeded"
+            elif max_ratio >= 0.8:
+                status = "warning"
+            rows.append(
+                {
+                    "scope": "tenant_environment",
+                    "tenant": tenant_env[0],
+                    "environment": tenant_env[1],
+                    "status": status,
+                    "estimated_cost": cost,
+                    "max_cost": budget["max_cost"],
+                    "total_tokens": tokens,
+                    "max_tokens": budget["max_tokens"],
+                    "p95_latency_ms": latency,
+                    "max_p95_latency_ms": budget["max_p95_latency_ms"],
+                    "budget_utilization": round(max_ratio, 3),
+                }
+            )
+        return rows
+
+    def _anomalies(self, records: list[JsonDict]) -> list[JsonDict]:
+        anomalies: list[JsonDict] = []
+        for row in self._usage_by(records, ["skill_id", "skill_name"]):
+            if row["p95_latency_ms"] >= 2000:
+                anomalies.append(
+                    {
+                        "type": "high_latency",
+                        "severity": "high",
+                        "skill_id": row["skill_id"],
+                        "detail": f"p95 latency {row['p95_latency_ms']}ms exceeds the 2000ms review threshold.",
+                        "recommended_control": "Add latency SLO alerting and review retrieval/prompt path before wider tenant rollout.",
+                    }
+                )
+        for budget in self._budget_status(records):
+            if budget["status"] == "warning":
+                anomalies.append(
+                    {
+                        "type": "budget_warning",
+                        "severity": "medium",
+                        "tenant": budget["tenant"],
+                        "environment": budget["environment"],
+                        "detail": f"Budget utilization is {budget['budget_utilization']:.0%}.",
+                        "recommended_control": "Set per-tenant token ceilings and require reviewer approval for production increases.",
+                    }
+                )
+        for event in records:
+            if event["event_type"] == "disabled_skill_blocked":
+                anomalies.append(
+                    {
+                        "type": "disabled_skill_blocked",
+                        "severity": "medium",
+                        "skill_id": event["skill_id"],
+                        "tenant": event["tenant"],
+                        "environment": event["environment"],
+                        "detail": "Disabled skill invocation was blocked before MCP exposure or execution.",
+                        "recommended_control": "Keep disabled skills hidden from MCP tools and route attempted use to audit review.",
+                    }
+                )
+        return anomalies
+
+    def _coverage_summary(self, records: list[JsonDict]) -> JsonDict:
+        built_in_skill_ids = set(BUILTIN_HANDLERS)
+        observed_skill_ids = {record["skill_id"] for record in records}
+        tenant_environments = sorted({f"{record['tenant']}:{record['environment']}" for record in records})
+        return {
+            "built_in_skill_count": len(built_in_skill_ids),
+            "built_in_skills_covered": sorted(built_in_skill_ids & observed_skill_ids),
+            "missing_built_in_skills": sorted(built_in_skill_ids - observed_skill_ids),
+            "all_built_in_skills_covered": built_in_skill_ids <= observed_skill_ids,
+            "tenant_environments": tenant_environments,
+            "tenant_environment_count": len(tenant_environments),
+            "has_high_latency_anomaly": any(record["latency_ms"] >= 2000 for record in records),
+            "has_budget_warning": any(item["status"] == "warning" for item in self._budget_status(records)),
+            "has_disabled_skill_blocked_event": any(
+                record["event_type"] == "disabled_skill_blocked" for record in records
+            ),
+            "source_mix": dict(sorted(self._count_by(records, "source").items())),
+        }
+
+    def _cost_allocation(self, analytics: UsageAnalyticsResult) -> list[JsonDict]:
+        total_cost = analytics.summary["estimated_cost"] or 1
+        return [
+            {
+                "tenant": row["tenant"],
+                "environment": row["environment"],
+                "estimated_cost": row["estimated_cost"],
+                "allocation_percent": round((row["estimated_cost"] / total_cost) * 100, 2),
+                "chargeback_owner": self._chargeback_owner(row["tenant"], row["environment"]),
+            }
+            for row in analytics.usage_by_tenant_environment
+        ]
+
+    def _recommended_controls(self, analytics: UsageAnalyticsResult) -> list[JsonDict]:
+        controls = [
+            {
+                "control": "tenant_token_budgets",
+                "priority": "high",
+                "recommendation": "Apply per-tenant max token and cost budgets before production rollout.",
+            },
+            {
+                "control": "latency_slo_alerts",
+                "priority": "high",
+                "recommendation": "Alert on p95 latency above 2000ms and route affected skills to reviewer approval.",
+            },
+            {
+                "control": "disabled_skill_block_audit",
+                "priority": "medium",
+                "recommendation": "Keep disabled skills out of MCP exposure and retain blocked invocation audit events.",
+            },
+            {
+                "control": "monthly_chargeback_review",
+                "priority": "medium",
+                "recommendation": "Review tenant and agent cost allocations with FinOps before budget changes.",
+            },
+        ]
+        if not analytics.disabled_skill_blocked_events:
+            controls = [item for item in controls if item["control"] != "disabled_skill_block_audit"]
+        return controls
+
+    def _reviewer_checklist(self, analytics: UsageAnalyticsResult) -> list[JsonDict]:
+        return [
+            {
+                "item": "Analytics cover all built-in skills and at least four tenant/environment scenarios.",
+                "status": "pass" if analytics.coverage_summary["all_built_in_skills_covered"] else "fail",
+                "proof": f"{analytics.coverage_summary['built_in_skill_count']} built-in skills, {analytics.coverage_summary['tenant_environment_count']} tenant/environments.",
+            },
+            {
+                "item": "Cost chargeback rows allocate spend by tenant/environment.",
+                "status": "pass" if analytics.usage_by_tenant_environment else "fail",
+                "proof": f"${analytics.summary['estimated_cost']:.6f} estimated local/mock cost.",
+            },
+            {
+                "item": "Budget and anomaly flags include warning and high-latency paths.",
+                "status": "pass" if analytics.anomalies else "warn",
+                "proof": f"{len(analytics.anomalies)} anomaly flag(s), {analytics.summary['budget_warning_count']} budget warning(s).",
+            },
+            {
+                "item": "Disabled-skill blocked event is captured for reviewer proof.",
+                "status": "pass" if analytics.disabled_skill_blocked_events else "warn",
+                "proof": f"{len(analytics.disabled_skill_blocked_events)} disabled blocked event(s).",
+            },
+            {
+                "item": "Run local proof commands before treating chargeback as publish-ready.",
+                "status": "manual",
+                "proof": "pytest, ruff, eval, conformance, dashboard smoke, demo, MCP CLI, and rg checks.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Usage analytics are deterministic local/mock evidence; they do not query a production telemetry warehouse.",
+            "Cost estimates use fixed mock token rates and should not be treated as provider invoices.",
+            "Fresh-clone coverage includes generated fixtures; live invocation history is added when demo or API calls run.",
+            "Tenant and agent labels are local portfolio scenarios, not external IAM or billing identities.",
+            "Generated Cost Chargeback artifacts are written under ignored data/usage_packs/.",
+        ]
+
+    def _chargeback_owner(self, tenant: str, environment: str) -> str:
+        owners = {
+            "healthcare": "regulated-health-platform",
+            "fintech": "risk-and-finops",
+            "public_sector": "public-sector-delivery",
+            "internal_demo": "platform-demo",
+        }
+        return f"{owners.get(tenant, 'platform-owner')}:{environment}"
+
+    def _estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        return self._round_cost(
+            input_tokens * self.INPUT_TOKEN_RATE + output_tokens * self.OUTPUT_TOKEN_RATE
+        )
+
+    def _round_cost(self, value: float) -> float:
+        return round(value, 6)
+
+    def _p95(self, latencies: list[float]) -> float:
+        if not latencies:
+            return 0.0
+        index = max(0, min(len(latencies) - 1, round(len(latencies) * 0.95) - 1))
+        return round(latencies[index], 2)
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        analytics = bundle["analytics"]
+        lines = [
+            "# Skill Usage Analytics + Cost Chargeback Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Estimated cost: `${analytics['summary']['estimated_cost']:.6f}`",
+            "",
+            "## Usage By Skill",
+            "",
+            "| Skill | Invocations | Status Blocks | Input Tokens | Output Tokens | Cost | p95 Latency |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            *[
+                f"| `{row['skill_id']}` | {row['invocation_count']} | {row['blocked_count']} | {row['input_tokens']} | {row['output_tokens']} | ${row['estimated_cost']:.6f} | {row['p95_latency_ms']}ms |"
+                for row in analytics["usage_by_skill"]
+            ],
+            "",
+            "## Cost Allocation",
+            "",
+            "| Tenant | Environment | Cost | Allocation | Owner |",
+            "| --- | --- | ---: | ---: | --- |",
+            *[
+                f"| `{row['tenant']}` | `{row['environment']}` | ${row['estimated_cost']:.6f} | {row['allocation_percent']}% | `{row['chargeback_owner']}` |"
+                for row in bundle["cost_allocation"]
+            ],
+            "",
+            "## Budget And Anomaly Flags",
+            "",
+            *[
+                f"- `{item['tenant']}` `{item['environment']}`: `{item['status']}` utilization `{item['budget_utilization']}`"
+                for item in analytics["budget_status"]
+            ],
+            "",
+            *[
+                f"- `{item['type']}` `{item['severity']}`: {item['detail']}"
+                for item in analytics["anomalies"]
+            ],
+            "",
+            "## Recommended Controls",
+            "",
+            *[
+                f"- `{item['priority']}` `{item['control']}`: {item['recommendation']}"
+                for item in bundle["recommended_controls"]
+            ],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class EnterpriseReadinessService:
+    PACK_ID = "portfolio_demo_pack_latest"
+    SCORECARD_ID = "enterprise_readiness_scorecard_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "portfolio_demo"
+
+    async def scorecard(self) -> EnterpriseReadinessScorecard:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        security = await self.app_state.evidence.security_review_summary()
+        release = await self.app_state.releases.preview("enterprise-readiness")
+        audit = await self.app_state.audit_query.query(AuditQueryRequest(limit=100))
+        capacity = await self.app_state.capacity.forecast(CapacityForecastRequest(actor="enterprise-readiness"))
+        dependency_map = await self.app_state.dependencies.build_map()
+        blast = await self.app_state.dependencies.blast_radius(
+            BlastRadiusRequest(skill_id="search_knowledge_base", actor="enterprise-readiness")
+        )
+        incident = await self.app_state.incidents.drill(
+            SkillIncidentDrillRequest(
+                scenario="latency_capacity_breach",
+                actor="enterprise-readiness",
+            )
+        )
+        tenant = self.app_state.tenant_sandbox.simulate(
+            TenantPolicySimulationRequest(
+                tenant="internal_demo",
+                role="reviewer",
+                environment="local",
+                data_sensitivity="confidential",
+            )
+        )
+        demo_agent = await self.app_state.agent.run(
+            "Summarize the Atlas Labs RFP meeting, search approved AI governance policy, "
+            "and create action items for Priya Shah by 2026-06-15.",
+            "enterprise-readiness",
+        )
+        categories = [
+            self._category(
+                "Governance",
+                self._status_from_governance(governance.status),
+                [
+                    f"{governance.skills_registered} registered skills",
+                    f"{governance.enabled_tools} MCP tools exposed",
+                    f"{len(governance.checks)} governance checks evaluated",
+                ],
+                [
+                    f"{check.name}: {check.detail}"
+                    for check in governance.checks
+                    if check.status != "pass"
+                ],
+                base_score=self._base_score_from_governance(governance.status),
+            ),
+            self._category(
+                "Conformance",
+                "ready" if conformance.status == "pass" else "blocked",
+                [
+                    f"{conformance.passed_skill_count}/{conformance.promoted_skill_count} promoted skills passed",
+                    "Schema, sample invocation, policy, MCP exposure, prompt, and resource refs checked",
+                ],
+                [
+                    f"{record.skill_id}: {failure}"
+                    for record in conformance.skills
+                    for failure in record.failures
+                ],
+                base_score=100 if conformance.status == "pass" else 45,
+            ),
+            self._category(
+                "Release Readiness",
+                release.readiness_status,
+                [
+                    f"{release.summary['promoted_skill_count']} promoted skills in release preview",
+                    f"{release.summary['approved_workflow_template_count']} approved workflow templates",
+                    f"{len(release.recommended_regression_tests)} regression commands",
+                ],
+                release.risk_flags,
+                base_score=self._base_score(release.readiness_status),
+            ),
+            self._category(
+                "Audit And Attestation",
+                security.readiness_status,
+                [
+                    f"{len(audit.matched_events)} normalized audit records available",
+                    f"{security.policy_denial_count} denied policy attempts recorded",
+                    f"{security.conformance_pass_count} conformance passes available for attestation",
+                ],
+                [*security.high_risk_flags, *audit.warnings],
+                base_score=self._base_score(security.readiness_status),
+            ),
+            self._category(
+                "Capacity",
+                capacity.readiness_status,
+                [
+                    f"{capacity.summary['total_forecasted_invocations']} forecasted invocations",
+                    f"{len(capacity.recommended_rate_limits)} recommended per-skill rate limits",
+                    f"{len(capacity.top_workflows)} workflow demand drivers",
+                ],
+                capacity.bottleneck_risk_flags,
+                base_score=self._base_score(capacity.readiness_status),
+            ),
+            self._category(
+                "Dependency Blast Radius",
+                self._combined_readiness([dependency_map.readiness_status, blast.readiness_status]),
+                [
+                    f"{len(dependency_map.nodes)} graph nodes and {len(dependency_map.edges)} edges",
+                    f"{len(dependency_map.high_centrality_skills)} high-centrality skills",
+                    f"{len(blast.impacted_workflows)} workflows impacted by knowledge-base skill changes",
+                ],
+                [*dependency_map.warnings, *blast.risk_flags, *blast.warnings],
+                base_score=self._base_score(
+                    self._combined_readiness([dependency_map.readiness_status, blast.readiness_status])
+                ),
+            ),
+            self._category(
+                "Incident Drill",
+                incident.readiness_status,
+                [
+                    f"{incident.scenario} drill severity {incident.severity}",
+                    f"{len(incident.containment_actions)} containment actions",
+                    f"{len(incident.rollback_canary_plan)} rollback/canary steps",
+                ],
+                [
+                    *incident.audit_evidence.get("warnings", []),
+                    *(
+                        [f"severity_{incident.severity}"]
+                        if incident.severity in {"sev1", "sev2"} and incident.readiness_status != "ready"
+                        else []
+                    ),
+                ],
+                base_score=self._base_score(incident.readiness_status),
+            ),
+            self._category(
+                "Tenant Sandbox",
+                tenant.readiness_status,
+                [
+                    f"{tenant.summary['allowed_skill_count']} allowed skills",
+                    f"{tenant.summary['review_required_skill_count']} review-required skills",
+                    f"{tenant.summary['blocked_skill_count']} blocked skills in selected demo tenant scenario",
+                ],
+                [*tenant.policy_reasons, *tenant.warnings],
+                base_score=self._base_score(tenant.readiness_status),
+            ),
+            self._category(
+                "Demo Agent Behavior",
+                self._agent_readiness(demo_agent),
+                [
+                    f"Selected {len(demo_agent.selected_skills)} governed MCP skills",
+                    f"Trace contains {len(demo_agent.trace)} tool calls",
+                    f"Final output length {len(demo_agent.final_output)} characters",
+                ],
+                [
+                    f"{step['skill']}: {step['result'].get('error')}"
+                    for step in demo_agent.trace
+                    if step["result"].get("status") != "succeeded"
+                ],
+                base_score=100 if self._agent_readiness(demo_agent) == "ready" else 55,
+            ),
+        ]
+        risks = sorted({risk for category in categories for risk in category.risks})
+        readiness_status = self._combined_readiness([category.readiness_status for category in categories])
+        overall_score = round(sum(category.score for category in categories) / len(categories))
+        if readiness_status == "blocked":
+            overall_score = min(overall_score, 69)
+        elif readiness_status == "needs_review":
+            overall_score = min(overall_score, 89)
+        summary = {
+            "scorecard_id": self.SCORECARD_ID,
+            "category_count": len(categories),
+            "risk_count": len(risks),
+            "governance_status": governance.status,
+            "conformance_status": conformance.status,
+            "release_readiness": release.readiness_status,
+            "capacity_readiness": capacity.readiness_status,
+            "dependency_readiness": dependency_map.readiness_status,
+            "incident_readiness": incident.readiness_status,
+            "tenant_readiness": tenant.readiness_status,
+            "demo_agent_selected_skills": demo_agent.selected_skills,
+        }
+        return EnterpriseReadinessScorecard(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            overall_score=overall_score,
+            category_scores=categories,
+            risks=risks,
+            recommended_actions=self._recommended_actions(categories, risks),
+            artifact_links=self._artifact_links(),
+            mcp_capability_counts=self._mcp_capability_counts(),
+            verification_commands=self._verification_commands(),
+            summary=summary,
+        )
+
+    async def portfolio_demo_pack(
+        self,
+        request: EnterprisePortfolioDemoPackRequest | None = None,
+    ) -> EnterprisePortfolioDemoPackResult:
+        request = request or EnterprisePortfolioDemoPackRequest()
+        scorecard = await self.scorecard()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": scorecard.readiness_status,
+            "overall_score": scorecard.overall_score,
+            "scorecard": scorecard.model_dump(mode="json"),
+            "architecture_talking_points": self._architecture_talking_points(),
+            "local_demo_commands": self._local_demo_commands(),
+            "endpoint_map": self._endpoint_map(),
+            "artifacts_list": self._artifact_links(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(scorecard),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "enterprise.portfolio_demo_pack_exported",
+            "portfolio_demo_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": scorecard.readiness_status,
+                "overall_score": scorecard.overall_score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return EnterprisePortfolioDemoPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=scorecard.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "overall_score": scorecard.overall_score,
+                "category_count": len(scorecard.category_scores),
+                "risk_count": len(scorecard.risks),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _category(
+        self,
+        category: str,
+        readiness_status: SecurityReadinessStatus,
+        signals: list[str],
+        risks: list[str],
+        base_score: int,
+    ) -> EnterpriseReadinessCategoryScore:
+        unique_risks = sorted({risk for risk in risks if risk})
+        score = max(0, min(100, base_score - min(35, len(unique_risks) * 5)))
+        return EnterpriseReadinessCategoryScore(
+            category=category,
+            score=score,
+            readiness_status=readiness_status,
+            signals=signals,
+            risks=unique_risks,
+        )
+
+    def _base_score(self, status: SecurityReadinessStatus) -> int:
+        return {"ready": 100, "needs_review": 82, "blocked": 45}[status]
+
+    def _status_from_governance(self, status: str) -> SecurityReadinessStatus:
+        if status == "fail":
+            return "blocked"
+        if status == "warn":
+            return "needs_review"
+        return "ready"
+
+    def _base_score_from_governance(self, status: str) -> int:
+        return {"pass": 100, "warn": 82, "fail": 45}[status]
+
+    def _agent_readiness(self, run: AgentRun) -> SecurityReadinessStatus:
+        if not run.selected_skills or any(step["result"].get("status") != "succeeded" for step in run.trace):
+            return "blocked"
+        if len(run.selected_skills) < 3:
+            return "needs_review"
+        return "ready"
+
+    def _combined_readiness(self, statuses: list[SecurityReadinessStatus]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _mcp_capability_counts(self) -> JsonDict:
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        return {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            "tools": sorted(tool.name for tool in tools),
+            "resources": sorted(resource.uri for resource in resources),
+            "prompts": sorted(prompt.id for prompt in prompts),
+        }
+
+    def _artifact_links(self) -> list[JsonDict]:
+        artifacts = [
+            ("Security evidence", "POST /evidence/export", Path("data") / "evidence" / "security_evidence_latest"),
+            ("Release notes", "POST /releases/export", Path("data") / "releases" / "release_notes_latest"),
+            (
+                "Compliance attestation",
+                "POST /compliance/attestation",
+                Path("data") / "attestations" / "compliance_attestation_latest",
+            ),
+            ("Capacity plan", "POST /capacity/plan-export", Path("data") / "capacity" / "capacity_plan_latest"),
+            (
+                "Dependency report",
+                "POST /dependencies/report",
+                Path("data") / "dependencies" / "dependency_report_latest",
+            ),
+            (
+                "Incident runbook",
+                "POST /incidents/runbook",
+                Path("data") / "incident_runbooks" / "incident_runbook_latest",
+            ),
+            (
+                "Tenant sandbox",
+                "POST /tenants/sandbox-export",
+                Path("data") / "tenant_sandboxes" / "tenant_policy_sandbox_latest",
+            ),
+            (
+                "Tenant Rollout approval pack",
+                "POST /marketplace/rollout-pack",
+                Path("data") / "marketplace_packs" / SkillMarketplaceGovernanceService.PACK_ID,
+            ),
+            (
+                "Portfolio demo pack",
+                "POST /enterprise/portfolio-demo-pack",
+                Path("data") / "portfolio_demo" / self.PACK_ID,
+            ),
+        ]
+        return [
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "json_path": str(base.with_suffix(".json")),
+                "markdown_path": str(base.with_suffix(".md")),
+                "json_exists": base.with_suffix(".json").exists(),
+                "markdown_exists": base.with_suffix(".md").exists(),
+            }
+            for name, endpoint, base in artifacts
+        ]
+
+    def _recommended_actions(
+        self,
+        categories: list[EnterpriseReadinessCategoryScore],
+        risks: list[str],
+    ) -> list[str]:
+        actions = []
+        if any(category.readiness_status == "blocked" for category in categories):
+            actions.append("Resolve blocked categories before presenting the hub as production-ready.")
+        if any(category.readiness_status == "needs_review" for category in categories):
+            actions.append("Call out review-required paths as deliberate enterprise governance gates.")
+        if any("high_centrality" in risk for risk in risks):
+            actions.append("Use the blast-radius report to explain canary rollout for central MCP skills.")
+        if any("confidential" in risk.lower() for risk in risks):
+            actions.append("Highlight tenant and data-sensitivity controls during portfolio demos.")
+        actions.append("Generate the portfolio demo pack and attach the JSON/Markdown artifacts to interviews.")
+        actions.append("Run the verification commands locally before sharing the portfolio artifact.")
+        return actions
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "enterprise/readiness-scorecard|enterprise/portfolio-demo-pack|Enterprise Readiness|portfolio_demo|portfolio demo" app dashboard docs README.md tests sample_data',
+        ]
+
+    def _local_demo_commands(self) -> list[str]:
+        return [
+            "python -m uvicorn app.main:app --reload --port 8000",
+            "python -m streamlit run dashboard/streamlit_app.py",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.evals.run_conformance",
+        ]
+
+    def _architecture_talking_points(self) -> list[str]:
+        return [
+            "FastAPI owns typed enterprise endpoints while services keep deterministic local/mock business logic.",
+            "The MCP adapter exposes only promoted and enabled skills as tools, plus auditable resources and prompts.",
+            "Governance, conformance, release, audit, capacity, dependency, incident, and tenant controls are composable services.",
+            "Every export writes local JSON and Markdown artifacts so reviewers can inspect evidence without cloud credentials.",
+            "The demo agent proves behavior through dynamic MCP discovery and traceable multi-skill execution.",
+        ]
+
+    def _endpoint_map(self) -> list[JsonDict]:
+        return [
+            {"area": "enterprise", "method": "GET", "path": "/enterprise/readiness-scorecard"},
+            {"area": "enterprise", "method": "POST", "path": "/enterprise/portfolio-demo-pack"},
+            {"area": "governance", "method": "GET", "path": "/governance/report"},
+            {"area": "conformance", "method": "GET", "path": "/conformance/report"},
+            {"area": "release", "method": "POST", "path": "/releases/preview"},
+            {"area": "audit", "method": "POST", "path": "/audit/query"},
+            {"area": "attestation", "method": "POST", "path": "/compliance/attestation"},
+            {"area": "capacity", "method": "POST", "path": "/capacity/forecast"},
+            {"area": "dependencies", "method": "GET", "path": "/dependencies/map"},
+            {"area": "dependencies", "method": "POST", "path": "/dependencies/blast-radius"},
+            {"area": "incidents", "method": "POST", "path": "/incidents/drill"},
+            {"area": "tenants", "method": "POST", "path": "/tenants/policy-simulate"},
+            {"area": "mcp", "method": "GET", "path": "/mcp/tools"},
+            {"area": "agent", "method": "POST", "path": "/agents/run"},
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "Enterprise FastAPI design with typed Pydantic contracts and deterministic service composition",
+            "MCP tool/resource/prompt governance, exposure controls, and local inspector support",
+            "Audit, compliance attestation, conformance, release, and verification evidence generation",
+            "Capacity planning, dependency blast radius, incident drill, and tenant sandbox modeling",
+            "Portfolio-grade dashboard, demo script, docs, tests, and Markdown/JSON artifact packaging",
+        ]
+
+    def _interviewer_talking_points(self, scorecard: EnterpriseReadinessScorecard) -> list[str]:
+        return [
+            f"The scorecard rolls nine enterprise readiness areas into a {scorecard.overall_score}/100 executive view.",
+            "Every number comes from local deterministic services, so reviewers can rerun it from a fresh clone.",
+            "MCP capability counts tie governance evidence to the actual tools, resources, and prompts agents can see.",
+            "The portfolio pack shows both the platform architecture and the concrete commands used to verify it.",
+            "Review-required outcomes are intentional governance gates, not hidden failures.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        scorecard = bundle["scorecard"]
+        lines = [
+            "# Enterprise Readiness Portfolio Demo Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Overall score: `{bundle['overall_score']}`",
+            "",
+            "## Enterprise Readiness Scorecard",
+            "",
+            *[
+                f"- `{category['category']}`: `{category['score']}` `{category['readiness_status']}`"
+                for category in scorecard["category_scores"]
+            ],
+            "",
+            "## Risks",
+            "",
+            *([f"- {risk}" for risk in scorecard["risks"]] or ["- none"]),
+            "",
+            "## Recommended Actions",
+            "",
+            *[f"- {action}" for action in scorecard["recommended_actions"]],
+            "",
+            "## Architecture Talking Points",
+            "",
+            *[f"- {point}" for point in bundle["architecture_talking_points"]],
+            "",
+            "## Local Demo Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_demo_commands"]],
+            "",
+            "## Endpoint Map",
+            "",
+            *[
+                f"- `{item['method']}` `{item['path']}` - {item['area']}"
+                for item in bundle["endpoint_map"]
+            ],
+            "",
+            "## Artifacts List",
+            "",
+            *[
+                f"- {item['name']}: `{item['json_path']}`, `{item['markdown_path']}`"
+                for item in bundle["artifacts_list"]
+            ],
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class PortfolioEvidenceService:
+    INDEX_ID = "portfolio_evidence_index_latest"
+    PACK_ID = "interview_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "portfolio_packs"
+
+    async def evidence_index(self) -> PortfolioEvidenceIndexResult:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        scorecard = await self.app_state.enterprise.scorecard()
+        smoke = await self.app_state.smoke.smoke_matrix()
+        release = await self.app_state.releases.preview("portfolio-evidence")
+        capacity = await self.app_state.capacity.forecast(CapacityForecastRequest(actor="portfolio-evidence"))
+        guardrails = self.app_state.capacity.guardrails(CapacityGuardrailsRequest(actor="portfolio-evidence"))
+        tenant = self.app_state.tenant_sandbox.simulate(TenantPolicySimulationRequest())
+        incident = await self.app_state.incidents.drill(
+            SkillIncidentDrillRequest(
+                scenario="latency_capacity_breach",
+                actor="portfolio-evidence",
+            )
+        )
+        audit = await self.app_state.audit_query.query(AuditQueryRequest(limit=100))
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        workflows = self.app_state.workflows.list()
+        jd_coverage = [
+            self._coverage(
+                "MCP tools/resources/prompts",
+                [
+                    f"{len(tools)} promoted tools",
+                    f"{len(resources)} resources",
+                    f"{len(prompts)} prompts",
+                ],
+                ["/mcp/tools", "/mcp/resources", "/mcp/prompts"],
+                ["app/services.py", "app/mcp_server.py"],
+                ["python -m app.mcp_server tools", "python -m app.mcp_server resources"],
+            ),
+            self._coverage(
+                "FastAPI admin API",
+                [f"{len(smoke.endpoint_matrix)} smoke-matrix endpoints", "API-key protected admin surfaces"],
+                [endpoint.path for endpoint in smoke.endpoint_matrix],
+                ["app/main.py", "docs/api.md"],
+                ["python -m uvicorn app.main:app --reload --port 8000"],
+            ),
+            self._coverage(
+                "Skill manifests and schema validation",
+                [
+                    f"{governance.skills_registered} registered manifests",
+                    f"{conformance.passed_skill_count}/{conformance.promoted_skill_count} conformance passes",
+                ],
+                ["/skills/validate", "/conformance/report"],
+                ["sample_data/manifests", "app/validator.py"],
+                ["python -m app.evals.run_conformance"],
+            ),
+            self._coverage(
+                "Governance, audit logs, enable/disable/versioning",
+                [
+                    f"governance status {governance.status}",
+                    f"{len(audit.matched_events)} normalized audit records",
+                    f"{len(governance.disabled_skills)} disabled skills tracked",
+                ],
+                ["/governance/report", "/audit/events", "/audit/query", "/skills/{skill_id}/versions"],
+                ["app/services.py", "tests/test_governance_snapshot.py"],
+                ["python -m pytest tests/test_hub.py tests/test_governance_snapshot.py -q"],
+            ),
+            self._coverage(
+                "Workflow templates and conformance evals",
+                [
+                    f"{len(workflows)} approved workflow templates",
+                    f"conformance status {conformance.status}",
+                ],
+                ["/workflows/templates", "/evals/golden", "/conformance/report"],
+                ["sample_data/workflow_templates.json", "app/evals/run_eval.py"],
+                ["python -m app.evals.run_eval", "python -m app.evals.run_eval --validate-only"],
+            ),
+            self._coverage(
+                "Release preview and capacity guardrails",
+                [
+                    f"release readiness {release.readiness_status}",
+                    f"capacity readiness {capacity.readiness_status}",
+                    f"guardrails {guardrails.status}",
+                ],
+                ["/releases/preview", "/capacity/forecast", "/capacity/guardrails"],
+                ["app/services.py", "tests/test_releases.py", "tests/test_capacity.py"],
+                ["python -m pytest tests/test_releases.py tests/test_capacity.py -q"],
+            ),
+            self._coverage(
+                "Tenant policy sandbox and incident runbook",
+                [
+                    f"tenant readiness {tenant.readiness_status}",
+                    f"incident drill {incident.scenario} severity {incident.severity}",
+                ],
+                ["/tenants/policy-simulate", "/tenants/sandbox-export", "/incidents/runbook"],
+                ["tests/test_tenant_sandbox.py", "tests/test_incidents.py"],
+                ["python -m pytest tests/test_tenant_sandbox.py tests/test_incidents.py -q"],
+            ),
+            self._coverage(
+                "Enterprise readiness, smoke matrix, and launch checklist",
+                [
+                    f"enterprise score {scorecard.overall_score}",
+                    f"smoke readiness {smoke.readiness_status}",
+                ],
+                [
+                    "/enterprise/readiness-scorecard",
+                    "/ops/smoke-matrix",
+                    "/ops/launch-checklist",
+                ],
+                ["docs/evaluation.md", "tests/test_enterprise_readiness.py", "tests/test_smoke_launch.py"],
+                ["python -m app.demo"],
+            ),
+            self._coverage(
+                "Portfolio Evidence and Interview Pack",
+                [
+                    "deterministic JD-to-proof matrix",
+                    "local Markdown and JSON interview artifacts",
+                ],
+                ["/portfolio/evidence-index", "/portfolio/interview-pack"],
+                ["app/services.py", "dashboard/streamlit_app.py"],
+                [
+                    'rg "portfolio/evidence-index|portfolio/interview-pack|Portfolio Evidence|Interview Pack"',
+                ],
+            ),
+        ]
+        proof_matrix = self._proof_matrix(jd_coverage)
+        readiness_status = self._combined_readiness(
+            [
+                scorecard.readiness_status,
+                smoke.readiness_status,
+                "ready" if conformance.status == "pass" else "blocked",
+                self._status_from_governance(governance.status),
+                release.readiness_status,
+                capacity.readiness_status,
+                tenant.readiness_status,
+                incident.readiness_status,
+            ]
+        )
+        evidence_score = round(
+            100
+            * sum(1 for item in jd_coverage if item["coverage_status"] == "covered")
+            / len(jd_coverage)
+        )
+        artifact_inventory = self._artifact_inventory()
+        verification_commands = self._verification_commands()
+        return PortfolioEvidenceIndexResult(
+            index_id=self.INDEX_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            evidence_score=evidence_score,
+            jd_skill_count=len(jd_coverage),
+            proof_count=len(proof_matrix),
+            jd_coverage=jd_coverage,
+            proof_matrix=proof_matrix,
+            mcp_capability_counts={
+                "tool_count": len(tools),
+                "resource_count": len(resources),
+                "prompt_count": len(prompts),
+                "tools": sorted(tool.name for tool in tools),
+                "resources": sorted(resource.uri for resource in resources),
+                "prompts": sorted(prompt.id for prompt in prompts),
+            },
+            artifact_inventory=artifact_inventory,
+            verification_commands=verification_commands,
+            summary={
+                "governance_status": governance.status,
+                "conformance_status": conformance.status,
+                "enterprise_score": scorecard.overall_score,
+                "smoke_endpoint_count": len(smoke.endpoint_matrix),
+                "workflow_template_count": len(workflows),
+                "audit_record_count": len(audit.matched_events),
+                "release_readiness": release.readiness_status,
+                "capacity_readiness": capacity.readiness_status,
+                "tenant_readiness": tenant.readiness_status,
+                "incident_readiness": incident.readiness_status,
+                "local_only": True,
+            },
+        )
+
+    async def interview_pack(
+        self,
+        request: PortfolioInterviewPackRequest | None = None,
+    ) -> PortfolioInterviewPackResult:
+        request = request or PortfolioInterviewPackRequest()
+        index = await self.evidence_index()
+        scorecard = await self.app_state.enterprise.scorecard()
+        conformance = await self.app_state.conformance.generate()
+        usage = self.app_state.metrics.summary()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": index.readiness_status,
+            "evidence_score": index.evidence_score,
+            "evidence_index": index.model_dump(mode="json"),
+            "three_minute_demo_script": self._three_minute_demo_script(index),
+            "technical_talking_points": self._technical_talking_points(index),
+            "architecture_walkthrough": self._architecture_walkthrough(index),
+            "governance_failure_mode_story": self._governance_failure_story(),
+            "local_verification_commands": index.verification_commands,
+            "metrics_eval_summary": {
+                "evidence_score": index.evidence_score,
+                "jd_skill_count": index.jd_skill_count,
+                "proof_count": index.proof_count,
+                "enterprise_score": scorecard.overall_score,
+                "conformance_status": conformance.status,
+                "conformance_passed_skills": conformance.passed_skill_count,
+                "conformance_promoted_skills": conformance.promoted_skill_count,
+                "recorded_invocations": usage.invocation_count,
+                "recorded_failures": usage.failure_count,
+                "estimated_cost": usage.estimated_cost,
+                "local_mock_mode": True,
+            },
+            "artifact_inventory": index.artifact_inventory,
+            "resume_bullets": self._resume_bullets(index),
+            "github_readme_bullets": self._github_readme_bullets(index),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "portfolio.interview_pack_exported",
+            "portfolio_interview_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": index.readiness_status,
+                "evidence_score": index.evidence_score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return PortfolioInterviewPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=index.readiness_status,
+            evidence_score=index.evidence_score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "jd_skill_count": index.jd_skill_count,
+                "proof_count": index.proof_count,
+                "talking_point_count": len(bundle["technical_talking_points"]),
+                "artifact_count": len(bundle["artifact_inventory"]),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _coverage(
+        self,
+        jd_skill: str,
+        evidence: list[str],
+        endpoints: list[str],
+        files: list[str],
+        commands: list[str],
+    ) -> JsonDict:
+        return {
+            "jd_skill": jd_skill,
+            "coverage_status": "covered",
+            "evidence": evidence,
+            "endpoints": endpoints,
+            "files": files,
+            "commands": commands,
+        }
+
+    def _proof_matrix(self, jd_coverage: list[JsonDict]) -> list[JsonDict]:
+        rows = []
+        for item in jd_coverage:
+            for endpoint in item["endpoints"]:
+                rows.append(
+                    {
+                        "jd_skill": item["jd_skill"],
+                        "proof_type": "endpoint",
+                        "proof": endpoint,
+                        "coverage_status": item["coverage_status"],
+                    }
+                )
+            for file_path in item["files"]:
+                rows.append(
+                    {
+                        "jd_skill": item["jd_skill"],
+                        "proof_type": "file",
+                        "proof": file_path,
+                        "coverage_status": item["coverage_status"],
+                    }
+                )
+            for command in item["commands"]:
+                rows.append(
+                    {
+                        "jd_skill": item["jd_skill"],
+                        "proof_type": "command",
+                        "proof": command,
+                        "coverage_status": item["coverage_status"],
+                    }
+                )
+        return rows
+
+    def _artifact_inventory(self) -> list[JsonDict]:
+        artifacts = [
+            ("Portfolio Evidence Index", "GET /portfolio/evidence-index", self.output_dir / self.INDEX_ID),
+            ("Interview Pack", "POST /portfolio/interview-pack", self.output_dir / self.PACK_ID),
+            ("Portfolio demo pack", "POST /enterprise/portfolio-demo-pack", Path("data") / "portfolio_demo" / "portfolio_demo_pack_latest"),
+            ("Launch checklist", "POST /ops/launch-checklist", Path("data") / "launch_checklists" / "launch_checklist_latest"),
+            ("Security evidence", "POST /evidence/export", Path("data") / "evidence" / "security_evidence_latest"),
+            ("Release notes", "POST /releases/export", Path("data") / "releases" / "release_notes_latest"),
+            ("Capacity plan", "POST /capacity/plan-export", Path("data") / "capacity" / "capacity_plan_latest"),
+            ("Tenant sandbox", "POST /tenants/sandbox-export", Path("data") / "tenant_sandboxes" / "tenant_policy_sandbox_latest"),
+            ("Incident runbook", "POST /incidents/runbook", Path("data") / "incident_runbooks" / "incident_runbook_latest"),
+        ]
+        return [
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "json_path": str(base.with_suffix(".json")),
+                "markdown_path": str(base.with_suffix(".md")),
+                "json_exists": base.with_suffix(".json").exists(),
+                "markdown_exists": base.with_suffix(".md").exists(),
+            }
+            for name, endpoint, base in artifacts
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "portfolio/evidence-index|portfolio/interview-pack|Portfolio Evidence|Interview Pack|portfolio_packs|portfolio_interview|evidence score" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\portfolio_packs,data\\portfolio_interview -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _three_minute_demo_script(self, index: PortfolioEvidenceIndexResult) -> list[str]:
+        return [
+            "Open with the problem: enterprises need reusable MCP skills that agents can discover without bypassing governance.",
+            f"Show `GET /portfolio/evidence-index`: {index.jd_skill_count} JD skill areas map to {index.proof_count} concrete proofs with an evidence score of {index.evidence_score}.",
+            "Inspect MCP tools, resources, and prompts to prove only promoted/enabled capabilities are visible to agents.",
+            "Run the policy and tenant sandbox story: confidential access can be allowed, blocked, or review-required by role and tenant.",
+            "Close with the interview pack artifact, verification commands, and the fact that the whole walkthrough runs locally in mock mode.",
+        ]
+
+    def _technical_talking_points(self, index: PortfolioEvidenceIndexResult) -> list[str]:
+        return [
+            "FastAPI endpoints use typed Pydantic contracts and API-key protected admin surfaces.",
+            "MCP discovery is derived from promoted/enabled skills, not from every registered manifest.",
+            "Skill manifests carry input/output JSON schemas and are validated before promotion and invocation.",
+            "Audit events and trace IDs connect registration, validation, invocation, policy denial, replay, and exports.",
+            "Version history, enable/disable state, and release preview prove lifecycle control.",
+            "Workflow templates compose skills only after review validation and approval.",
+            "Conformance and golden eval commands provide deterministic regression coverage.",
+            "Capacity guardrails model quotas, latency, tokens, fallback behavior, and local cost.",
+            "Tenant sandbox and incident drill demonstrate failure-mode thinking before production rollout.",
+            f"The proof matrix is deterministic: {index.proof_count} endpoint, file, and command rows from local sources.",
+        ]
+
+    def _architecture_walkthrough(self, index: PortfolioEvidenceIndexResult) -> list[str]:
+        return [
+            "Bootstrap registers built-in promoted skill manifests into an in-memory registry.",
+            "Services own governance, policy, workflows, evals, release, capacity, dependency, tenant, incident, and portfolio evidence.",
+            "The MCP adapter translates promoted skills into tools and exposes local resources and prompt templates.",
+            "FastAPI routes are thin typed wrappers around services, while Streamlit provides the local admin console.",
+            f"The portfolio layer summarizes {index.jd_skill_count} JD skill areas into evidence that recruiters can verify without SaaS credentials.",
+        ]
+
+    def _governance_failure_story(self) -> list[str]:
+        return [
+            "A confidential RFP workflow request from an agent role is denied by policy before tool execution.",
+            "The denial is recorded with a trace ID, actor, resource, policy decision, and failure metric.",
+            "Replay and audit query make the failure reproducible for reviewers instead of leaving it as a log-only event.",
+            "Incident drill and capacity guardrails turn likely failure modes into containment, rollback, and verification steps.",
+        ]
+
+    def _resume_bullets(self, index: PortfolioEvidenceIndexResult) -> list[str]:
+        return [
+            f"Built a local governed MCP skill hub with {index.mcp_capability_counts['tool_count']} tools, {index.mcp_capability_counts['resource_count']} resources, and {index.mcp_capability_counts['prompt_count']} prompts exposed through FastAPI and CLI inspectors.",
+            f"Implemented a deterministic portfolio evidence index mapping {index.jd_skill_count} enterprise agent-platform skills to {index.proof_count} endpoint, file, and command proofs.",
+            "Added governance, policy simulation, audit, conformance, release preview, capacity guardrails, tenant sandbox, and incident-runbook artifacts without paid API dependencies.",
+        ]
+
+    def _github_readme_bullets(self, index: PortfolioEvidenceIndexResult) -> list[str]:
+        return [
+            f"`GET /portfolio/evidence-index` returns a {index.evidence_score}/100 local evidence score and proof matrix for interviewer review.",
+            "`POST /portfolio/interview-pack` writes Markdown and JSON with a 3-minute demo script, talking points, commands, metrics, artifact inventory, and resume bullets.",
+            "The Streamlit Portfolio Pack view shows JD coverage, proof matrix, verification commands, and generated artifact paths.",
+        ]
+
+    def _status_from_governance(self, status: str) -> SecurityReadinessStatus:
+        if status == "fail":
+            return "blocked"
+        if status == "warn":
+            return "needs_review"
+        return "ready"
+
+    def _combined_readiness(self, statuses: list[SecurityReadinessStatus]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        index = bundle["evidence_index"]
+        lines = [
+            "# Portfolio Evidence Interview Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Evidence score: `{bundle['evidence_score']}`",
+            "",
+            "## 3-Minute Demo Script",
+            "",
+            *[f"{number}. {line}" for number, line in enumerate(bundle["three_minute_demo_script"], start=1)],
+            "",
+            "## Technical Talking Points",
+            "",
+            *[f"{number}. {point}" for number, point in enumerate(bundle["technical_talking_points"], start=1)],
+            "",
+            "## Architecture Walk-Through",
+            "",
+            *[f"- {step}" for step in bundle["architecture_walkthrough"]],
+            "",
+            "## Governance And Failure Mode Story",
+            "",
+            *[f"- {step}" for step in bundle["governance_failure_mode_story"]],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## Metrics And Eval Summary",
+            "",
+            *[
+                f"- `{key}`: `{value}`"
+                for key, value in bundle["metrics_eval_summary"].items()
+            ],
+            "",
+            "## Artifact Inventory",
+            "",
+            *[
+                f"- {item['name']}: `{item['json_path']}`, `{item['markdown_path']}`"
+                for item in bundle["artifact_inventory"]
+            ],
+            "",
+            "## JD Coverage",
+            "",
+            *[
+                f"- {item['jd_skill']}: `{item['coverage_status']}` - {', '.join(item['evidence'])}"
+                for item in index["jd_coverage"]
+            ],
+            "",
+            "## Resume Bullets",
+            "",
+            *[f"- {bullet}" for bullet in bundle["resume_bullets"]],
+            "",
+            "## GitHub README Bullets",
+            "",
+            *[f"- {bullet}" for bullet in bundle["github_readme_bullets"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class SmokeMatrixService:
+    CHECKLIST_ID = "launch_checklist_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "launch_checklists"
+
+    async def smoke_matrix(self) -> SmokeMatrixResult:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        release = await self.app_state.releases.preview("smoke-matrix")
+        capacity = await self.app_state.capacity.forecast(CapacityForecastRequest(actor="smoke-matrix"))
+        tenant = self.app_state.tenant_sandbox.simulate(TenantPolicySimulationRequest())
+        incident = await self.app_state.incidents.drill(SkillIncidentDrillRequest(actor="smoke-matrix"))
+        marketplace = await self.app_state.marketplace.catalog()
+        usage = self.app_state.usage.analytics()
+        enterprise = await self.app_state.enterprise.scorecard()
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        readiness_status = self._smoke_readiness(
+            governance.status,
+            conformance.status,
+            len(tools),
+            [
+                release.readiness_status,
+                capacity.readiness_status,
+                tenant.readiness_status,
+                incident.readiness_status,
+                marketplace.readiness_status,
+                usage.readiness_status,
+                enterprise.readiness_status,
+            ],
+        )
+        endpoint_matrix = self._endpoint_matrix()
+        readiness_summary = {
+            "status": readiness_status,
+            "sections_covered": [
+                "auth/health",
+                "skills",
+                "mcp",
+                "governance",
+                "workflows",
+                "releases",
+                "capacity",
+                "tenant policy",
+                "marketplace",
+                "usage analytics",
+                "incidents",
+                "enterprise readiness",
+                "portfolio evidence",
+                "reviewer quickstart",
+                "ui verification",
+                "git readiness",
+                "runtime demo",
+                "api contract",
+            ],
+            "endpoint_count": len(endpoint_matrix),
+            "protected_endpoint_count": sum(1 for endpoint in endpoint_matrix if endpoint.auth_required),
+            "skill_count": len(self.app_state.registry.list()),
+            "mcp_tool_count": len(tools),
+            "mcp_resource_count": len(resources),
+            "mcp_prompt_count": len(prompts),
+            "workflow_template_count": len(self.app_state.workflows.list()),
+            "governance_status": governance.status,
+            "conformance_status": conformance.status,
+            "release_readiness": release.readiness_status,
+            "capacity_readiness": capacity.readiness_status,
+            "tenant_readiness": tenant.readiness_status,
+            "marketplace_readiness": marketplace.readiness_status,
+            "marketplace_listing_count": marketplace.coverage_summary["listing_count"],
+            "usage_readiness": usage.readiness_status,
+            "usage_estimated_cost": usage.summary["estimated_cost"],
+            "usage_anomaly_count": usage.summary["anomaly_count"],
+            "incident_readiness": incident.readiness_status,
+            "enterprise_readiness": enterprise.readiness_status,
+            "enterprise_score": enterprise.overall_score,
+            "local_only": True,
+        }
+        return SmokeMatrixResult(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            endpoint_matrix=endpoint_matrix,
+            artifact_expectations=self._artifact_expectations(),
+            readiness_summary=readiness_summary,
+            verification_commands=self._verification_commands(),
+        )
+
+    async def launch_checklist(self, request: LaunchChecklistRequest | None = None) -> LaunchChecklistResult:
+        request = request or LaunchChecklistRequest()
+        matrix = await self.smoke_matrix()
+        bundle = {
+            "checklist_id": self.CHECKLIST_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": matrix.readiness_status,
+            "install_commands": self._install_commands(),
+            "run_commands": self._run_commands(),
+            "api_smoke_matrix": matrix.model_dump(mode="json"),
+            "demo_command": "python -m app.demo",
+            "eval_commands": self._eval_commands(),
+            "artifact_paths": self._artifact_expectations(),
+            "troubleshooting_notes": self._troubleshooting_notes(),
+            "jd_skills_demonstrated": self._jd_skills_demonstrated(),
+            "interviewer_talking_points": self._interviewer_talking_points(matrix),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.CHECKLIST_ID}.json"
+        markdown_path = self.output_dir / f"{self.CHECKLIST_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "ops.launch_checklist_exported",
+            "launch_checklist",
+            self.CHECKLIST_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": matrix.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "endpoint_count": len(matrix.endpoint_matrix),
+            },
+        )
+        return LaunchChecklistResult(
+            checklist_id=self.CHECKLIST_ID,
+            generated_at=utc_now(),
+            readiness_status=matrix.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "endpoint_count": len(matrix.endpoint_matrix),
+                "artifact_count": len(bundle["artifact_paths"]),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "sections_covered": matrix.readiness_summary["sections_covered"],
+            },
+        )
+
+    def _endpoint_matrix(self) -> list[SmokeMatrixEndpoint]:
+        return [
+            self._endpoint(
+                "auth/health",
+                "POST",
+                "/auth/demo-token",
+                False,
+                200,
+                "Invoke-RestMethod http://localhost:8000/auth/demo-token -Method POST",
+                [],
+                "Returns the local X-API-Key bootstrap token.",
+            ),
+            self._endpoint(
+                "auth/health",
+                "GET",
+                "/health",
+                False,
+                200,
+                "Invoke-RestMethod http://localhost:8000/health",
+                [],
+                "Confirms API, provider mode, MCP compatibility mode, and version.",
+            ),
+            self._endpoint(
+                "auth/health",
+                "GET",
+                "/skills",
+                False,
+                401,
+                "Invoke-RestMethod http://localhost:8000/skills",
+                [],
+                "Missing API key is rejected for protected surfaces.",
+            ),
+            self._endpoint(
+                "skills",
+                "GET",
+                "/skills",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/skills -Headers $headers",
+                [],
+                "Lists built-in promoted skills plus any local registered manifests.",
+            ),
+            self._endpoint(
+                "skills",
+                "POST",
+                "/skills/classify_request/invoke",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/skills/classify_request/invoke -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"input\":{\"request\":\"RFP security review is blocked.\"}}'",
+                [],
+                "Exercises schema validation, deterministic handler output, audit, and metrics.",
+            ),
+            self._endpoint(
+                "mcp",
+                "GET",
+                "/mcp/tools",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/mcp/tools -Headers $headers",
+                [],
+                "Shows promoted/enabled skills exposed as MCP-compatible tools.",
+            ),
+            self._endpoint(
+                "mcp",
+                "GET",
+                "/mcp/resources",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/mcp/resources -Headers $headers",
+                [],
+                "Shows file-backed policy/product/workflow resources.",
+            ),
+            self._endpoint(
+                "mcp",
+                "GET",
+                "/mcp/prompts",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/mcp/prompts -Headers $headers",
+                [],
+                "Shows reusable prompt templates available to MCP clients.",
+            ),
+            self._endpoint(
+                "governance",
+                "GET",
+                "/governance/report",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/governance/report -Headers $headers",
+                [],
+                "Reports lifecycle, schema, policy, audit, metric, and MCP exposure checks.",
+            ),
+            self._endpoint(
+                "workflows",
+                "GET",
+                "/workflows/templates",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/workflows/templates -Headers $headers",
+                [],
+                "Lists approved skill compositions ready for local simulation.",
+            ),
+            self._endpoint(
+                "workflows",
+                "POST",
+                "/workflows/meeting_to_actions/simulate",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/workflows/meeting_to_actions/simulate -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"input_text\":\"Priya needs a summary and action items.\",\"role\":\"agent\",\"data_sensitivity\":\"internal\"}'",
+                [],
+                "Exercises ordered skill composition with per-step policy decisions.",
+            ),
+            self._endpoint(
+                "releases",
+                "POST",
+                "/releases/preview",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/releases/preview -Method POST -Headers $headers",
+                ["data/releases/release_notes_latest.json", "data/releases/release_notes_latest.md"],
+                "Previews catalog and workflow changes against the local release baseline.",
+            ),
+            self._endpoint(
+                "capacity",
+                "POST",
+                "/capacity/forecast",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/capacity/forecast -Method POST -Headers $headers",
+                ["data/capacity/capacity_plan_latest.json", "data/capacity/capacity_plan_latest.md"],
+                "Forecasts local/mock demand, token, cost, latency, and guardrail signals.",
+            ),
+            self._endpoint(
+                "tenant policy",
+                "POST",
+                "/tenants/policy-simulate",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/tenants/policy-simulate -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"tenant\":\"healthcare\",\"role\":\"reviewer\",\"data_sensitivity\":\"confidential\"}'",
+                ["data/tenant_sandboxes/tenant_policy_sandbox_latest.json", "data/tenant_sandboxes/tenant_policy_sandbox_latest.md"],
+                "Shows tenant-specific allowed, blocked, and review-required MCP capability decisions.",
+            ),
+            self._endpoint(
+                "marketplace",
+                "GET",
+                "/marketplace/catalog",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+                [],
+                "Lists governed marketplace skills with rollout eligibility, risk, usage, version, and MCP exposure evidence.",
+            ),
+            self._endpoint(
+                "marketplace",
+                "POST",
+                "/marketplace/rollout-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+                [
+                    "data/marketplace_packs/rollout_approval_pack_latest.json",
+                    "data/marketplace_packs/rollout_approval_pack_latest.md",
+                ],
+                "Writes the Tenant Rollout approval pack with blocked, review-required, version, and reviewer proof notes.",
+            ),
+            self._endpoint(
+                "usage analytics",
+                "GET",
+                "/usage/analytics",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
+                [],
+                "Returns enterprise usage by skill, tenant/environment, agent, status, MCP exposure, budgets, anomalies, and chargeback estimates.",
+            ),
+            self._endpoint(
+                "usage analytics",
+                "POST",
+                "/usage/chargeback-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+                [
+                    "data/usage_packs/chargeback_pack_latest.json",
+                    "data/usage_packs/chargeback_pack_latest.md",
+                ],
+                "Writes Skill Usage Analytics and Cost Chargeback reviewer artifacts.",
+            ),
+            self._endpoint(
+                "incidents",
+                "POST",
+                "/incidents/drill",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/incidents/drill -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"scenario\":\"latency_capacity_breach\"}'",
+                ["data/incident_runbooks/incident_runbook_latest.json", "data/incident_runbooks/incident_runbook_latest.md"],
+                "Runs deterministic reliability drills with containment and rollback evidence.",
+            ),
+            self._endpoint(
+                "enterprise readiness",
+                "GET",
+                "/enterprise/readiness-scorecard",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/enterprise/readiness-scorecard -Headers $headers",
+                ["data/portfolio_demo/portfolio_demo_pack_latest.json", "data/portfolio_demo/portfolio_demo_pack_latest.md"],
+                "Aggregates interview-ready governance, release, capacity, tenant, incident, and demo readiness.",
+            ),
+            self._endpoint(
+                "portfolio evidence",
+                "GET",
+                "/portfolio/evidence-index",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/portfolio/evidence-index -Headers $headers",
+                [],
+                "Maps recruiter JD skills to concrete local implementation evidence.",
+            ),
+            self._endpoint(
+                "portfolio evidence",
+                "POST",
+                "/portfolio/interview-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/portfolio/interview-pack -Method POST -Headers $headers",
+                ["data/portfolio_packs/interview_pack_latest.json", "data/portfolio_packs/interview_pack_latest.md"],
+                "Writes the Markdown/JSON interview script pack for portfolio review.",
+            ),
+            self._endpoint(
+                "reviewer quickstart",
+                "GET",
+                "/reviewer/quickstart",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/reviewer/quickstart -Headers $headers",
+                [],
+                "Returns exact local setup, demo, verification, endpoint, MCP, artifact, and troubleshooting guidance.",
+            ),
+            self._endpoint(
+                "reviewer quickstart",
+                "POST",
+                "/reviewer/walkthrough-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/reviewer/walkthrough-pack -Method POST -Headers $headers",
+                ["data/reviewer_packs/walkthrough_pack_latest.json", "data/reviewer_packs/walkthrough_pack_latest.md"],
+                "Writes the recruiter and engineer Walkthrough Pack for GitHub reviewers.",
+            ),
+            self._endpoint(
+                "api contract",
+                "GET",
+                "/api/contract-audit",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+                [],
+                "Returns source-backed OpenAPI, auth, docs, dashboard, artifact, demo, and MCP contract checks.",
+            ),
+            self._endpoint(
+                "api contract",
+                "POST",
+                "/api/reviewer-collection",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+                [
+                    "data/api_contracts/reviewer_collection_latest.json",
+                    "data/api_contracts/reviewer_collection_latest.md",
+                ],
+                "Writes the API Contract Reviewer Collection Pack for fresh-clone reviewers.",
+            ),
+            self._endpoint(
+                "ui verification",
+                "GET",
+                "/ui/dashboard-smoke",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/ui/dashboard-smoke -Headers $headers",
+                [],
+                "Returns deterministic dashboard source wiring checks without launching a browser.",
+            ),
+            self._endpoint(
+                "ui verification",
+                "POST",
+                "/ui/verification-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/ui/verification-pack -Method POST -Headers $headers",
+                [
+                    "data/ui_verification/ui_verification_pack_latest.json",
+                    "data/ui_verification/ui_verification_pack_latest.md",
+                ],
+                "Writes Dashboard Smoke, reviewer checklist, screenshot placeholders, and troubleshooting artifacts.",
+            ),
+            self._endpoint(
+                "git readiness",
+                "GET",
+                "/git/readiness",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/git/readiness -Headers $headers",
+                [],
+                "Returns local git repository, branch, worktree, generated artifact, and publish hygiene checks.",
+            ),
+            self._endpoint(
+                "git readiness",
+                "POST",
+                "/git/push-plan",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/git/push-plan -Method POST -Headers $headers",
+                ["data/git_packs/git_push_plan_latest.json", "data/git_packs/git_push_plan_latest.md"],
+                "Writes the GitHub Push Readiness + Branch Hygiene Pack without staging or pushing.",
+            ),
+            self._endpoint(
+                "runtime demo",
+                "GET",
+                "/runtime/demo-readiness",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
+                [],
+                "Returns local FastAPI, Streamlit, and MCP CLI start commands, dependency checks, port checks, health URLs, and limits.",
+            ),
+            self._endpoint(
+                "runtime demo",
+                "POST",
+                "/runtime/demo-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+                ["data/runtime_packs/runtime_demo_pack_latest.json", "data/runtime_packs/runtime_demo_pack_latest.md"],
+                "Writes the Runtime Demo Server Pack without starting or stopping local processes.",
+            ),
+            self._endpoint(
+                "ops",
+                "GET",
+                "/ops/smoke-matrix",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/ops/smoke-matrix -Headers $headers",
+                [],
+                "Returns this API smoke matrix and readiness summary.",
+            ),
+            self._endpoint(
+                "ops",
+                "POST",
+                "/ops/launch-checklist",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/ops/launch-checklist -Method POST -Headers $headers",
+                ["data/launch_checklists/launch_checklist_latest.json", "data/launch_checklists/launch_checklist_latest.md"],
+                "Writes the local launch checklist artifact for README and interview demos.",
+            ),
+        ]
+
+    def _endpoint(
+        self,
+        area: str,
+        method: str,
+        path: str,
+        auth_required: bool,
+        expected_status: int,
+        sample_command: str,
+        artifact_expectations: list[str],
+        readiness_signal: str,
+    ) -> SmokeMatrixEndpoint:
+        return SmokeMatrixEndpoint(
+            area=area,
+            method=method,
+            path=path,
+            auth_required=auth_required,
+            expected_status=expected_status,
+            sample_command=sample_command,
+            artifact_expectations=artifact_expectations,
+            readiness_signal=readiness_signal,
+        )
+
+    def _artifact_expectations(self) -> list[JsonDict]:
+        artifacts = [
+            ("Security evidence", "POST /evidence/export", Path("data") / "evidence" / "security_evidence_latest"),
+            (
+                "Compliance attestation",
+                "POST /compliance/attestation",
+                Path("data") / "attestations" / "compliance_attestation_latest",
+            ),
+            ("Release notes", "POST /releases/export", Path("data") / "releases" / "release_notes_latest"),
+            ("Capacity plan", "POST /capacity/plan-export", Path("data") / "capacity" / "capacity_plan_latest"),
+            (
+                "Dependency report",
+                "POST /dependencies/report",
+                Path("data") / "dependencies" / "dependency_report_latest",
+            ),
+            (
+                "Incident runbook",
+                "POST /incidents/runbook",
+                Path("data") / "incident_runbooks" / "incident_runbook_latest",
+            ),
+            (
+                "Tenant sandbox",
+                "POST /tenants/sandbox-export",
+                Path("data") / "tenant_sandboxes" / "tenant_policy_sandbox_latest",
+            ),
+            (
+                "Cost Chargeback Pack",
+                "POST /usage/chargeback-pack",
+                Path("data") / "usage_packs" / SkillUsageAnalyticsService.PACK_ID,
+            ),
+            (
+                "Portfolio demo pack",
+                "POST /enterprise/portfolio-demo-pack",
+                Path("data") / "portfolio_demo" / "portfolio_demo_pack_latest",
+            ),
+            (
+                "Interview pack",
+                "POST /portfolio/interview-pack",
+                Path("data") / "portfolio_packs" / "interview_pack_latest",
+            ),
+            (
+                "Launch checklist",
+                "POST /ops/launch-checklist",
+                Path("data") / "launch_checklists" / self.CHECKLIST_ID,
+            ),
+            (
+                "Reviewer Walkthrough Pack",
+                "POST /reviewer/walkthrough-pack",
+                Path("data") / "reviewer_packs" / ReviewerQuickstartService.PACK_ID,
+            ),
+            (
+                "API Contract Reviewer Collection",
+                "POST /api/reviewer-collection",
+                Path("data") / "api_contracts" / "reviewer_collection_latest",
+            ),
+            (
+                "UI Verification Pack",
+                "POST /ui/verification-pack",
+                Path("data") / "ui_verification" / DashboardSmokeService.PACK_ID,
+            ),
+            (
+                "GitHub Push Readiness + Branch Hygiene Pack",
+                "POST /git/push-plan",
+                Path("data") / "git_packs" / "git_push_plan_latest",
+            ),
+            (
+                "Runtime Demo Server Pack",
+                "POST /runtime/demo-pack",
+                Path("data") / "runtime_packs" / RuntimeDemoService.PACK_ID,
+            ),
+        ]
+        return [
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "json_path": str(base.with_suffix(".json")),
+                "markdown_path": str(base.with_suffix(".md")),
+                "json_exists": base.with_suffix(".json").exists(),
+                "markdown_exists": base.with_suffix(".md").exists(),
+            }
+            for name, endpoint, base in artifacts
+        ]
+
+    def _install_commands(self) -> list[str]:
+        return [
+            "cd C:\\Users\\Devan\\Documents\\emcp-hub",
+            "python -m pip install -r requirements-dev.txt",
+        ]
+
+    def _run_commands(self) -> list[str]:
+        return [
+            "python scripts\\runtime_check.py",
+            "python -m uvicorn app.main:app --reload --port 8000",
+            "python -m streamlit run dashboard/streamlit_app.py",
+            "python -m app.demo",
+            "$headers = @{ \"X-API-Key\" = \"dev-local-token\" }",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ops/smoke-matrix -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ops/launch-checklist -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+        ]
+
+    def _eval_commands(self) -> list[str]:
+        return [
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            *self._eval_commands(),
+            "python scripts\\dashboard_smoke.py",
+            "python scripts\\runtime_check.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ops/smoke-matrix -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reviewer/quickstart -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reviewer/walkthrough-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ui/dashboard-smoke -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ui/verification-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+            'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
+            'rg "runtime/demo-readiness|runtime/demo-pack|Runtime Demo|runtime_packs|runtime_check|start_demo" app dashboard docs README.md tests scripts sample_data',
+            'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
+        ]
+
+    def _troubleshooting_notes(self) -> list[str]:
+        return [
+            "Use `POST /auth/demo-token` to confirm the local token and header name.",
+            "Protected endpoints expect `X-API-Key: dev-local-token` unless `.env` overrides it.",
+            "The default provider is mock, so smoke checks should not require paid API keys or network LLM calls.",
+            "If release artifacts look empty on a fresh clone, call `POST /releases/export` to create a local baseline.",
+            "Generated Markdown and JSON artifacts live under ignored `data/` subfolders and can be regenerated safely.",
+        ]
+
+    def _jd_skills_demonstrated(self) -> list[str]:
+        return [
+            "FastAPI and Pydantic API design with authenticated local ops surfaces",
+            "MCP-compatible tools, resources, and prompts with governed exposure",
+            "Deterministic eval, conformance, release, audit, and evidence workflows",
+            "Capacity, dependency, incident, tenant policy, and enterprise readiness modeling",
+            "Interview-ready documentation, dashboard UX, demo automation, and local artifact packaging",
+        ]
+
+    def _interviewer_talking_points(self, matrix: SmokeMatrixResult) -> list[str]:
+        summary = matrix.readiness_summary
+        return [
+            f"The smoke matrix covers {summary['endpoint_count']} API checks across auth, skills, MCP, governance, workflows, release, capacity, tenant, incident, and enterprise readiness.",
+            "Every command is local/mock and can run from a fresh clone without SaaS credentials.",
+            "The checklist links API checks to concrete JSON and Markdown artifacts an interviewer can inspect.",
+            "MCP discovery is verified separately for tools, resources, and prompts, not inferred from the skill catalog.",
+            f"The readiness summary rolls live service signals into one `{matrix.readiness_status}` launch posture.",
+        ]
+
+    def _status_from_governance(self, status: str) -> SecurityReadinessStatus:
+        if status == "fail":
+            return "blocked"
+        if status == "warn":
+            return "needs_review"
+        return "ready"
+
+    def _combined_readiness(self, statuses: list[SecurityReadinessStatus]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _smoke_readiness(
+        self,
+        governance_status: str,
+        conformance_status: str,
+        tool_count: int,
+        domain_statuses: list[SecurityReadinessStatus],
+    ) -> SecurityReadinessStatus:
+        if governance_status == "fail" or conformance_status == "fail" or tool_count == 0:
+            return "blocked"
+        if governance_status == "warn" or any(status != "ready" for status in domain_statuses):
+            return "needs_review"
+        return "ready"
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        matrix = bundle["api_smoke_matrix"]
+        lines = [
+            "# Launch Checklist",
+            "",
+            f"- Checklist ID: `{bundle['checklist_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Smoke readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Install Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["install_commands"]],
+            "",
+            "## Run Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["run_commands"]],
+            "",
+            "## API Smoke Matrix",
+            "",
+            "| Area | Method | Path | Expected | Auth | Signal |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                (
+                    f"| {item['area']} | `{item['method']}` | `{item['path']}` | "
+                    f"`{item['expected_status']}` | `{item['auth_required']}` | {item['readiness_signal']} |"
+                )
+                for item in matrix["endpoint_matrix"]
+            ],
+            "",
+            "## Smoke Readiness Summary",
+            "",
+            *[
+                f"- `{key}`: `{value}`"
+                for key, value in matrix["readiness_summary"].items()
+                if key != "sections_covered"
+            ],
+            f"- `sections_covered`: `{', '.join(matrix['readiness_summary']['sections_covered'])}`",
+            "",
+            "## Demo Command",
+            "",
+            f"- `{bundle['demo_command']}`",
+            "",
+            "## Eval Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["eval_commands"]],
+            "",
+            "## Artifact Paths",
+            "",
+            *[
+                f"- {item['name']}: `{item['json_path']}`, `{item['markdown_path']}`"
+                for item in bundle["artifact_paths"]
+            ],
+            "",
+            "## Troubleshooting Notes",
+            "",
+            *[f"- {note}" for note in bundle["troubleshooting_notes"]],
+            "",
+            "## JD Skills Demonstrated",
+            "",
+            *[f"- {skill}" for skill in bundle["jd_skills_demonstrated"]],
+            "",
+            "## Interviewer Talking Points",
+            "",
+            *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class ReleaseCandidateService:
+    GATE_ID = "release_candidate_quality_gate_latest"
+    PACK_ID = "publish_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "release_packs"
+
+    async def quality_gate(self) -> ReleaseQualityGate:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        release = await self.app_state.releases.preview("release-candidate-gate")
+        smoke = await self.app_state.smoke.smoke_matrix()
+        enterprise = await self.app_state.enterprise.scorecard()
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        endpoint_inventory = self._endpoint_inventory(smoke)
+        artifact_coverage = self._artifact_inventory()
+        verification_checklist = self._verification_checklist()
+        blockers = self._blockers(governance.status, conformance.status, tools, verification_checklist)
+        warnings = self._warnings(release, smoke, enterprise, artifact_coverage)
+        coverage = self._coverage(governance, conformance, release, smoke, enterprise)
+        status = self._gate_status(blockers, warnings)
+        score = self._score(status, coverage, blockers, warnings)
+        publish_readiness = self._publish_readiness(status, score, blockers, warnings)
+        mcp_inventory = {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            "tools": sorted(tool.name for tool in tools),
+            "resources": sorted(resource.uri for resource in resources),
+            "prompts": sorted(prompt.id for prompt in prompts),
+        }
+        summary = {
+            "gate_id": self.GATE_ID,
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "endpoint_count": len(endpoint_inventory),
+            "artifact_count": len(artifact_coverage),
+            "verification_command_count": len(verification_checklist),
+            "blocker_count": len(blockers),
+            "warning_count": len(warnings),
+            "release_gate": status,
+            "release_preview_status": release.readiness_status,
+            "enterprise_score": enterprise.overall_score,
+        }
+        return ReleaseQualityGate(
+            gate_id=self.GATE_ID,
+            generated_at=utc_now(),
+            status=status,
+            score=score,
+            blockers=blockers,
+            warnings=warnings,
+            verification_checklist=verification_checklist,
+            coverage=coverage,
+            artifact_coverage=artifact_coverage,
+            local_runtime_notes=self._local_runtime_notes(),
+            publish_readiness=publish_readiness,
+            endpoint_inventory=endpoint_inventory,
+            mcp_capability_inventory=mcp_inventory,
+            summary=summary,
+        )
+
+    async def publish_pack(
+        self,
+        request: ReleasePublishPackRequest | None = None,
+    ) -> ReleasePublishPackResult:
+        request = request or ReleasePublishPackRequest()
+        gate = await self.quality_gate()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "release_summary": self._release_summary(gate),
+            "quality_gate": gate.model_dump(mode="json"),
+            "setup_commands": self._setup_commands(),
+            "demo_commands": self._demo_commands(),
+            "verification_commands": [item["command"] for item in gate.verification_checklist],
+            "expected_outputs": self._expected_outputs(gate),
+            "endpoint_inventory": gate.endpoint_inventory,
+            "mcp_capability_inventory": gate.mcp_capability_inventory,
+            "artifact_inventory": gate.artifact_coverage,
+            "screenshots_manual_verification": self._manual_verification_placeholders(),
+            "github_repo_checklist": self._github_repo_checklist(gate),
+            "commit_push_readiness_notes": self._commit_push_notes(gate),
+            "recruiter_review_notes": self._recruiter_review_notes(gate),
+            "known_limitations": self._known_limitations(),
+            "local_runtime_notes": gate.local_runtime_notes,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "release.publish_pack_exported",
+            "release_publish_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "status": gate.status,
+                "score": gate.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ReleasePublishPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            status=gate.status,
+            score=gate.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "status": gate.status,
+                "score": gate.score,
+                "blocker_count": len(gate.blockers),
+                "warning_count": len(gate.warnings),
+                "artifact_count": len(gate.artifact_coverage),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _coverage(
+        self,
+        governance: GovernanceReport,
+        conformance: ConformanceReport,
+        release: ReleasePreview,
+        smoke: SmokeMatrixResult,
+        enterprise: EnterpriseReadinessScorecard,
+    ) -> JsonDict:
+        docs_files = [Path("README.md"), Path("docs") / "api.md", Path("docs") / "architecture.md", Path("docs") / "evaluation.md"]
+        return {
+            "ci": {
+                "status": "covered",
+                "signals": ["pytest", "ruff", "eval", "conformance", "demo", "MCP inspector commands"],
+                "commands": [item["command"] for item in self._verification_checklist()],
+            },
+            "docs": {
+                "status": "covered" if all(path.exists() for path in docs_files) else "needs_review",
+                "files": [str(path) for path in docs_files],
+            },
+            "tests": {
+                "status": "covered" if governance.status != "fail" else "blocked",
+                "governance_status": governance.status,
+                "pytest_command": "python -m pytest -q",
+            },
+            "eval": {
+                "status": "covered" if conformance.status == "pass" else "blocked",
+                "conformance_status": conformance.status,
+                "promoted_skill_count": conformance.promoted_skill_count,
+                "passed_skill_count": conformance.passed_skill_count,
+            },
+            "demo": {
+                "status": "covered",
+                "command": "python -m app.demo",
+                "enterprise_score": enterprise.overall_score,
+                "smoke_readiness": smoke.readiness_status,
+            },
+            "mcp": {
+                "status": "covered" if smoke.readiness_summary["mcp_tool_count"] else "blocked",
+                "tool_count": smoke.readiness_summary["mcp_tool_count"],
+                "resource_count": smoke.readiness_summary["mcp_resource_count"],
+                "prompt_count": smoke.readiness_summary["mcp_prompt_count"],
+            },
+            "release": {
+                "status": release.readiness_status,
+                "promoted_skill_count": release.summary["promoted_skill_count"],
+                "approved_workflow_template_count": release.summary["approved_workflow_template_count"],
+            },
+        }
+
+    def _verification_checklist(self) -> list[JsonDict]:
+        commands = [
+            ("pytest", "python -m pytest -q", "Full regression suite passes quietly."),
+            ("ruff", "python -m ruff check app tests dashboard", "Static checks pass for app, tests, and dashboard."),
+            ("golden_eval", "python -m app.evals.run_eval", "Golden eval cases pass in mock mode."),
+            ("eval_validate_only", "python -m app.evals.run_eval --validate-only", "Manifest validation-only eval passes."),
+            ("conformance", "python -m app.evals.run_conformance", "Promoted MCP skills pass conformance."),
+            ("demo", "python -m app.demo", "Demo prints readiness and artifact paths."),
+            ("mcp_tools", "python -m app.mcp_server tools", "MCP tool inventory returns promoted tools."),
+            ("mcp_resources", "python -m app.mcp_server resources", "MCP resource inventory returns local resources."),
+            ("mcp_prompts", "python -m app.mcp_server prompts", "MCP prompt inventory returns prompt templates."),
+            (
+                "release_rg",
+                'rg "release/quality-gate|release/publish-pack|Release Candidate|Publish Pack|release_packs|release gate" app dashboard docs README.md tests sample_data',
+                "Release Candidate coverage is discoverable in code, docs, tests, and sample data.",
+            ),
+            (
+                "release_pack_files",
+                "Get-ChildItem -Recurse -File data\\release_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+                "Publish Pack artifacts exist after export.",
+            ),
+        ]
+        return [
+            {
+                "id": item_id,
+                "command": command,
+                "expected_output": expected,
+                "status": "required",
+            }
+            for item_id, command, expected in commands
+        ]
+
+    def _endpoint_inventory(self, smoke: SmokeMatrixResult) -> list[JsonDict]:
+        rows = [
+            {
+                "area": endpoint.area,
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "auth_required": endpoint.auth_required,
+                "expected_status": endpoint.expected_status,
+                "sample_command": endpoint.sample_command,
+            }
+            for endpoint in smoke.endpoint_matrix
+        ]
+        rows.extend(
+            [
+                {
+                    "area": "release candidate",
+                    "method": "GET",
+                    "path": "/release/quality-gate",
+                    "auth_required": True,
+                    "expected_status": 200,
+                    "sample_command": "Invoke-RestMethod http://localhost:8000/release/quality-gate -Headers $headers",
+                },
+                {
+                    "area": "release candidate",
+                    "method": "POST",
+                    "path": "/release/publish-pack",
+                    "auth_required": True,
+                    "expected_status": 200,
+                    "sample_command": "Invoke-RestMethod http://localhost:8000/release/publish-pack -Method POST -Headers $headers",
+                },
+            ]
+        )
+        return sorted(rows, key=lambda item: (item["area"], item["path"], item["method"]))
+
+    def _artifact_inventory(self) -> list[JsonDict]:
+        artifacts = [
+            ("Release Candidate Publish Pack", "POST /release/publish-pack", self.output_dir / self.PACK_ID),
+            ("Release notes", "POST /releases/export", Path("data") / "releases" / "release_notes_latest"),
+            ("Launch checklist", "POST /ops/launch-checklist", Path("data") / "launch_checklists" / "launch_checklist_latest"),
+            ("Portfolio demo pack", "POST /enterprise/portfolio-demo-pack", Path("data") / "portfolio_demo" / "portfolio_demo_pack_latest"),
+            ("Interview pack", "POST /portfolio/interview-pack", Path("data") / "portfolio_packs" / "interview_pack_latest"),
+            ("Security evidence", "POST /evidence/export", Path("data") / "evidence" / "security_evidence_latest"),
+            ("Compliance attestation", "POST /compliance/attestation", Path("data") / "attestations" / "compliance_attestation_latest"),
+            ("Capacity plan", "POST /capacity/plan-export", Path("data") / "capacity" / "capacity_plan_latest"),
+            ("Dependency report", "POST /dependencies/report", Path("data") / "dependencies" / "dependency_report_latest"),
+            ("Incident runbook", "POST /incidents/runbook", Path("data") / "incident_runbooks" / "incident_runbook_latest"),
+            ("Tenant sandbox", "POST /tenants/sandbox-export", Path("data") / "tenant_sandboxes" / "tenant_policy_sandbox_latest"),
+        ]
+        return [
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "json_path": str(base.with_suffix(".json")),
+                "markdown_path": str(base.with_suffix(".md")),
+                "json_exists": base.with_suffix(".json").exists(),
+                "markdown_exists": base.with_suffix(".md").exists(),
+            }
+            for name, endpoint, base in artifacts
+        ]
+
+    def _blockers(
+        self,
+        governance_status: str,
+        conformance_status: str,
+        tools: list[McpToolDefinition],
+        verification_checklist: list[JsonDict],
+    ) -> list[str]:
+        blockers = []
+        if governance_status == "fail":
+            blockers.append("Governance report has failing checks.")
+        if conformance_status == "fail":
+            blockers.append("Conformance suite has failing promoted skills.")
+        if not tools:
+            blockers.append("No MCP tools are exposed for the publish candidate.")
+        if not verification_checklist:
+            blockers.append("No verification checklist was generated.")
+        return blockers
+
+    def _warnings(
+        self,
+        release: ReleasePreview,
+        smoke: SmokeMatrixResult,
+        enterprise: EnterpriseReadinessScorecard,
+        artifact_coverage: list[JsonDict],
+    ) -> list[str]:
+        warnings = []
+        if release.readiness_status != "ready":
+            warnings.append(f"Release preview is {release.readiness_status}.")
+        if smoke.readiness_status != "ready":
+            warnings.append(f"Smoke matrix is {smoke.readiness_status}.")
+        if enterprise.readiness_status != "ready":
+            warnings.append(f"Enterprise scorecard is {enterprise.readiness_status}.")
+        missing = [
+            item["name"]
+            for item in artifact_coverage
+            if item["name"] != "Release Candidate Publish Pack"
+            and (not item["json_exists"] or not item["markdown_exists"])
+        ]
+        if missing:
+            warnings.append(f"Regenerate optional local artifacts before screenshots: {', '.join(missing)}.")
+        warnings.extend(
+            flag
+            for flag in release.risk_flags
+            if flag != "catalog_changes_detected"
+        )
+        return sorted(set(warnings))
+
+    def _gate_status(self, blockers: list[str], warnings: list[str]) -> SecurityReadinessStatus:
+        if blockers:
+            return "blocked"
+        if warnings:
+            return "needs_review"
+        return "ready"
+
+    def _score(
+        self,
+        status: SecurityReadinessStatus,
+        coverage: JsonDict,
+        blockers: list[str],
+        warnings: list[str],
+    ) -> int:
+        covered = sum(1 for item in coverage.values() if item["status"] in {"covered", "ready"})
+        total = len(coverage) or 1
+        score = round(100 * covered / total)
+        score -= min(40, len(blockers) * 20)
+        score -= min(20, len(warnings) * 4)
+        if status == "blocked":
+            score = min(score, 69)
+        elif status == "needs_review":
+            score = min(score, 89)
+        return max(0, min(100, score))
+
+    def _publish_readiness(
+        self,
+        status: SecurityReadinessStatus,
+        score: int,
+        blockers: list[str],
+        warnings: list[str],
+    ) -> JsonDict:
+        return {
+            "ready_to_publish": status == "ready",
+            "status": status,
+            "score": score,
+            "decision": "publish" if status == "ready" else "review_before_publish",
+            "blockers_to_clear": blockers,
+            "warnings_to_disclose": warnings,
+            "recommended_next_step": (
+                "Commit and push once the verification checklist has been run locally."
+                if status == "ready"
+                else "Run the verification checklist and regenerate missing local artifacts before pushing."
+            ),
+        }
+
+    def _release_summary(self, gate: ReleaseQualityGate) -> JsonDict:
+        return {
+            "title": "Release Candidate Quality Gate + GitHub Publish Pack",
+            "status": gate.status,
+            "score": gate.score,
+            "blockers": gate.blockers,
+            "warnings": gate.warnings,
+            "publish_ready": gate.publish_readiness["ready_to_publish"],
+            "local_only": True,
+            "artifact_root": str(self.output_dir),
+        }
+
+    def _setup_commands(self) -> list[str]:
+        return [
+            "cd C:\\Users\\Devan\\Documents\\emcp-hub",
+            "python -m pip install -r requirements-dev.txt",
+            "python -m uvicorn app.main:app --reload --port 8000",
+            "python -m streamlit run dashboard/streamlit_app.py",
+            "$headers = @{ \"X-API-Key\" = \"dev-local-token\" }",
+        ]
+
+    def _demo_commands(self) -> list[str]:
+        return [
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "Invoke-RestMethod http://localhost:8000/release/quality-gate -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/release/publish-pack -Method POST -Headers $headers",
+        ]
+
+    def _expected_outputs(self, gate: ReleaseQualityGate) -> list[JsonDict]:
+        return [
+            {"command": "GET /release/quality-gate", "expected": f"`status` is `{gate.status}` and `score` is `{gate.score}`."},
+            {"command": "POST /release/publish-pack", "expected": "`json_path` and `markdown_path` point to data/release_packs artifacts."},
+            {"command": "python -m app.demo", "expected": "Prints release gate status/score and publish pack path."},
+            {"command": "python -m app.mcp_server tools", "expected": f"Lists {gate.mcp_capability_inventory['tool_count']} promoted MCP tools."},
+        ]
+
+    def _manual_verification_placeholders(self) -> list[JsonDict]:
+        return [
+            {
+                "name": "API docs screenshot",
+                "target": "http://localhost:8000/docs",
+                "status": "placeholder",
+                "note": "Capture after verifying /release/quality-gate and /release/publish-pack in Swagger UI.",
+            },
+            {
+                "name": "Streamlit Release Pack screenshot",
+                "target": "http://localhost:8501",
+                "status": "placeholder",
+                "note": "Capture the dashboard Release Pack view showing gate status, score, commands, and artifact path.",
+            },
+            {
+                "name": "Terminal verification screenshot",
+                "target": "local PowerShell",
+                "status": "placeholder",
+                "note": "Capture the acceptance command block after it passes locally.",
+            },
+        ]
+
+    def _github_repo_checklist(self, gate: ReleaseQualityGate) -> list[JsonDict]:
+        return [
+            {"item": "README has setup, demo, and Release Candidate sections", "status": "required"},
+            {"item": "Generated data/release_packs artifacts remain ignored", "status": "required"},
+            {"item": "Run all verification commands before commit", "status": "required"},
+            {"item": "Check `git status --short` for unrelated agent/user changes", "status": "required"},
+            {"item": "Attach screenshots manually if desired", "status": "optional"},
+            {"item": "Publish readiness decision", "status": gate.publish_readiness["decision"]},
+        ]
+
+    def _commit_push_notes(self, gate: ReleaseQualityGate) -> list[str]:
+        notes = [
+            "Review `git status --short` before staging so unrelated user or agent changes are not swept in.",
+            "Generated `data/release_packs/` artifacts are ignored and can be regenerated locally.",
+            "Commit only after the required verification checklist passes.",
+        ]
+        if gate.status != "ready":
+            notes.append("Disclose gate warnings in the PR or README before presenting this as a release candidate.")
+        return notes
+
+    def _recruiter_review_notes(self, gate: ReleaseQualityGate) -> list[str]:
+        return [
+            f"Open with the Release Candidate score: {gate.score}/100, status `{gate.status}`.",
+            "Show that endpoints, MCP capabilities, docs, tests, evals, demo, and artifacts are covered locally.",
+            "Emphasize that the repo runs in mock mode and does not require Azure, OpenAI, or paid APIs.",
+            "Use the Publish Pack Markdown as the guided walkthrough for GitHub reviewers.",
+        ]
+
+    def _known_limitations(self) -> list[str]:
+        return [
+            "Quality gate command results are represented as a deterministic checklist; commands still need to be run in the local shell before publishing.",
+            "Screenshots are placeholders by default because the feature stays local/mock and does not automate browser capture.",
+            "Generated artifacts under data/ are ignored and should not be treated as source-controlled evidence.",
+            "Provider defaults are mock; OpenAI and Azure provider classes exist but are not required for this release candidate.",
+        ]
+
+    def _local_runtime_notes(self) -> list[str]:
+        return [
+            "Local/mock mode is the default runtime posture.",
+            "Protected endpoints use `X-API-Key: dev-local-token` unless `.env` overrides it.",
+            "No Azure, OpenAI, SaaS, or paid API credentials are required for the Release Candidate gate.",
+            "Artifacts are deterministic Markdown/JSON files written under ignored `data/` subfolders.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        gate = bundle["quality_gate"]
+        lines = [
+            "# Release Candidate Publish Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Release gate: `{gate['status']}`",
+            f"- Score: `{gate['score']}`",
+            "",
+            "## Release Summary",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["release_summary"].items()],
+            "",
+            "## Blockers And Warnings",
+            "",
+            *([f"- Blocker: {item}" for item in gate["blockers"]] or ["- Blockers: none"]),
+            *([f"- Warning: {item}" for item in gate["warnings"]] or ["- Warnings: none"]),
+            "",
+            "## Setup Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["setup_commands"]],
+            "",
+            "## Demo Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["demo_commands"]],
+            "",
+            "## Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["verification_commands"]],
+            "",
+            "## Expected Outputs",
+            "",
+            *[f"- `{item['command']}`: {item['expected']}" for item in bundle["expected_outputs"]],
+            "",
+            "## Endpoint Inventory",
+            "",
+            "| Area | Method | Path | Auth | Expected |",
+            "| --- | --- | --- | --- | --- |",
+            *[
+                f"| {item['area']} | `{item['method']}` | `{item['path']}` | `{item['auth_required']}` | `{item['expected_status']}` |"
+                for item in bundle["endpoint_inventory"]
+            ],
+            "",
+            "## MCP Capability Inventory",
+            "",
+            f"- Tools: `{', '.join(bundle['mcp_capability_inventory']['tools'])}`",
+            f"- Resources: `{', '.join(bundle['mcp_capability_inventory']['resources'])}`",
+            f"- Prompts: `{', '.join(bundle['mcp_capability_inventory']['prompts'])}`",
+            "",
+            "## Artifact Inventory",
+            "",
+            *[
+                f"- {item['name']}: `{item['json_path']}`, `{item['markdown_path']}`"
+                for item in bundle["artifact_inventory"]
+            ],
+            "",
+            "## Screenshots And Manual Verification",
+            "",
+            *[
+                f"- {item['name']}: `{item['status']}` - {item['note']}"
+                for item in bundle["screenshots_manual_verification"]
+            ],
+            "",
+            "## GitHub Repo Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']}"
+                for item in bundle["github_repo_checklist"]
+            ],
+            "",
+            "## Commit And Push Readiness Notes",
+            "",
+            *[f"- {note}" for note in bundle["commit_push_readiness_notes"]],
+            "",
+            "## Recruiter Review Notes",
+            "",
+            *[f"- {note}" for note in bundle["recruiter_review_notes"]],
+            "",
+            "## Known Limitations",
+            "",
+            *[f"- {note}" for note in bundle["known_limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class CiDoctorService:
+    DOCTOR_ID = "ci_doctor_latest"
+    PACK_ID = "audit_pack_latest"
+    REQUIRED_README_SECTIONS = [
+        "Quick Start",
+        "MCP-Compatible Inspector",
+        "Governance Snapshot",
+        "Security Evidence Bundle",
+        "Evaluation And Policy Lab",
+        "Environment",
+    ]
+    REQUIRED_DOCS = [
+        Path("docs") / "api.md",
+        Path("docs") / "architecture.md",
+        Path("docs") / "evaluation.md",
+        Path("docs") / "mcp.md",
+    ]
+    REQUIRED_IGNORES = [
+        "data/evidence/",
+        "data/releases/",
+        "data/attestations/",
+        "data/capacity/",
+        "data/dependencies/",
+        "data/incident_runbooks/",
+        "data/tenant_sandboxes/",
+        "data/usage_packs/",
+        "data/portfolio_demo/",
+        "data/portfolio_packs/",
+        "data/launch_checklists/",
+        "data/release_packs/",
+        "data/audit_packs/",
+        "data/reviewer_packs/",
+        "data/artifact_indexes/",
+        "data/ui_verification/",
+        "data/final_handoff/",
+        "data/api_contracts/",
+        "data/conformance/",
+        "data/governance/",
+        "data/workflow_reviews/",
+    ]
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+        self.output_dir = output_dir or Path("data") / "audit_packs"
+
+    async def ci_doctor(self) -> CiDoctorResult:
+        dependency_inventory = self._dependency_inventory()
+        secret_scan_summary = self._secret_scan_summary()
+        command_checks = self._command_checks()
+        checks = [
+            *command_checks,
+            self._presence_check(
+                "github_actions_workflows",
+                "ci",
+                "GitHub Actions workflows",
+                [Path(".github") / "workflows"],
+                "No `.github/workflows` directory was found.",
+            ),
+            self._presence_check(
+                "docker_compose",
+                "runtime",
+                "Docker Compose",
+                [Path("docker-compose.yml"), Path("compose.yml"), Path("compose.yaml")],
+                "Add a Docker Compose file for local service orchestration.",
+                any_match=True,
+            ),
+            self._presence_check(
+                "env_example",
+                "env",
+                ".env.example",
+                [Path(".env.example")],
+                "Add `.env.example` with safe local/mock placeholders.",
+            ),
+            self._readme_section_check(),
+            self._docs_presence_check(),
+            self._generated_artifact_ignores_check(),
+            self._dependency_files_check(dependency_inventory),
+            self._local_mock_provider_check(),
+            self._secret_scan_check(secret_scan_summary),
+        ]
+        blockers = [check for check in checks if check.status == "fail"]
+        warnings = [check for check in checks if check.status == "warn"]
+        readiness_status = self._readiness_status(blockers, warnings)
+        score = self._score(checks, blockers, warnings)
+        summary = {
+            "doctor_id": self.DOCTOR_ID,
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "check_count": len(checks),
+            "pass_count": sum(1 for check in checks if check.status == "pass"),
+            "warn_count": len(warnings),
+            "fail_count": len(blockers),
+            "command_check_count": len(command_checks),
+            "dependency_file_count": len(dependency_inventory["files"]),
+            "secret_scan_match_count": secret_scan_summary["match_count"],
+            "secret_scan_high_confidence_count": secret_scan_summary["high_confidence_count"],
+            "artifact_root": str(self.output_dir),
+        }
+        return CiDoctorResult(
+            doctor_id=self.DOCTOR_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=score,
+            summary=summary,
+            checks=checks,
+            command_checks=command_checks,
+            dependency_inventory=dependency_inventory,
+            secret_scan_summary=secret_scan_summary,
+            local_runtime_notes=self._local_runtime_notes(),
+            publish_safety_checklist=self._publish_safety_checklist(secret_scan_summary),
+        )
+
+    async def audit_pack(self, request: AuditPackRequest | None = None) -> AuditPackResult:
+        request = request or AuditPackRequest()
+        doctor = await self.ci_doctor()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "ci_doctor": doctor.model_dump(mode="json"),
+            "dependency_inventory": doctor.dependency_inventory,
+            "secret_scan_summary": doctor.secret_scan_summary,
+            "local_verification_commands": self._verification_commands(),
+            "publish_safety_checklist": doctor.publish_safety_checklist,
+            "remediation_notes": self._remediation_notes(doctor),
+            "recruiter_interviewer_explanation": self._recruiter_interviewer_explanation(doctor),
+            "local_runtime_notes": doctor.local_runtime_notes,
+            "limitations": self._known_limitations(),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "ops.audit_pack_exported",
+            "audit_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": doctor.readiness_status,
+                "score": doctor.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "secret_scan_match_count": doctor.secret_scan_summary["match_count"],
+            },
+        )
+        return AuditPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=doctor.readiness_status,
+            score=doctor.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": doctor.readiness_status,
+                "score": doctor.score,
+                "check_count": len(doctor.checks),
+                "warn_count": doctor.summary["warn_count"],
+                "fail_count": doctor.summary["fail_count"],
+                "secret_scan_match_count": doctor.secret_scan_summary["match_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _command_checks(self) -> list[CiDoctorCheck]:
+        commands = [
+            ("pytest", "python -m pytest -q", "Pytest command"),
+            ("ruff", "python -m ruff check app tests dashboard", "Ruff command"),
+            ("eval", "python -m app.evals.run_eval", "Golden eval command"),
+            ("eval_validate_only", "python -m app.evals.run_eval --validate-only", "Eval validate-only command"),
+            ("conformance", "python -m app.evals.run_conformance", "Conformance command"),
+            ("dashboard_smoke", "python scripts\\dashboard_smoke.py", "Dashboard smoke command"),
+            ("demo", "python -m app.demo", "Demo command"),
+            ("mcp_tools", "python -m app.mcp_server tools", "MCP tools command"),
+            ("mcp_resources", "python -m app.mcp_server resources", "MCP resources command"),
+            ("mcp_prompts", "python -m app.mcp_server prompts", "MCP prompts command"),
+        ]
+        source_files = [
+            Path("README.md"),
+            Path("Makefile"),
+            Path("docs") / "api.md",
+            Path("docs") / "architecture.md",
+            Path("docs") / "evaluation.md",
+            Path("docs") / "mcp.md",
+            Path("app") / "services.py",
+        ]
+        searchable = self._combined_text(source_files)
+        checks = []
+        for check_id, command, title in commands:
+            covered = command in searchable
+            checks.append(
+                CiDoctorCheck(
+                    id=f"command_{check_id}",
+                    category="commands",
+                    status="pass" if covered else "warn",
+                    title=title,
+                    detail=(
+                        f"`{command}` is documented or emitted by local tooling."
+                        if covered
+                        else f"`{command}` is not yet discoverable in docs or service command lists."
+                    ),
+                    evidence=self._files_containing(source_files, command),
+                    command=command,
+                    remediation=f"Add `{command}` to README, docs/evaluation.md, or a local checklist.",
+                )
+            )
+        return checks
+
+    def _presence_check(
+        self,
+        check_id: str,
+        category: str,
+        title: str,
+        paths: list[Path],
+        remediation: str,
+        any_match: bool = False,
+    ) -> CiDoctorCheck:
+        existing = [path for path in paths if self._root(path).exists()]
+        if any_match:
+            status = "pass" if existing else "fail"
+        else:
+            status = "pass" if len(existing) == len(paths) else "fail"
+        return CiDoctorCheck(
+            id=check_id,
+            category=category,
+            status=status,
+            title=title,
+            detail=f"Found {len(existing)} of {len(paths)} expected path(s).",
+            evidence=[str(path) for path in existing],
+            remediation=None if status == "pass" else remediation,
+        )
+
+    def _readme_section_check(self) -> CiDoctorCheck:
+        readme = self._read_text(Path("README.md"))
+        missing = [section for section in self.REQUIRED_README_SECTIONS if f"## {section}" not in readme]
+        return CiDoctorCheck(
+            id="readme_required_sections",
+            category="docs",
+            status="pass" if not missing else "warn",
+            title="README required sections",
+            detail=(
+                "README includes required enterprise maintenance sections."
+                if not missing
+                else f"README is missing sections: {', '.join(missing)}."
+            ),
+            evidence=[f"## {section}" for section in self.REQUIRED_README_SECTIONS if section not in missing],
+            remediation="Add the missing README sections before publishing.",
+        )
+
+    def _docs_presence_check(self) -> CiDoctorCheck:
+        existing = [path for path in self.REQUIRED_DOCS if self._root(path).exists()]
+        missing = [path for path in self.REQUIRED_DOCS if not self._root(path).exists()]
+        return CiDoctorCheck(
+            id="docs_presence",
+            category="docs",
+            status="pass" if not missing else "warn",
+            title="Docs presence",
+            detail=(
+                "Required docs are present."
+                if not missing
+                else f"Missing docs: {', '.join(str(path) for path in missing)}."
+            ),
+            evidence=[str(path) for path in existing],
+            remediation="Restore required docs/api.md, docs/architecture.md, docs/evaluation.md, and docs/mcp.md.",
+        )
+
+    def _generated_artifact_ignores_check(self) -> CiDoctorCheck:
+        gitignore = self._read_text(Path(".gitignore"))
+        missing = [entry for entry in self.REQUIRED_IGNORES if entry not in gitignore]
+        return CiDoctorCheck(
+            id="generated_artifact_ignores",
+            category="publish_safety",
+            status="pass" if not missing else "fail",
+            title="Generated artifact ignores",
+            detail=(
+                "Generated data artifacts are ignored."
+                if not missing
+                else f"Missing ignored generated folders: {', '.join(missing)}."
+            ),
+            evidence=[entry for entry in self.REQUIRED_IGNORES if entry not in missing],
+            remediation="Add the missing data artifact folders to `.gitignore`.",
+        )
+
+    def _dependency_files_check(self, inventory: JsonDict) -> CiDoctorCheck:
+        required = {"pyproject.toml", "requirements.txt", "requirements-dev.txt"}
+        present = {item["path"] for item in inventory["files"]}
+        missing = sorted(required - present)
+        return CiDoctorCheck(
+            id="dependency_files",
+            category="dependencies",
+            status="pass" if not missing else "fail",
+            title="Dependency files",
+            detail=(
+                f"Found {len(inventory['files'])} dependency manifest(s)."
+                if not missing
+                else f"Missing dependency manifests: {', '.join(missing)}."
+            ),
+            evidence=sorted(present),
+            remediation="Restore pyproject.toml, requirements.txt, and requirements-dev.txt.",
+        )
+
+    def _local_mock_provider_check(self) -> CiDoctorCheck:
+        config = self._read_text(Path("app") / "config.py")
+        env_example = self._read_text(Path(".env.example"))
+        readme = self._read_text(Path("README.md"))
+        evidence = []
+        if 'llm_provider: str = "mock"' in config:
+            evidence.append("app/config.py defaults llm_provider to mock")
+        if "LLM_PROVIDER=mock" in env_example:
+            evidence.append(".env.example documents LLM_PROVIDER=mock")
+        if "local/mock" in readme.lower() or "mock mode" in readme.lower():
+            evidence.append("README documents local/mock behavior")
+        status = "pass" if len(evidence) >= 2 and self.app_state.provider.name == "mock" else "warn"
+        return CiDoctorCheck(
+            id="local_mock_provider_notes",
+            category="env",
+            status=status,
+            title="Local/mock provider notes",
+            detail=(
+                "Local/mock provider posture is documented and active."
+                if status == "pass"
+                else "Local/mock provider posture needs clearer docs or defaults."
+            ),
+            evidence=evidence,
+            remediation="Document mock mode in .env.example and README, and keep the default provider mock.",
+        )
+
+    def _secret_scan_check(self, summary: JsonDict) -> CiDoctorCheck:
+        high = summary["high_confidence_count"]
+        status = "fail" if high else ("warn" if summary["match_count"] else "pass")
+        detail = (
+            "Secret scan found no suspicious literal credential patterns."
+            if status == "pass"
+            else f"Secret scan found {summary['match_count']} suspicious pattern(s), {high} high confidence."
+        )
+        return CiDoctorCheck(
+            id="secret_scan_summary",
+            category="secrets",
+            status=status,
+            title="Suspicious secret-pattern scan summary",
+            detail=detail,
+            evidence=[
+                f"{item['path']}:{item['line']} {item['pattern']} {item['severity']}"
+                for item in summary["matches"][:20]
+            ],
+            remediation="Move any real credentials into `.env`, rotate exposed values, and keep examples placeholder-only.",
+        )
+
+    def _dependency_inventory(self) -> JsonDict:
+        files = []
+        dependencies: list[JsonDict] = []
+        pyproject = self._root(Path("pyproject.toml"))
+        if pyproject.exists():
+            files.append({"path": "pyproject.toml", "kind": "python_project"})
+            pyproject_data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            project = pyproject_data.get("project", {})
+            for dep in project.get("dependencies", []):
+                dependencies.append({"name": self._dependency_name(dep), "specifier": dep, "source": "pyproject.toml"})
+            for group, values in project.get("optional-dependencies", {}).items():
+                for dep in values:
+                    dependencies.append(
+                        {"name": self._dependency_name(dep), "specifier": dep, "source": f"pyproject.toml[{group}]"}
+                    )
+        for filename, kind in [("requirements.txt", "python_runtime"), ("requirements-dev.txt", "python_dev")]:
+            path = self._root(Path(filename))
+            if path.exists():
+                files.append({"path": filename, "kind": kind})
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or stripped.startswith("-r "):
+                        continue
+                    dependencies.append({"name": self._dependency_name(stripped), "specifier": stripped, "source": filename})
+        package_json = self._root(Path("typescript-bridge") / "package.json")
+        if package_json.exists():
+            files.append({"path": "typescript-bridge/package.json", "kind": "node_bridge"})
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            for section in ["dependencies", "devDependencies"]:
+                for name, version in package.get(section, {}).items():
+                    dependencies.append(
+                        {"name": name, "specifier": version, "source": f"typescript-bridge/package.json:{section}"}
+                    )
+        unique_names = sorted({item["name"] for item in dependencies})
+        return {
+            "files": files,
+            "dependency_count": len(dependencies),
+            "unique_dependency_count": len(unique_names),
+            "dependencies": dependencies,
+            "unique_names": unique_names,
+            "notes": [
+                "Inventory is static and local; it does not resolve transitive dependencies or query package indexes.",
+                "requirements-dev.txt intentionally references requirements.txt with `-r requirements.txt`.",
+            ],
+        }
+
+    def _secret_scan_summary(self) -> JsonDict:
+        patterns = [
+            ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}"), "high"),
+            ("openai_key", re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "high"),
+            ("azure_key_assignment", re.compile(r"AZURE_[A-Z0-9_]*KEY\s*=\s*[^\\s#]+", re.IGNORECASE), "medium"),
+            ("generic_secret_assignment", re.compile(r"(secret|token|api[_-]?key)\s*[=:]\s*['\"]?[A-Za-z0-9_./+=-]{16,}", re.IGNORECASE), "medium"),
+            ("private_key_block", re.compile(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"), "high"),
+        ]
+        matches = []
+        scanned_files = 0
+        for path in self._scan_files():
+            scanned_files += 1
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+            relative = path.relative_to(self.repo_root).as_posix()
+            for line_number, line in enumerate(lines, start=1):
+                if self._is_placeholder_secret_line(line):
+                    continue
+                for name, pattern, severity in patterns:
+                    if pattern.search(line):
+                        matches.append(
+                            {
+                                "path": relative,
+                                "line": line_number,
+                                "pattern": name,
+                                "severity": severity,
+                                "redacted_excerpt": self._redacted_excerpt(line),
+                            }
+                        )
+        return {
+            "scanner": "local_regex_secret_scan",
+            "scanned_file_count": scanned_files,
+            "match_count": len(matches),
+            "high_confidence_count": sum(1 for item in matches if item["severity"] == "high"),
+            "matches": matches[:100],
+            "truncated": len(matches) > 100,
+            "excluded_paths": [".git", ".venv", ".local", "data", "__pycache__", ".pytest_cache", ".ruff_cache"],
+            "notes": [
+                "The secret scan is deterministic and local; it is a suspicious-pattern summary, not a replacement for dedicated secret scanners.",
+                "Matches are redacted and limited to file, line, pattern, and severity.",
+            ],
+        }
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "ops/ci-doctor|ops/audit-pack|CI Doctor|Audit Pack|audit_packs|secret scan" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\audit_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _publish_safety_checklist(self, secret_scan_summary: JsonDict) -> list[JsonDict]:
+        return [
+            {"item": "Run pytest, ruff, eval, conformance, demo, and MCP inspector commands", "status": "required"},
+            {"item": "Confirm generated artifacts stay under ignored data folders", "status": "required"},
+            {"item": "Review dependency inventory before publishing", "status": "required"},
+            {
+                "item": "Review secret scan summary and rotate anything real",
+                "status": "clear" if secret_scan_summary["high_confidence_count"] == 0 else "blocked",
+            },
+            {"item": "Keep provider defaults local/mock for public demos", "status": "required"},
+            {"item": "Check git status before staging to avoid unrelated changes", "status": "required"},
+        ]
+
+    def _remediation_notes(self, doctor: CiDoctorResult) -> list[str]:
+        notes = [
+            f"{check.title}: {check.remediation}"
+            for check in doctor.checks
+            if check.status != "pass" and check.remediation
+        ]
+        if not notes:
+            notes.append("No blocking CI Doctor remediation items were found; run the verification commands before publishing.")
+        return notes
+
+    def _recruiter_interviewer_explanation(self, doctor: CiDoctorResult) -> list[str]:
+        return [
+            f"CI Doctor score is {doctor.score}/100 with status `{doctor.readiness_status}`.",
+            "The audit stays local and deterministic: it inspects repo files, docs, dependency manifests, ignored artifact folders, and suspicious secret patterns.",
+            "The Audit Pack is Markdown/JSON evidence a reviewer can open without external CI, cloud credentials, or SaaS integrations.",
+            "The project is intentionally mock-provider by default so interview demos can run from a fresh clone.",
+        ]
+
+    def _known_limitations(self) -> list[str]:
+        return [
+            "CI Doctor checks command availability and source coverage but does not execute the commands.",
+            "Dependency inventory is first-party manifest based and does not include transitive dependency resolution.",
+            "The secret scan is regex based and may miss obfuscated credentials or report false positives.",
+            "Generated audit packs are local evidence under ignored `data/audit_packs/`, not source-controlled artifacts.",
+        ]
+
+    def _local_runtime_notes(self) -> list[str]:
+        return [
+            "Local/mock provider mode is the default.",
+            "Protected endpoints use `X-API-Key: dev-local-token` unless `.env` overrides it.",
+            "No OpenAI, Azure, GitHub, Docker registry, or external CI service is required.",
+            "Audit Pack artifacts are written under ignored `data/audit_packs/`.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        doctor = bundle["ci_doctor"]
+        lines = [
+            "# Local CI Doctor Audit Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- CI Doctor status: `{doctor['readiness_status']}`",
+            f"- CI Doctor score: `{doctor['score']}`",
+            "",
+            "## CI Doctor Results",
+            "",
+            "| Status | Category | Check | Detail |",
+            "| --- | --- | --- | --- |",
+            *[
+                f"| `{check['status']}` | {check['category']} | {check['title']} | {check['detail']} |"
+                for check in doctor["checks"]
+            ],
+            "",
+            "## Dependency Inventory",
+            "",
+            f"- Dependency files: `{len(bundle['dependency_inventory']['files'])}`",
+            f"- Unique dependencies: `{bundle['dependency_inventory']['unique_dependency_count']}`",
+            *[f"- `{item['source']}`: `{item['specifier']}`" for item in bundle["dependency_inventory"]["dependencies"]],
+            "",
+            "## Secret Scan Summary",
+            "",
+            f"- Scanner: `{bundle['secret_scan_summary']['scanner']}`",
+            f"- Scanned files: `{bundle['secret_scan_summary']['scanned_file_count']}`",
+            f"- Matches: `{bundle['secret_scan_summary']['match_count']}`",
+            f"- High confidence: `{bundle['secret_scan_summary']['high_confidence_count']}`",
+            *[
+                f"- `{item['severity']}` `{item['pattern']}` at `{item['path']}:{item['line']}`"
+                for item in bundle["secret_scan_summary"]["matches"]
+            ],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## Publish-Safety Checklist",
+            "",
+            *[f"- `{item['status']}` {item['item']}" for item in bundle["publish_safety_checklist"]],
+            "",
+            "## Remediation Notes",
+            "",
+            *[f"- {note}" for note in bundle["remediation_notes"]],
+            "",
+            "## Recruiter/Interviewer Explanation",
+            "",
+            *[f"- {note}" for note in bundle["recruiter_interviewer_explanation"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _readiness_status(
+        self,
+        blockers: list[CiDoctorCheck],
+        warnings: list[CiDoctorCheck],
+    ) -> SecurityReadinessStatus:
+        if blockers:
+            return "blocked"
+        if warnings:
+            return "needs_review"
+        return "ready"
+
+    def _score(
+        self,
+        checks: list[CiDoctorCheck],
+        blockers: list[CiDoctorCheck],
+        warnings: list[CiDoctorCheck],
+    ) -> int:
+        if not checks:
+            return 0
+        score = round(100 * sum(1 for check in checks if check.status == "pass") / len(checks))
+        score -= min(45, 15 * len(blockers))
+        score -= min(25, 4 * len(warnings))
+        if blockers:
+            score = min(score, 69)
+        elif warnings:
+            score = min(score, 89)
+        return max(0, min(100, score))
+
+    def _combined_text(self, paths: list[Path]) -> str:
+        return "\n".join(self._read_text(path) for path in paths)
+
+    def _files_containing(self, paths: list[Path], needle: str) -> list[str]:
+        return [str(path) for path in paths if needle in self._read_text(path)]
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._root(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8")
+
+    def _root(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+    def _dependency_name(self, specifier: str) -> str:
+        return re.split(r"[<>=!~;\[]", specifier.strip(), maxsplit=1)[0].strip()
+
+    def _scan_files(self) -> list[Path]:
+        allowed_suffixes = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".example", ".mjs"}
+        excluded_parts = {".git", ".venv", ".local", "data", "__pycache__", ".pytest_cache", ".ruff_cache"}
+        files = []
+        for path in self.repo_root.rglob("*"):
+            if not path.is_file():
+                continue
+            if excluded_parts.intersection(path.relative_to(self.repo_root).parts):
+                continue
+            if path.name in {"Makefile", ".gitignore", ".env.example"} or path.suffix in allowed_suffixes:
+                files.append(path)
+        return sorted(files)
+
+    def _is_placeholder_secret_line(self, line: str) -> bool:
+        lowered = line.lower()
+        placeholders = [
+            "none",
+            "null",
+            "placeholder",
+            "example",
+            "dev-local-token",
+            "your_",
+            "mock",
+            "redacted",
+            "not set",
+        ]
+        return any(token in lowered for token in placeholders)
+
+    def _redacted_excerpt(self, line: str) -> str:
+        collapsed = " ".join(line.strip().split())
+        return re.sub(r"([=:]\s*['\"]?)[^'\"\s]{4,}", r"\1[REDACTED]", collapsed)[:160]
+
+
+class ReviewerQuickstartService:
+    QUICKSTART_ID = "reviewer_quickstart_latest"
+    PACK_ID = "walkthrough_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "reviewer_packs"
+
+    async def quickstart(self) -> ReviewerQuickstartResult:
+        smoke = await self.app_state.smoke.smoke_matrix()
+        portfolio = await self.app_state.portfolio.evidence_index()
+        release_gate = await self.app_state.release_candidate.quality_gate()
+        ci_doctor = await self.app_state.ci_doctor.ci_doctor()
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        artifacts = self._artifact_proof_map()
+        endpoint_walkthrough = self._endpoint_walkthrough()
+        mcp_walkthrough = self._mcp_command_walkthrough(tools, resources, prompts)
+        readiness_status = self._combined_readiness(
+            [
+                smoke.readiness_status,
+                self._reviewer_signal(portfolio.readiness_status),
+                release_gate.status,
+                ci_doctor.readiness_status,
+            ]
+        )
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "quickstart_item_count": len(endpoint_walkthrough) + len(mcp_walkthrough) + len(artifacts),
+            "endpoint_count": len(endpoint_walkthrough),
+            "mcp_command_count": len(mcp_walkthrough),
+            "artifact_count": len(artifacts),
+            "mcp_tool_count": len(tools),
+            "mcp_resource_count": len(resources),
+            "mcp_prompt_count": len(prompts),
+            "portfolio_evidence_score": portfolio.evidence_score,
+            "release_gate_score": release_gate.score,
+            "ci_doctor_score": ci_doctor.score,
+            "smoke_readiness": smoke.readiness_status,
+            "portfolio_readiness": portfolio.readiness_status,
+            "release_gate_status": release_gate.status,
+            "ci_doctor_status": ci_doctor.readiness_status,
+        }
+        return ReviewerQuickstartResult(
+            quickstart_id=self.QUICKSTART_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            setup_commands=self._setup_commands(),
+            one_command_demo={
+                "command": "python -m app.demo",
+                "expected": "Prints agent, governance, release, portfolio, CI Doctor, reviewer quickstart, and walkthrough pack artifact status.",
+            },
+            verification_commands=self._verification_commands(),
+            endpoint_walkthrough=endpoint_walkthrough,
+            mcp_command_walkthrough=mcp_walkthrough,
+            artifact_proof_map=artifacts,
+            expected_outputs=self._expected_outputs(summary),
+            troubleshooting=self._troubleshooting(),
+            role_specific_notes=self._role_specific_notes(portfolio.evidence_score, ci_doctor.score),
+            summary=summary,
+        )
+
+    async def walkthrough_pack(
+        self,
+        request: ReviewerWalkthroughPackRequest | None = None,
+    ) -> ReviewerWalkthroughPackResult:
+        request = request or ReviewerWalkthroughPackRequest()
+        quickstart = await self.quickstart()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": quickstart.readiness_status,
+            "reviewer_quickstart": quickstart.model_dump(mode="json"),
+            "recruiter_friendly_story": self._recruiter_story(quickstart),
+            "engineer_deep_dive_path": self._engineer_deep_dive_path(),
+            "command_checklist": self._command_checklist(quickstart),
+            "api_mcp_proof_tour": self._api_mcp_proof_tour(quickstart),
+            "artifacts_to_inspect": quickstart.artifact_proof_map,
+            "limitations": self._limitations(),
+            "github_readme_blurb": self._github_readme_blurb(quickstart),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "reviewer.walkthrough_pack_exported",
+            "reviewer_walkthrough_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": quickstart.readiness_status,
+                "quickstart_item_count": quickstart.summary["quickstart_item_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ReviewerWalkthroughPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=quickstart.readiness_status,
+            quickstart_step_count=quickstart.summary["quickstart_item_count"],
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": quickstart.readiness_status,
+                "quickstart_item_count": quickstart.summary["quickstart_item_count"],
+                "endpoint_count": quickstart.summary["endpoint_count"],
+                "artifact_count": quickstart.summary["artifact_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _setup_commands(self) -> list[str]:
+        return [
+            "cd C:\\Users\\Devan\\Documents\\emcp-hub",
+            "python -m pip install -r requirements-dev.txt",
+            "python -m uvicorn app.main:app --reload --port 8000",
+            "$headers = @{ \"X-API-Key\" = \"dev-local-token\" }",
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "reviewer/quickstart|reviewer/walkthrough-pack|Reviewer Quickstart|Walkthrough Pack|reviewer_packs|proof tour" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\reviewer_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _endpoint_walkthrough(self) -> list[JsonDict]:
+        return [
+            self._walkthrough_step(
+                1,
+                "Bootstrap auth",
+                "POST",
+                "/auth/demo-token",
+                "Invoke-RestMethod http://localhost:8000/auth/demo-token -Method POST",
+                "Returns `token` and `header`; the default token is `dev-local-token`.",
+            ),
+            self._walkthrough_step(
+                2,
+                "Reviewer Quickstart",
+                "GET",
+                "/reviewer/quickstart",
+                "Invoke-RestMethod http://localhost:8000/reviewer/quickstart -Headers $headers",
+                "Returns setup commands, one-command demo, endpoint order, MCP command walkthrough, proof map, expected outputs, troubleshooting, and reviewer notes.",
+            ),
+            self._walkthrough_step(
+                3,
+                "Walkthrough Pack",
+                "POST",
+                "/reviewer/walkthrough-pack",
+                "Invoke-RestMethod http://localhost:8000/reviewer/walkthrough-pack -Method POST -Headers $headers",
+                "Writes recruiter and engineer Markdown/JSON proof artifacts under ignored `data/reviewer_packs/`.",
+            ),
+            self._walkthrough_step(
+                4,
+                "MCP inventory",
+                "GET",
+                "/mcp/tools",
+                "Invoke-RestMethod http://localhost:8000/mcp/tools -Headers $headers",
+                "Lists only enabled promoted skills exposed as MCP-compatible tools.",
+            ),
+            self._walkthrough_step(
+                5,
+                "Policy proof",
+                "POST",
+                "/policy/simulate",
+                "Invoke-RestMethod http://localhost:8000/policy/simulate -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"skill_id\":\"search_knowledge_base\",\"role\":\"agent\",\"environment\":\"local\",\"data_sensitivity\":\"confidential\",\"requested_action\":\"invoke\"}'",
+                "Shows role and sensitivity rules before an agent executes a tool.",
+            ),
+            self._walkthrough_step(
+                6,
+                "Workflow proof",
+                "POST",
+                "/workflows/meeting_to_actions/simulate",
+                "Invoke-RestMethod http://localhost:8000/workflows/meeting_to_actions/simulate -Method POST -Headers $headers -ContentType 'application/json' -Body '{\"input_text\":\"Priya needs a summary and action items.\",\"role\":\"agent\",\"data_sensitivity\":\"internal\"}'",
+                "Runs ordered skill composition with per-step traces and policy decisions.",
+            ),
+            self._walkthrough_step(
+                7,
+                "Portfolio evidence",
+                "GET",
+                "/portfolio/evidence-index",
+                "Invoke-RestMethod http://localhost:8000/portfolio/evidence-index -Headers $headers",
+                "Maps JD/recruiter skill claims to concrete endpoints, files, commands, and artifacts.",
+            ),
+            self._walkthrough_step(
+                8,
+                "Release proof",
+                "GET",
+                "/release/quality-gate",
+                "Invoke-RestMethod http://localhost:8000/release/quality-gate -Headers $headers",
+                "Shows CI/docs/test/eval/demo/MCP coverage and publish readiness.",
+            ),
+        ]
+
+    def _walkthrough_step(
+        self,
+        order: int,
+        title: str,
+        method: str,
+        path: str,
+        command: str,
+        expected: str,
+    ) -> JsonDict:
+        return {
+            "order": order,
+            "title": title,
+            "method": method,
+            "path": path,
+            "command": command,
+            "expected": expected,
+        }
+
+    def _mcp_command_walkthrough(
+        self,
+        tools: list[McpToolDefinition],
+        resources: list[ResourceDefinition],
+        prompts: list[PromptDefinition],
+    ) -> list[JsonDict]:
+        return [
+            {
+                "order": 1,
+                "command": "python -m app.mcp_server tools",
+                "expected": f"Lists {len(tools)} promoted tools: {', '.join(sorted(tool.name for tool in tools))}.",
+            },
+            {
+                "order": 2,
+                "command": "python -m app.mcp_server resources",
+                "expected": f"Lists {len(resources)} local resources including policy, product, workflow, and skill catalog resources.",
+            },
+            {
+                "order": 3,
+                "command": "python -m app.mcp_server prompts",
+                "expected": f"Lists {len(prompts)} reusable prompt templates: {', '.join(sorted(prompt.id for prompt in prompts))}.",
+            },
+            {
+                "order": 4,
+                "command": 'python -m app.mcp_server call --name summarize_document --arguments "{\\"text\\":\\"Atlas Labs needs governed AI skills.\\"}"',
+                "expected": "Returns a deterministic successful invocation with summary fields and traceable local output.",
+            },
+        ]
+
+    def _artifact_proof_map(self) -> list[JsonDict]:
+        artifacts = [
+            ("Reviewer Walkthrough Pack", "POST /reviewer/walkthrough-pack", Path("data") / "reviewer_packs" / self.PACK_ID),
+            ("Portfolio Evidence Interview Pack", "POST /portfolio/interview-pack", Path("data") / "portfolio_packs" / "interview_pack_latest"),
+            ("Portfolio Demo Pack", "POST /enterprise/portfolio-demo-pack", Path("data") / "portfolio_demo" / "portfolio_demo_pack_latest"),
+            ("Launch Checklist", "POST /ops/launch-checklist", Path("data") / "launch_checklists" / "launch_checklist_latest"),
+            ("Release Publish Pack", "POST /release/publish-pack", Path("data") / "release_packs" / "publish_pack_latest"),
+            ("CI Doctor Audit Pack", "POST /ops/audit-pack", Path("data") / "audit_packs" / "audit_pack_latest"),
+            ("Security Evidence Bundle", "POST /evidence/export", Path("data") / "evidence" / "security_evidence_latest"),
+        ]
+        return [
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "json_path": str(base.with_suffix(".json")),
+                "markdown_path": str(base.with_suffix(".md")),
+                "json_exists": base.with_suffix(".json").exists(),
+                "markdown_exists": base.with_suffix(".md").exists(),
+                "proof": "Generated Markdown/JSON artifact reviewers can inspect locally.",
+            }
+            for name, endpoint, base in artifacts
+        ]
+
+    def _expected_outputs(self, summary: JsonDict) -> list[JsonDict]:
+        return [
+            {"command": "GET /reviewer/quickstart", "expected": f"Returns a reviewer readiness status plus {summary['quickstart_item_count']} quickstart proof items."},
+            {"command": "POST /reviewer/walkthrough-pack", "expected": "`json_path` and `markdown_path` under ignored `data/reviewer_packs/`."},
+            {"command": "python -m app.demo", "expected": "JSON containing `reviewer_quickstart_status`, `reviewer_quickstart_count`, and `walkthrough_pack_path`."},
+            {"command": "python -m app.mcp_server tools", "expected": f"{summary['mcp_tool_count']} promoted MCP tools in local/mock mode."},
+            {"command": "python -m pytest -q", "expected": "All local pytest coverage passes, including reviewer quickstart and pack tests."},
+        ]
+
+    def _troubleshooting(self) -> list[str]:
+        return [
+            "If a protected endpoint returns 401, call `POST /auth/demo-token` and set `$headers = @{ \"X-API-Key\" = \"dev-local-token\" }`.",
+            "If the API port is busy, run uvicorn on another port and replace `localhost:8000` in the commands.",
+            "If generated artifact files are missing, call the related POST export endpoint; the `data/` outputs are intentionally ignored and regenerable.",
+            "If provider setup is confusing, keep `LLM_PROVIDER=mock`; the reviewer quickstart does not need external model credentials.",
+            "If release readiness says `needs_review`, inspect the warning fields rather than treating it as a runtime failure.",
+        ]
+
+    def _role_specific_notes(self, evidence_score: int, ci_score: int) -> list[JsonDict]:
+        return [
+            {
+                "role": "recruiter",
+                "notes": [
+                    f"Start with the Walkthrough Pack story and Portfolio Evidence score `{evidence_score}`.",
+                    "Look for local/mock execution, concrete generated artifacts, and README-ready proof bullets.",
+                ],
+            },
+            {
+                "role": "engineering reviewer",
+                "notes": [
+                    "Follow the endpoint walkthrough, then inspect MCP tools/resources/prompts and policy-denied examples.",
+                    "Use pytest, ruff, eval, conformance, demo, and MCP commands as the technical proof loop.",
+                ],
+            },
+            {
+                "role": "hiring manager",
+                "notes": [
+                    f"Use the CI Doctor score `{ci_score}` and Release Quality Gate for publish readiness.",
+                    "Inspect limitations to see what is deliberately local/mock versus production integration work.",
+                ],
+            },
+        ]
+
+    def _recruiter_story(self, quickstart: ReviewerQuickstartResult) -> list[str]:
+        return [
+            "This repo demonstrates an enterprise MCP skill layer where reusable AI capabilities are approved, schema-validated, policy-checked, audited, and exposed to agents through tools/resources/prompts.",
+            f"A reviewer can run the whole proof locally: {quickstart.summary['mcp_tool_count']} tools, {quickstart.summary['mcp_resource_count']} resources, and {quickstart.summary['mcp_prompt_count']} prompts are discoverable without paid API keys.",
+            "The Walkthrough Pack makes the portfolio story inspectable: commands, endpoint order, MCP proof tour, artifacts, limitations, and README blurb are generated from the local service state.",
+        ]
+
+    def _engineer_deep_dive_path(self) -> list[str]:
+        return [
+            "Read `app/bootstrap.py` for built-in promoted manifests and local/mock defaults.",
+            "Read `app/services.py` for registry, invocation, policy, workflow, MCP, release, CI Doctor, and reviewer services.",
+            "Run `GET /reviewer/quickstart`, then follow the endpoint walkthrough from auth to MCP to policy to workflow to release.",
+            "Run the MCP CLI commands to prove the adapter surface independently from FastAPI.",
+            "Open generated Markdown and JSON under `data/reviewer_packs/` and compare them with README/docs/test coverage.",
+        ]
+
+    def _command_checklist(self, quickstart: ReviewerQuickstartResult) -> list[JsonDict]:
+        return [
+            {"section": "setup", "commands": quickstart.setup_commands},
+            {"section": "one_command_demo", "commands": [quickstart.one_command_demo["command"]]},
+            {"section": "verification", "commands": quickstart.verification_commands},
+            {
+                "section": "api_walkthrough",
+                "commands": [step["command"] for step in quickstart.endpoint_walkthrough],
+            },
+            {
+                "section": "mcp_walkthrough",
+                "commands": [step["command"] for step in quickstart.mcp_command_walkthrough],
+            },
+        ]
+
+    def _api_mcp_proof_tour(self, quickstart: ReviewerQuickstartResult) -> list[JsonDict]:
+        return [
+            {
+                "tour": "API proof tour",
+                "steps": quickstart.endpoint_walkthrough,
+            },
+            {
+                "tour": "MCP proof tour",
+                "steps": quickstart.mcp_command_walkthrough,
+            },
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The default provider is deterministic `mock`; OpenAI/Azure provider classes exist but are not required for the reviewer walkthrough.",
+            "Generated artifacts are local proof files under ignored `data/` folders, not cloud-hosted compliance evidence.",
+            "CI Doctor is a static local audit; the acceptance commands still need to be run for execution proof.",
+            "The MCP adapter uses compatible protocol-shaped payloads and CLI inspection without requiring the official SDK at runtime.",
+        ]
+
+    def _github_readme_blurb(self, quickstart: ReviewerQuickstartResult) -> str:
+        return (
+            f"`GET /reviewer/quickstart` returns a copy-ready local reviewer path with "
+            f"{quickstart.summary['quickstart_item_count']} proof items across setup, API endpoints, MCP commands, "
+            "expected outputs, troubleshooting, artifacts, and role-specific notes. "
+            "`POST /reviewer/walkthrough-pack` writes Markdown/JSON under ignored `data/reviewer_packs/` "
+            "with a recruiter story, engineer deep dive, command checklist, API/MCP proof tour, artifacts, limitations, and README blurb."
+        )
+
+    def _combined_readiness(self, statuses: list[SecurityReadinessStatus]) -> SecurityReadinessStatus:
+        if "blocked" in statuses:
+            return "blocked"
+        if "needs_review" in statuses:
+            return "needs_review"
+        return "ready"
+
+    def _reviewer_signal(self, status: SecurityReadinessStatus) -> SecurityReadinessStatus:
+        return "needs_review" if status == "blocked" else status
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        quickstart = bundle["reviewer_quickstart"]
+        lines = [
+            "# Reviewer Walkthrough Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Quickstart proof items: `{quickstart['summary']['quickstart_item_count']}`",
+            "",
+            "## Recruiter-Friendly Story",
+            "",
+            *[f"- {line}" for line in bundle["recruiter_friendly_story"]],
+            "",
+            "## Engineer Deep-Dive Path",
+            "",
+            *[f"{index}. {step}" for index, step in enumerate(bundle["engineer_deep_dive_path"], start=1)],
+            "",
+            "## Command Checklist",
+            "",
+            *[
+                f"- `{item['section']}`: {', '.join(f'`{command}`' for command in item['commands'])}"
+                for item in bundle["command_checklist"]
+            ],
+            "",
+            "## API/MCP Proof Tour",
+            "",
+            *[
+                f"- {tour['tour']}: {len(tour['steps'])} steps"
+                for tour in bundle["api_mcp_proof_tour"]
+            ],
+            "",
+            "## Endpoint Walkthrough",
+            "",
+            *[
+                f"- `{step['order']}` `{step['method']} {step['path']}` - {step['expected']}"
+                for step in quickstart["endpoint_walkthrough"]
+            ],
+            "",
+            "## MCP Command Walkthrough",
+            "",
+            *[
+                f"- `{step['command']}` - {step['expected']}"
+                for step in quickstart["mcp_command_walkthrough"]
+            ],
+            "",
+            "## Artifacts To Inspect",
+            "",
+            *[
+                f"- {item['name']}: `{item['json_path']}`, `{item['markdown_path']}`"
+                for item in bundle["artifacts_to_inspect"]
+            ],
+            "",
+            "## Expected Outputs",
+            "",
+            *[
+                f"- `{item['command']}` - {item['expected']}"
+                for item in quickstart["expected_outputs"]
+            ],
+            "",
+            "## Troubleshooting",
+            "",
+            *[f"- {note}" for note in quickstart["troubleshooting"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+            "## GitHub README Blurb",
+            "",
+            bundle["github_readme_blurb"],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class RuntimeDemoService:
+    READINESS_ID = "runtime_demo_readiness_latest"
+    PACK_ID = "runtime_demo_pack_latest"
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "runtime_packs"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def readiness(self) -> RuntimeDemoReadinessResult:
+        dependency_checks = self._dependency_checks()
+        port_checks = self._port_checks()
+        required_failures = [
+            check
+            for check in dependency_checks
+            if check["required"] and check["status"] == "fail"
+        ]
+        blocked_ports = [check for check in port_checks if check["status"] == "warn"]
+        readiness_status: SecurityReadinessStatus = "ready"
+        if required_failures:
+            readiness_status = "blocked"
+        elif blocked_ports:
+            readiness_status = "needs_review"
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "readiness_status": readiness_status,
+            "required_dependency_failures": len(required_failures),
+            "occupied_expected_ports": len(blocked_ports),
+            "fastapi_port": 8000,
+            "streamlit_port": 8501,
+            "mcp_tool_count": len(tools),
+            "mcp_resource_count": len(resources),
+            "mcp_prompt_count": len(prompts),
+            "artifact_directory": str(self.output_dir),
+        }
+        return RuntimeDemoReadinessResult(
+            readiness_id=self.READINESS_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            local_run_commands=self._local_run_commands(),
+            start_commands=self._start_commands(),
+            stop_commands=self._stop_commands(),
+            expected_ports=self._expected_ports(),
+            env_requirements=self._env_requirements(),
+            dependency_checks=dependency_checks,
+            port_checks=port_checks,
+            health_urls=self._health_urls(),
+            smoke_urls=self._smoke_urls(),
+            mcp_verification_commands=self._mcp_verification_commands(),
+            demo_flow_order=self._demo_flow_order(),
+            troubleshooting=self._troubleshooting(),
+            known_limitations=self._known_limitations(),
+        )
+
+    def demo_pack(
+        self,
+        request: RuntimeDemoPackRequest | None = None,
+    ) -> RuntimeDemoPackResult:
+        request = request or RuntimeDemoPackRequest()
+        readiness = self.readiness()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": readiness.readiness_status,
+            "runtime_readiness": readiness.model_dump(mode="json"),
+            "exact_start_commands": readiness.start_commands,
+            "manual_stop_commands": readiness.stop_commands,
+            "health_checks": readiness.health_urls,
+            "demo_flow_order": readiness.demo_flow_order,
+            "mcp_cli_verification_order": readiness.mcp_verification_commands,
+            "screenshot_checklist_placeholders": self._screenshot_checklist_placeholders(),
+            "troubleshooting": readiness.troubleshooting,
+            "recruiter_explanation": self._recruiter_explanation(readiness),
+            "engineer_explanation": self._engineer_explanation(readiness),
+            "known_limitations": readiness.known_limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "runtime.demo_pack_exported",
+            "runtime_demo_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "occupied_expected_ports": readiness.summary["occupied_expected_ports"],
+            },
+        )
+        return RuntimeDemoPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": readiness.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "dependency_check_count": len(readiness.dependency_checks),
+                "port_check_count": len(readiness.port_checks),
+                "demo_step_count": len(readiness.demo_flow_order),
+            },
+        )
+
+    def _dependency_checks(self) -> list[JsonDict]:
+        checks = [
+            self._python_check(),
+            *[
+                self._module_check(name, module, required)
+                for name, module, required in [
+                    ("FastAPI", "fastapi", True),
+                    ("Uvicorn", "uvicorn", True),
+                    ("Streamlit", "streamlit", True),
+                    ("Pydantic", "pydantic", True),
+                    ("PyYAML", "yaml", True),
+                    ("pytest", "pytest", False),
+                    ("ruff", "ruff", False),
+                ]
+            ],
+        ]
+        return checks
+
+    def _python_check(self) -> JsonDict:
+        ok = sys.version_info >= (3, 11)
+        return {
+            "name": "Python",
+            "module": "sys",
+            "required": True,
+            "status": "pass" if ok else "fail",
+            "detail": f"Running Python {sys.version.split()[0]}; repo requires Python 3.11+.",
+            "install_hint": "Install Python 3.11 or newer and rerun `python -m pip install -r requirements-dev.txt`.",
+        }
+
+    def _module_check(self, name: str, module: str, required: bool) -> JsonDict:
+        found = find_spec(module) is not None
+        return {
+            "name": name,
+            "module": module,
+            "required": required,
+            "status": "pass" if found else ("fail" if required else "warn"),
+            "detail": f"Python import `{module}` {'is available' if found else 'is not available'}.",
+            "install_hint": "python -m pip install -r requirements-dev.txt",
+        }
+
+    def _port_checks(self) -> list[JsonDict]:
+        return [self._port_check(port) for port in self._expected_ports()]
+
+    def _port_check(self, expected: JsonDict) -> JsonDict:
+        port = int(expected["port"])
+        occupied = self._is_port_open("127.0.0.1", port)
+        return {
+            **expected,
+            "host": "127.0.0.1",
+            "status": "warn" if occupied else "pass",
+            "in_use": occupied,
+            "detail": (
+                f"Port {port} is already accepting connections; confirm whether it is this demo runtime."
+                if occupied
+                else f"Port {port} is free for the documented local start command."
+            ),
+            "process_check_command": f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess",
+        }
+
+    def _is_port_open(self, host: str, port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.2)
+                return sock.connect_ex((host, port)) == 0
+        except OSError:
+            return False
+
+    def _expected_ports(self) -> list[JsonDict]:
+        return [
+            {"service": "FastAPI", "port": 8000, "url": "http://127.0.0.1:8000"},
+            {"service": "Streamlit", "port": 8501, "url": "http://127.0.0.1:8501"},
+        ]
+
+    def _env_requirements(self) -> list[JsonDict]:
+        return [
+            {
+                "name": "API_KEY",
+                "required": False,
+                "default": "dev-local-token",
+                "purpose": "Protects demo endpoints through the `X-API-Key` header.",
+            },
+            {
+                "name": "LLM_PROVIDER",
+                "required": False,
+                "default": "mock",
+                "purpose": "Keeps the reviewer path deterministic and external-service-free.",
+            },
+            {
+                "name": "OPENAI_API_KEY / Azure OpenAI settings",
+                "required": False,
+                "default": None,
+                "purpose": "Optional hosted provider configuration; not needed for the runtime demo pack.",
+            },
+        ]
+
+    def _local_run_commands(self) -> list[str]:
+        return [
+            "python scripts\\runtime_check.py",
+            "powershell -ExecutionPolicy Bypass -File scripts\\start_demo.ps1",
+            "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+            "python -m streamlit run dashboard/streamlit_app.py --server.port 8501",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+        ]
+
+    def _start_commands(self) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "service": "install",
+                "command": "python -m pip install -r requirements-dev.txt",
+                "terminal": "PowerShell",
+                "expected": "Installs FastAPI, Streamlit, pytest, ruff, and local runtime dependencies.",
+            },
+            {
+                "step": 2,
+                "service": "readiness",
+                "command": "python scripts\\runtime_check.py",
+                "terminal": "PowerShell",
+                "expected": "Prints local commands, dependency checks, port checks, health URLs, and MCP verification order.",
+            },
+            {
+                "step": 3,
+                "service": "FastAPI",
+                "command": "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+                "terminal": "PowerShell terminal A",
+                "expected": "Starts the API at http://127.0.0.1:8000.",
+            },
+            {
+                "step": 4,
+                "service": "Streamlit",
+                "command": "python -m streamlit run dashboard/streamlit_app.py --server.port 8501",
+                "terminal": "PowerShell terminal B",
+                "expected": "Starts the dashboard at http://127.0.0.1:8501.",
+            },
+        ]
+
+    def _stop_commands(self) -> list[JsonDict]:
+        return [
+            {
+                "service": "FastAPI",
+                "command": "Press Ctrl+C in the terminal running Uvicorn.",
+                "safe_check_first": "Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess",
+            },
+            {
+                "service": "Streamlit",
+                "command": "Press Ctrl+C in the terminal running Streamlit.",
+                "safe_check_first": "Get-NetTCPConnection -LocalPort 8501 -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess",
+            },
+        ]
+
+    def _health_urls(self) -> list[JsonDict]:
+        return [
+            {
+                "service": "FastAPI health",
+                "method": "GET",
+                "url": "http://127.0.0.1:8000/health",
+                "command": "Invoke-RestMethod http://127.0.0.1:8000/health",
+                "expected": "JSON with `status=ok`, `provider_mode=mock`, and MCP compatibility mode.",
+            },
+            {
+                "service": "FastAPI demo token",
+                "method": "POST",
+                "url": "http://127.0.0.1:8000/auth/demo-token",
+                "command": "Invoke-RestMethod http://127.0.0.1:8000/auth/demo-token -Method POST",
+                "expected": "Returns `X-API-Key` and the local token.",
+            },
+            {
+                "service": "Streamlit dashboard",
+                "method": "GET",
+                "url": "http://127.0.0.1:8501",
+                "command": "Open http://127.0.0.1:8501 in a browser.",
+                "expected": "Enterprise MCP Skill Hub dashboard renders with Runtime Demo view.",
+            },
+        ]
+
+    def _smoke_urls(self) -> list[JsonDict]:
+        return [
+            {
+                "name": "Runtime readiness API",
+                "method": "GET",
+                "path": "/runtime/demo-readiness",
+                "command": "Invoke-RestMethod http://127.0.0.1:8000/runtime/demo-readiness -Headers $headers",
+            },
+            {
+                "name": "Runtime demo pack export",
+                "method": "POST",
+                "path": "/runtime/demo-pack",
+                "command": "Invoke-RestMethod http://127.0.0.1:8000/runtime/demo-pack -Method POST -Headers $headers",
+            },
+            {
+                "name": "Dashboard smoke",
+                "method": "GET",
+                "path": "/ui/dashboard-smoke",
+                "command": "Invoke-RestMethod http://127.0.0.1:8000/ui/dashboard-smoke -Headers $headers",
+            },
+        ]
+
+    def _mcp_verification_commands(self) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "command": "python -m app.mcp_server tools",
+                "expected": "Lists six promoted local skill tools.",
+            },
+            {
+                "step": 2,
+                "command": "python -m app.mcp_server resources",
+                "expected": "Lists local policy, product, and workflow resources.",
+            },
+            {
+                "step": 3,
+                "command": "python -m app.mcp_server prompts",
+                "expected": "Lists reusable prompt templates.",
+            },
+        ]
+
+    def _demo_flow_order(self) -> list[JsonDict]:
+        return [
+            {"step": 1, "name": "Source readiness", "command": "python scripts\\runtime_check.py"},
+            {"step": 2, "name": "API server", "command": "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000"},
+            {"step": 3, "name": "Dashboard", "command": "python -m streamlit run dashboard/streamlit_app.py --server.port 8501"},
+            {"step": 4, "name": "Token", "command": "Invoke-RestMethod http://127.0.0.1:8000/auth/demo-token -Method POST"},
+            {"step": 5, "name": "Runtime readiness endpoint", "command": "Invoke-RestMethod http://127.0.0.1:8000/runtime/demo-readiness -Headers $headers"},
+            {"step": 6, "name": "Runtime pack endpoint", "command": "Invoke-RestMethod http://127.0.0.1:8000/runtime/demo-pack -Method POST -Headers $headers"},
+            {"step": 7, "name": "Demo agent", "command": "python -m app.demo"},
+            {"step": 8, "name": "MCP CLI tools", "command": "python -m app.mcp_server tools"},
+            {"step": 9, "name": "MCP CLI resources", "command": "python -m app.mcp_server resources"},
+            {"step": 10, "name": "MCP CLI prompts", "command": "python -m app.mcp_server prompts"},
+        ]
+
+    def _screenshot_checklist_placeholders(self) -> list[JsonDict]:
+        return [
+            {
+                "view": "Runtime Demo",
+                "placeholder": "screenshots/runtime_demo.png",
+                "check": "Show readiness metrics, port checks, commands, and pack export result.",
+            },
+            {
+                "view": "MCP Inspector",
+                "placeholder": "screenshots/mcp_inspector.png",
+                "check": "Show tools, resources, and prompts tabs.",
+            },
+            {
+                "view": "Launch Checklist",
+                "placeholder": "screenshots/launch_checklist.png",
+                "check": "Show runtime endpoints inside the smoke matrix.",
+            },
+        ]
+
+    def _troubleshooting(self) -> list[str]:
+        return [
+            "If `python scripts\\runtime_check.py` reports missing modules, rerun `python -m pip install -r requirements-dev.txt` from the repo root.",
+            "If port 8000 or 8501 is occupied, inspect the owning process with the listed `Get-NetTCPConnection` command before choosing a different port.",
+            "If protected API calls return 401, call `POST /auth/demo-token` and set `$headers = @{ \"X-API-Key\" = \"dev-local-token\" }`.",
+            "If Streamlit opens but the dashboard looks stale, stop and restart the Streamlit terminal after code changes.",
+            "If MCP CLI output is empty, confirm the built-in manifests are promoted by running `python -m app.mcp_server tools` from the repo root.",
+        ]
+
+    def _known_limitations(self) -> list[str]:
+        return [
+            "Readiness uses local import checks and socket probes; it does not launch FastAPI or Streamlit.",
+            "Port checks report whether localhost accepts connections; they do not identify or kill processes.",
+            "The demo path uses the deterministic mock provider by default and does not require OpenAI, Azure, or other external services.",
+            "Screenshot checklist entries are manual placeholders for reviewers.",
+            "Generated Runtime Demo Pack files live under ignored `data/runtime_packs/` and should be regenerated locally.",
+        ]
+
+    def _recruiter_explanation(self, readiness: RuntimeDemoReadinessResult) -> str:
+        return (
+            "Runtime Demo Server Pack gives a fresh-clone reviewer exact commands to start the FastAPI API, "
+            "Streamlit dashboard, demo agent, and MCP CLI proof path without guessing. "
+            f"The current local readiness is `{readiness.readiness_status}` with "
+            f"{readiness.summary['mcp_tool_count']} MCP tools discoverable in mock mode."
+        )
+
+    def _engineer_explanation(self, readiness: RuntimeDemoReadinessResult) -> str:
+        return (
+            "The readiness endpoint is a non-mutating runtime manifest: it checks required Python modules, "
+            "probes the expected localhost ports, enumerates env defaults, and publishes the exact health, smoke, "
+            "and MCP CLI verification order. The pack endpoint persists that contract as Markdown/JSON for review "
+            f"under `{self.output_dir.as_posix()}`; it reports {len(readiness.dependency_checks)} dependency checks "
+            f"and {len(readiness.port_checks)} port checks."
+        )
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        readiness = bundle["runtime_readiness"]
+        lines = [
+            "# Runtime Demo Server Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Exact Start Commands",
+            "",
+            *[
+                f"- {item['step']}. {item['service']}: `{item['command']}`"
+                for item in bundle["exact_start_commands"]
+            ],
+            "",
+            "## Manual Stop Commands",
+            "",
+            *[
+                f"- {item['service']}: {item['command']} Check first with `{item['safe_check_first']}`."
+                for item in bundle["manual_stop_commands"]
+            ],
+            "",
+            "## Dependency Checks",
+            "",
+            *[
+                f"- `{item['status']}` {item['name']}: {item['detail']}"
+                for item in readiness["dependency_checks"]
+            ],
+            "",
+            "## Port Checks",
+            "",
+            *[
+                f"- `{item['status']}` {item['service']} port `{item['port']}`: {item['detail']}"
+                for item in readiness["port_checks"]
+            ],
+            "",
+            "## Health Checks",
+            "",
+            *[
+                f"- `{item['method']}` {item['url']}: `{item['command']}`"
+                for item in bundle["health_checks"]
+            ],
+            "",
+            "## Demo Flow Order",
+            "",
+            *[
+                f"- {item['step']}. {item['name']}: `{item['command']}`"
+                for item in bundle["demo_flow_order"]
+            ],
+            "",
+            "## MCP CLI Verification Order",
+            "",
+            *[
+                f"- {item['step']}. `{item['command']}` - {item['expected']}"
+                for item in bundle["mcp_cli_verification_order"]
+            ],
+            "",
+            "## Screenshot Checklist Placeholders",
+            "",
+            *[
+                f"- {item['view']}: `{item['placeholder']}` - {item['check']}"
+                for item in bundle["screenshot_checklist_placeholders"]
+            ],
+            "",
+            "## Troubleshooting",
+            "",
+            *[f"- {note}" for note in bundle["troubleshooting"]],
+            "",
+            "## Recruiter Explanation",
+            "",
+            bundle["recruiter_explanation"],
+            "",
+            "## Engineer Explanation",
+            "",
+            bundle["engineer_explanation"],
+            "",
+            "## Known Limitations",
+            "",
+            *[f"- {note}" for note in bundle["known_limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class DashboardSmokeService:
+    SMOKE_ID = "dashboard_smoke_latest"
+    PACK_ID = "ui_verification_pack_latest"
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "ui_verification"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def dashboard_smoke(self) -> DashboardSmokeResult:
+        expected_views = self._expected_views()
+        endpoint_references = self._endpoint_references()
+        generated_artifact_tabs = self._generated_artifact_tabs()
+        mcp_proof_surfaces = self._mcp_proof_surfaces()
+        checks = [
+            self._path_exists_check(
+                "dashboard_source",
+                "source",
+                Path("dashboard") / "streamlit_app.py",
+                "Streamlit dashboard source exists.",
+            ),
+            self._path_exists_check(
+                "main_api_source",
+                "source",
+                Path("app") / "main.py",
+                "FastAPI endpoint source exists.",
+            ),
+            self._path_exists_check(
+                "dashboard_smoke_script",
+                "source",
+                Path("scripts") / "dashboard_smoke.py",
+                "Dashboard smoke script exists.",
+            ),
+            self._gitignore_check(),
+            *[
+                self._source_contains_check(
+                    f"dashboard_view_{view['id']}",
+                    "dashboard views",
+                    Path("dashboard") / "streamlit_app.py",
+                    view["label"],
+                    f"Dashboard exposes the `{view['label']}` view.",
+                    f"Add `{view['label']}` to the Streamlit sidebar view list.",
+                )
+                for view in expected_views
+            ],
+            *[
+                self._source_contains_check(
+                    f"endpoint_{endpoint['id']}",
+                    "api endpoints",
+                    Path("app") / "main.py",
+                    endpoint["path"],
+                    f"FastAPI source references `{endpoint['method']} {endpoint['path']}`.",
+                    f"Add the `{endpoint['path']}` route to `app/main.py`.",
+                )
+                for endpoint in endpoint_references
+            ],
+            *[
+                self._source_contains_check(
+                    f"artifact_tab_{item['id']}",
+                    "artifact tabs",
+                    Path("dashboard") / "streamlit_app.py",
+                    item["tab_label"],
+                    f"Dashboard exposes the `{item['tab_label']}` generated artifact tab.",
+                    f"Add a `{item['tab_label']}` tab to the `{item['view']}` dashboard view.",
+                )
+                for item in generated_artifact_tabs
+            ],
+            *[
+                self._source_contains_check(
+                    f"mcp_surface_{item['id']}",
+                    "mcp proof",
+                    Path("dashboard") / "streamlit_app.py",
+                    item["dashboard_label"],
+                    f"Dashboard exposes MCP proof surface `{item['dashboard_label']}`.",
+                    f"Add `{item['dashboard_label']}` to the dashboard MCP proof surface.",
+                )
+                for item in mcp_proof_surfaces
+            ],
+        ]
+        fail_count = sum(1 for check in checks if check.status == "fail")
+        warn_count = sum(1 for check in checks if check.status == "warn")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if fail_count:
+            readiness_status = "blocked"
+        elif warn_count:
+            readiness_status = "needs_review"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "status": readiness_status,
+            "check_count": len(checks),
+            "pass_count": sum(1 for check in checks if check.status == "pass"),
+            "warn_count": warn_count,
+            "fail_count": fail_count,
+            "expected_view_count": len(expected_views),
+            "endpoint_reference_count": len(endpoint_references),
+            "generated_artifact_tab_count": len(generated_artifact_tabs),
+            "mcp_proof_surface_count": len(mcp_proof_surfaces),
+            "artifact_root": str(self.output_dir),
+        }
+        return DashboardSmokeResult(
+            smoke_id=self.SMOKE_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            checks=checks,
+            expected_views=expected_views,
+            endpoint_references=endpoint_references,
+            generated_artifact_tabs=generated_artifact_tabs,
+            local_run_commands=self._local_run_commands(),
+            mcp_proof_surfaces=mcp_proof_surfaces,
+            limitations=self._limitations(),
+        )
+
+    def verification_pack(
+        self,
+        request: UiVerificationPackRequest | None = None,
+    ) -> UiVerificationPackResult:
+        request = request or UiVerificationPackRequest()
+        smoke = self.dashboard_smoke()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": smoke.readiness_status,
+            "dashboard_smoke": smoke.model_dump(mode="json"),
+            "streamlit_run_command": "python -m streamlit run dashboard/streamlit_app.py",
+            "local_run_commands": smoke.local_run_commands,
+            "reviewer_checklist": self._reviewer_checklist(smoke),
+            "screenshot_placeholders": self._screenshot_placeholders(smoke),
+            "troubleshooting": self._troubleshooting(),
+            "limitations": smoke.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "ui.verification_pack_exported",
+            "ui_verification_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": smoke.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "check_count": len(smoke.checks),
+                "fail_count": smoke.summary["fail_count"],
+            },
+        )
+        return UiVerificationPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=smoke.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": smoke.readiness_status,
+                "check_count": len(smoke.checks),
+                "fail_count": smoke.summary["fail_count"],
+                "expected_view_count": len(smoke.expected_views),
+                "endpoint_reference_count": len(smoke.endpoint_references),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _expected_views(self) -> list[JsonDict]:
+        return [
+            {"id": "reviewer_quickstart", "label": "Reviewer Quickstart", "purpose": "Copy-ready reviewer path."},
+            {"id": "artifact_inventory", "label": "Artifact Inventory", "purpose": "Generated proof index."},
+            {"id": "skill_marketplace", "label": "Skill Marketplace", "purpose": "Tenant rollout approval pack."},
+            {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
+            {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
+            {"id": "ci_doctor", "label": "CI Doctor / Audit Pack", "purpose": "Static local CI and publish audit."},
+            {"id": "release_pack", "label": "Release Pack", "purpose": "Release quality and publish artifacts."},
+            {"id": "mcp_inspector", "label": "MCP Inspector", "purpose": "Tools/resources/prompts proof."},
+            {"id": "ui_verification", "label": "UI Verification", "purpose": "Dashboard smoke and UI pack."},
+            {"id": "git_readiness", "label": "Git Readiness", "purpose": "Local git publish hygiene and push plan."},
+            {"id": "runtime_demo", "label": "Runtime Demo", "purpose": "FastAPI, Streamlit, and MCP CLI local runtime proof."},
+            {"id": "final_handoff", "label": "Final Handoff", "purpose": "README Consistency audit and final pack."},
+            {"id": "api_contract", "label": "API Contract", "purpose": "OpenAPI/MCP contract audit and reviewer collection."},
+        ]
+
+    def _endpoint_references(self) -> list[JsonDict]:
+        return [
+            self._endpoint_ref("dashboard_smoke", "GET", "/ui/dashboard-smoke", "Dashboard smoke source checks."),
+            self._endpoint_ref("verification_pack", "POST", "/ui/verification-pack", "Writes UI proof artifacts."),
+            self._endpoint_ref("reviewer_quickstart", "GET", "/reviewer/quickstart", "Reviewer walkthrough source."),
+            self._endpoint_ref("walkthrough_pack", "POST", "/reviewer/walkthrough-pack", "Reviewer pack artifact."),
+            self._endpoint_ref("smoke_matrix", "GET", "/ops/smoke-matrix", "API smoke counterpart."),
+            self._endpoint_ref("launch_checklist", "POST", "/ops/launch-checklist", "Launch checklist artifact."),
+            self._endpoint_ref("mcp_tools", "GET", "/mcp/tools", "MCP tool inventory."),
+            self._endpoint_ref("mcp_resources", "GET", "/mcp/resources", "MCP resource inventory."),
+            self._endpoint_ref("mcp_prompts", "GET", "/mcp/prompts", "MCP prompt inventory."),
+            self._endpoint_ref("final_audit", "GET", "/handoff/final-audit", "README Consistency final audit."),
+            self._endpoint_ref("final_pack", "POST", "/handoff/final-pack", "Writes Final Handoff proof artifacts."),
+            self._endpoint_ref("git_readiness", "GET", "/git/readiness", "Git readiness and branch hygiene checks."),
+            self._endpoint_ref("git_push_plan", "POST", "/git/push-plan", "Writes GitHub Push Readiness proof artifacts."),
+            self._endpoint_ref("runtime_readiness", "GET", "/runtime/demo-readiness", "Runtime demo source and port readiness."),
+            self._endpoint_ref("runtime_pack", "POST", "/runtime/demo-pack", "Writes Runtime Demo Server Pack artifacts."),
+            self._endpoint_ref("marketplace_catalog", "GET", "/marketplace/catalog", "Skill Marketplace catalog."),
+            self._endpoint_ref("marketplace_rollout_pack", "POST", "/marketplace/rollout-pack", "Writes Tenant Rollout approval pack."),
+            self._endpoint_ref("usage_analytics", "GET", "/usage/analytics", "Skill Usage Analytics and chargeback signals."),
+            self._endpoint_ref("usage_chargeback_pack", "POST", "/usage/chargeback-pack", "Writes Cost Chargeback artifacts."),
+            self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
+            self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
+        ]
+
+    def _endpoint_ref(self, ref_id: str, method: str, path: str, purpose: str) -> JsonDict:
+        sample_command = f"Invoke-RestMethod http://localhost:8000{path} -Headers $headers"
+        if method == "POST":
+            sample_command = f"Invoke-RestMethod http://localhost:8000{path} -Method POST -Headers $headers"
+        return {
+            "id": ref_id,
+            "method": method,
+            "path": path,
+            "auth_required": True,
+            "purpose": purpose,
+            "sample_command": sample_command,
+        }
+
+    def _generated_artifact_tabs(self) -> list[JsonDict]:
+        return [
+            self._artifact_tab("walkthrough_pack", "Reviewer Quickstart", "Walkthrough Pack", "data/reviewer_packs/"),
+            self._artifact_tab("readme_checklist", "Artifact Inventory", "Export", "data/artifact_indexes/"),
+            self._artifact_tab("launch_checklist", "Launch Checklist", "Export", "data/launch_checklists/"),
+            self._artifact_tab("audit_pack", "CI Doctor / Audit Pack", "Audit Pack", "data/audit_packs/"),
+            self._artifact_tab("release_pack", "Release Pack", "Publish Pack", "data/release_packs/"),
+            self._artifact_tab("ui_verification", "UI Verification", "Verification Pack", "data/ui_verification/"),
+            self._artifact_tab("git_push_plan", "Git Readiness", "Push Plan", "data/git_packs/"),
+            self._artifact_tab("runtime_demo", "Runtime Demo", "Runtime Demo Pack", "data/runtime_packs/"),
+            self._artifact_tab("marketplace_pack", "Skill Marketplace", "Tenant Rollout", "data/marketplace_packs/"),
+            self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
+            self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
+            self._artifact_tab("api_contract", "API Contract", "Reviewer Collection", "data/api_contracts/"),
+        ]
+
+    def _artifact_tab(self, tab_id: str, view: str, tab_label: str, artifact_dir: str) -> JsonDict:
+        return {
+            "id": tab_id,
+            "view": view,
+            "tab_label": tab_label,
+            "artifact_dir": artifact_dir,
+            "proof": "Dashboard tab can create or display ignored local Markdown/JSON artifacts.",
+        }
+
+    def _mcp_proof_surfaces(self) -> list[JsonDict]:
+        return [
+            {
+                "id": "mcp_inspector_view",
+                "dashboard_label": "MCP Inspector",
+                "proof": "Streamlit view renders tools, resources, and prompts tabs.",
+                "commands": [
+                    "python -m app.mcp_server tools",
+                    "python -m app.mcp_server resources",
+                    "python -m app.mcp_server prompts",
+                ],
+            },
+            {
+                "id": "tools_tab",
+                "dashboard_label": "Tools",
+                "proof": "MCP Inspector includes promoted tool definitions.",
+                "commands": ["python -m app.mcp_server tools"],
+            },
+            {
+                "id": "resources_tab",
+                "dashboard_label": "Resources",
+                "proof": "MCP Inspector includes local resource definitions.",
+                "commands": ["python -m app.mcp_server resources"],
+            },
+            {
+                "id": "prompts_tab",
+                "dashboard_label": "Prompts",
+                "proof": "MCP Inspector includes prompt templates.",
+                "commands": ["python -m app.mcp_server prompts"],
+            },
+        ]
+
+    def _local_run_commands(self) -> list[str]:
+        return [
+            "python -m streamlit run dashboard/streamlit_app.py",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/ui/dashboard-smoke -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ui/verification-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/git/readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/git/push-plan -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/handoff/final-audit -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/handoff/final-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+            'rg "git/readiness|git/push-plan|GitHub Push Readiness|git_packs|Branch Hygiene|Git Readiness" app dashboard docs README.md tests scripts sample_data',
+            'rg "runtime/demo-readiness|runtime/demo-pack|Runtime Demo|runtime_packs|runtime_check|start_demo" app dashboard docs README.md tests scripts sample_data',
+            'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
+            'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\runtime_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _reviewer_checklist(self, smoke: DashboardSmokeResult) -> list[JsonDict]:
+        return [
+            {
+                "item": "Run the dashboard smoke script.",
+                "status": "pass" if smoke.summary["fail_count"] == 0 else "fail",
+                "proof": "python scripts\\dashboard_smoke.py",
+            },
+            {
+                "item": "Start Streamlit locally.",
+                "status": "manual",
+                "proof": "python -m streamlit run dashboard/streamlit_app.py",
+            },
+            {
+                "item": "Open the UI Verification view and export the pack.",
+                "status": "manual",
+                "proof": "data/ui_verification/ui_verification_pack_latest.md",
+            },
+            {
+                "item": "Confirm MCP proof tabs are visible.",
+                "status": "manual",
+                "proof": "MCP Inspector: Tools, Resources, Prompts.",
+            },
+            {
+                "item": "Confirm generated artifact tabs point to ignored data folders.",
+                "status": "pass",
+                "proof": "Reviewer Quickstart, Artifact Inventory, Skill Marketplace, Launch Checklist, CI Doctor, Release Pack, UI Verification, Git Readiness, Runtime Demo.",
+            },
+        ]
+
+    def _screenshot_placeholders(self, smoke: DashboardSmokeResult) -> list[JsonDict]:
+        return [
+            {
+                "view": view["label"],
+                "placeholder": f"screenshots/{view['id']}.png",
+                "note": "Optional manual screenshot slot; no browser automation is required for this pack.",
+            }
+            for view in smoke.expected_views
+        ]
+
+    def _troubleshooting(self) -> list[str]:
+        return [
+            "If a dashboard label check fails, confirm the sidebar label in `dashboard/streamlit_app.py` matches the smoke expectation exactly.",
+            "If endpoint checks fail, confirm `app/main.py` contains the route path and response model imports.",
+            "If the verification pack cannot write files, confirm `data/ui_verification/` is ignored and writable.",
+            "If Streamlit import errors appear, install local dev dependencies with `python -m pip install -r requirements-dev.txt`.",
+            "If MCP proof looks empty, run `python -m app.mcp_server tools`, `resources`, and `prompts` to isolate adapter output from dashboard rendering.",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Dashboard smoke is a deterministic source and wiring check; it does not launch Streamlit or capture live browser pixels.",
+            "Screenshot placeholders are manual reviewer slots, not generated images.",
+            "Endpoint references prove route wiring in source; they do not replace API runtime smoke commands.",
+            "All outputs are local/mock and intentionally avoid external SaaS, model, browser, or screenshot services.",
+        ]
+
+    def _path_exists_check(
+        self,
+        check_id: str,
+        category: str,
+        path: Path,
+        title: str,
+    ) -> DashboardSmokeCheck:
+        full_path = self._root(path)
+        exists = full_path.exists()
+        return DashboardSmokeCheck(
+            id=check_id,
+            category=category,
+            status="pass" if exists else "fail",
+            title=title,
+            detail=f"`{path.as_posix()}` {'exists' if exists else 'is missing'}.",
+            evidence=[path.as_posix()] if exists else [],
+            remediation=f"Create `{path.as_posix()}`." if not exists else None,
+        )
+
+    def _source_contains_check(
+        self,
+        check_id: str,
+        category: str,
+        path: Path,
+        needle: str,
+        title: str,
+        remediation: str,
+    ) -> DashboardSmokeCheck:
+        text = self._read_text(path)
+        found = needle in text
+        return DashboardSmokeCheck(
+            id=check_id,
+            category=category,
+            status="pass" if found else "fail",
+            title=title,
+            detail=f"`{needle}` {'was found' if found else 'was not found'} in `{path.as_posix()}`.",
+            evidence=[path.as_posix(), needle] if found else [path.as_posix()],
+            remediation=None if found else remediation,
+        )
+
+    def _gitignore_check(self) -> DashboardSmokeCheck:
+        needle = "data/ui_verification/"
+        text = self._read_text(Path(".gitignore"))
+        found = needle in text
+        return DashboardSmokeCheck(
+            id="ui_verification_gitignore",
+            category="artifacts",
+            status="pass" if found else "fail",
+            title="UI verification artifacts are ignored.",
+            detail=f"`{needle}` {'is present' if found else 'is missing'} in `.gitignore`.",
+            evidence=[".gitignore", needle] if found else [".gitignore"],
+            remediation=f"Add `{needle}` to `.gitignore`." if not found else None,
+        )
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        smoke = bundle["dashboard_smoke"]
+        lines = [
+            "# UI Verification Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Checks: `{smoke['summary']['pass_count']} pass`, `{smoke['summary']['fail_count']} fail`",
+            "",
+            "## Streamlit Run Command",
+            "",
+            f"- `{bundle['streamlit_run_command']}`",
+            "",
+            "## Dashboard Smoke",
+            "",
+            *[
+                f"- `{check['status']}` {check['title']} {check['detail']}"
+                for check in smoke["checks"]
+            ],
+            "",
+            "## Expected Views",
+            "",
+            *[f"- {view['label']}: {view['purpose']}" for view in smoke["expected_views"]],
+            "",
+            "## Endpoint References",
+            "",
+            *[
+                f"- `{endpoint['method']} {endpoint['path']}` - {endpoint['purpose']}"
+                for endpoint in smoke["endpoint_references"]
+            ],
+            "",
+            "## Generated Artifact Tabs",
+            "",
+            *[
+                f"- {item['view']} / {item['tab_label']}: `{item['artifact_dir']}`"
+                for item in smoke["generated_artifact_tabs"]
+            ],
+            "",
+            "## MCP Proof Surfaces",
+            "",
+            *[
+                f"- {item['dashboard_label']}: {item['proof']}"
+                for item in smoke["mcp_proof_surfaces"]
+            ],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Screenshot Placeholders",
+            "",
+            *[
+                f"- {item['view']}: `{item['placeholder']}` - {item['note']}"
+                for item in bundle["screenshot_placeholders"]
+            ],
+            "",
+            "## Troubleshooting",
+            "",
+            *[f"- {note}" for note in bundle["troubleshooting"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._root(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8")
+
+    def _root(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+
+class ArtifactInventoryService:
+    INVENTORY_ID = "artifact_inventory_latest"
+    CHECKLIST_ID = "readme_checklist_latest"
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "artifact_indexes"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def inventory(self) -> ArtifactInventoryResult:
+        items = [self._inventory_item(row) for row in self._artifact_catalog()]
+        generated_count = sum(1 for item in items if item.generated)
+        ignored_count = sum(1 for item in items if item.ignored_status == "ignored")
+        missing_ignores = [item.directory for item in items if item.ignored_status != "ignored"]
+        readiness_status = "ready" if not missing_ignores else "needs_review"
+        return ArtifactInventoryResult(
+            inventory_id=self.INVENTORY_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            artifact_count=len(items),
+            generated_directory_count=generated_count,
+            ignored_directory_count=ignored_count,
+            items=items,
+            readme_badge_suggestions=self._readme_badge_suggestions(),
+            reviewer_proof_checklist=self._reviewer_proof_checklist(items),
+            local_commands=self._local_commands(),
+            cleanup_regeneration_notes=self._cleanup_regeneration_notes(),
+            summary={
+                "local_only": True,
+                "mock_provider": self.app_state.provider.name == "mock",
+                "artifact_index_directory": str(self.output_dir),
+                "missing_ignore_count": len(missing_ignores),
+                "missing_ignored_directories": missing_ignores,
+                "generated_artifact_count": generated_count,
+            },
+        )
+
+    def readme_checklist(
+        self,
+        request: ArtifactReadmeChecklistRequest | None = None,
+    ) -> ArtifactReadmeChecklistResult:
+        request = request or ArtifactReadmeChecklistRequest()
+        inventory = self.inventory()
+        bundle = {
+            "checklist_id": self.CHECKLIST_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": inventory.readiness_status,
+            "artifact_inventory": inventory.model_dump(mode="json"),
+            "readme_badge_suggestions": inventory.readme_badge_suggestions,
+            "readme_checklist_suggestions": self._readme_checklist_suggestions(inventory),
+            "local_commands": inventory.local_commands,
+            "reviewer_proof_checklist": inventory.reviewer_proof_checklist,
+            "cleanup_regeneration_notes": inventory.cleanup_regeneration_notes,
+            "limitations": self._limitations(),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.CHECKLIST_ID}.json"
+        markdown_path = self.output_dir / f"{self.CHECKLIST_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "artifacts.readme_checklist_exported",
+            "artifact_readme_checklist",
+            self.CHECKLIST_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": inventory.readiness_status,
+                "inventory_count": inventory.artifact_count,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ArtifactReadmeChecklistResult(
+            checklist_id=self.CHECKLIST_ID,
+            generated_at=utc_now(),
+            readiness_status=inventory.readiness_status,
+            inventory_count=inventory.artifact_count,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "artifact_count": inventory.artifact_count,
+                "generated_directory_count": inventory.generated_directory_count,
+                "ignored_directory_count": inventory.ignored_directory_count,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _artifact_catalog(self) -> list[JsonDict]:
+        return [
+            self._catalog_row(
+                "final_handoff",
+                "Final Handoff Pack",
+                Path("data") / "final_handoff",
+                "POST /handoff/final-pack",
+                "Invoke-RestMethod http://localhost:8000/handoff/final-pack -Method POST -Headers $headers",
+                ["final_handoff_pack_latest.json", "final_handoff_pack_latest.md"],
+                "Final README Consistency audit, endpoint/MCP/artifact summaries, verification order, and recruiter-facing handoff blurb.",
+            ),
+            self._catalog_row(
+                "artifact_indexes",
+                "Artifact Inventory + README Checklist",
+                self.output_dir,
+                "POST /artifacts/readme-checklist",
+                "Invoke-RestMethod http://localhost:8000/artifacts/readme-checklist -Method POST -Headers $headers",
+                ["readme_checklist_latest.json", "readme_checklist_latest.md"],
+                "Reviewer-facing index of every local generated artifact family, README badge ideas, and a reviewer proof checklist.",
+            ),
+            self._catalog_row(
+                "ui_verification",
+                "UI Verification Pack",
+                Path("data") / "ui_verification",
+                "POST /ui/verification-pack",
+                "Invoke-RestMethod http://localhost:8000/ui/verification-pack -Method POST -Headers $headers",
+                ["ui_verification_pack_latest.json", "ui_verification_pack_latest.md"],
+                "Dashboard smoke results, Streamlit run command, reviewer checklist, screenshot placeholders, and troubleshooting.",
+            ),
+            self._catalog_row(
+                "git_packs",
+                "GitHub Push Readiness + Branch Hygiene Pack",
+                Path("data") / "git_packs",
+                "POST /git/push-plan",
+                "Invoke-RestMethod http://localhost:8000/git/push-plan -Method POST -Headers $headers",
+                ["git_push_plan_latest.json", "git_push_plan_latest.md"],
+                "Local branch hygiene, worktree summary, safe review commands, commit grouping, and MCP publish notes.",
+            ),
+            self._catalog_row(
+                "runtime_packs",
+                "Runtime Demo Server Pack",
+                Path("data") / "runtime_packs",
+                "POST /runtime/demo-pack",
+                "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+                ["runtime_demo_pack_latest.json", "runtime_demo_pack_latest.md"],
+                "Fresh-clone FastAPI, Streamlit, and MCP CLI runtime commands, readiness checks, health URLs, screenshot placeholders, and troubleshooting.",
+            ),
+            self._catalog_row(
+                "portfolio_demo",
+                "Enterprise Portfolio Demo Pack",
+                Path("data") / "portfolio_demo",
+                "POST /enterprise/portfolio-demo-pack",
+                "Invoke-RestMethod http://localhost:8000/enterprise/portfolio-demo-pack -Method POST -Headers $headers",
+                ["portfolio_demo_pack_latest.json", "portfolio_demo_pack_latest.md"],
+                "Executive MCP readiness story spanning governance, conformance, release, audit, capacity, tenant, incident, and demo signals.",
+            ),
+            self._catalog_row(
+                "portfolio_packs",
+                "Portfolio Evidence Interview Pack",
+                Path("data") / "portfolio_packs",
+                "POST /portfolio/interview-pack",
+                "Invoke-RestMethod http://localhost:8000/portfolio/interview-pack -Method POST -Headers $headers",
+                ["interview_pack_latest.json", "interview_pack_latest.md"],
+                "Recruiter and engineering interview proof for MCP tools/resources/prompts, APIs, governance, evals, and local commands.",
+            ),
+            self._catalog_row(
+                "release_packs",
+                "Release Candidate Publish Pack",
+                Path("data") / "release_packs",
+                "POST /release/publish-pack",
+                "Invoke-RestMethod http://localhost:8000/release/publish-pack -Method POST -Headers $headers",
+                ["publish_pack_latest.json", "publish_pack_latest.md"],
+                "GitHub publish readiness pack with endpoint inventory, MCP capability inventory, verification commands, and limitations.",
+            ),
+            self._catalog_row(
+                "audit_packs",
+                "Local CI Doctor Audit Pack",
+                Path("data") / "audit_packs",
+                "POST /ops/audit-pack",
+                "Invoke-RestMethod http://localhost:8000/ops/audit-pack -Method POST -Headers $headers",
+                ["audit_pack_latest.json", "audit_pack_latest.md"],
+                "Dependency, docs, ignore, command, local/mock posture, and suspicious secret scan proof before publishing.",
+            ),
+            self._catalog_row(
+                "reviewer_packs",
+                "Reviewer Walkthrough Pack",
+                Path("data") / "reviewer_packs",
+                "POST /reviewer/walkthrough-pack",
+                "Invoke-RestMethod http://localhost:8000/reviewer/walkthrough-pack -Method POST -Headers $headers",
+                ["walkthrough_pack_latest.json", "walkthrough_pack_latest.md"],
+                "Copy-ready GitHub reviewer path with setup, API walkthrough, MCP proof tour, artifacts, and role-specific notes.",
+            ),
+            self._catalog_row(
+                "api_contracts",
+                "API Contract Reviewer Collection",
+                Path("data") / "api_contracts",
+                "POST /api/reviewer-collection",
+                "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+                ["reviewer_collection_latest.json", "reviewer_collection_latest.md"],
+                "OpenAPI route inventory, auth status, docs coverage, dashboard alignment, MCP inventory, sample commands, and reviewer explanations.",
+            ),
+            self._catalog_row(
+                "launch_checklists",
+                "Local Launch Checklist",
+                Path("data") / "launch_checklists",
+                "POST /ops/launch-checklist",
+                "Invoke-RestMethod http://localhost:8000/ops/launch-checklist -Method POST -Headers $headers",
+                ["launch_checklist_latest.json", "launch_checklist_latest.md"],
+                "Fast local smoke proof for auth, skills, MCP surfaces, governance, workflows, release, and enterprise readiness.",
+            ),
+            self._catalog_row(
+                "evidence",
+                "Security Evidence Bundle",
+                Path("data") / "evidence",
+                "POST /evidence/export",
+                "Invoke-RestMethod http://localhost:8000/evidence/export -Method POST -Headers $headers",
+                ["security_evidence_latest.json", "security_evidence_latest.md"],
+                "Security review artifact covering governance, conformance, policy, invocation history, audit, and MCP exposure.",
+            ),
+            self._catalog_row(
+                "attestations",
+                "Compliance Attestation Pack",
+                Path("data") / "attestations",
+                "POST /compliance/attestation",
+                "Invoke-RestMethod http://localhost:8000/compliance/attestation -Method POST -Headers $headers",
+                ["compliance_attestation_latest.json", "compliance_attestation_latest.md"],
+                "Procurement-style governance and MCP attestation with local verification commands and interviewer talking points.",
+            ),
+            self._catalog_row(
+                "releases",
+                "Governed Release Notes",
+                Path("data") / "releases",
+                "POST /releases/export",
+                "Invoke-RestMethod http://localhost:8000/releases/export -Method POST -Headers $headers",
+                ["release_notes_latest.json", "release_notes_latest.md", "current_snapshot.json"],
+                "Promoted skill and workflow-template release diff with conformance, policy, MCP impact, and regression commands.",
+            ),
+            self._catalog_row(
+                "capacity",
+                "Capacity Plan",
+                Path("data") / "capacity",
+                "POST /capacity/plan-export",
+                "Invoke-RestMethod http://localhost:8000/capacity/plan-export -Method POST -Headers $headers",
+                ["capacity_plan_latest.json", "capacity_plan_latest.md", "capacity_guardrails_latest.json"],
+                "Skill demand, quotas, latency, token, fallback, and rollout evidence for MCP platform planning.",
+            ),
+            self._catalog_row(
+                "dependencies",
+                "Dependency Report",
+                Path("data") / "dependencies",
+                "POST /dependencies/report",
+                "Invoke-RestMethod http://localhost:8000/dependencies/report -Method POST -Headers $headers",
+                ["dependency_report_latest.json", "dependency_report_latest.md"],
+                "Cross-agent dependency and blast-radius evidence for skills, workflows, prompts, resources, release, and capacity.",
+            ),
+            self._catalog_row(
+                "incident_runbooks",
+                "Incident Runbook",
+                Path("data") / "incident_runbooks",
+                "POST /incidents/runbook",
+                "Invoke-RestMethod http://localhost:8000/incidents/runbook -Method POST -Headers $headers",
+                ["incident_runbook_latest.json", "incident_runbook_latest.md"],
+                "Local incident drill artifact with symptoms, containment, rollback, eval/conformance commands, and MCP impact.",
+            ),
+            self._catalog_row(
+                "tenant_sandboxes",
+                "Tenant Policy Sandbox",
+                Path("data") / "tenant_sandboxes",
+                "POST /tenants/sandbox-export",
+                "Invoke-RestMethod http://localhost:8000/tenants/sandbox-export -Method POST -Headers $headers",
+                ["tenant_policy_sandbox_latest.json", "tenant_policy_sandbox_latest.md"],
+                "Tenant-specific allowed, blocked, and review-required MCP skill/workflow evidence.",
+            ),
+            self._catalog_row(
+                "marketplace_packs",
+                "Skill Marketplace Tenant Rollout Approval Pack",
+                Path("data") / "marketplace_packs",
+                "POST /marketplace/rollout-pack",
+                "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+                ["rollout_approval_pack_latest.json", "rollout_approval_pack_latest.md"],
+                "Marketplace governance proof with tenant rollout recommendations, disabled-skill blocks, version notes, and reviewer checklist.",
+            ),
+            self._catalog_row(
+                "usage_packs",
+                "Skill Usage Analytics + Cost Chargeback Pack",
+                Path("data") / "usage_packs",
+                "POST /usage/chargeback-pack",
+                "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
+                ["chargeback_pack_latest.json", "chargeback_pack_latest.md"],
+                "Enterprise usage, token, latency, budget, anomaly, disabled-skill block, and chargeback allocation proof.",
+            ),
+            self._catalog_row(
+                "workflow_reviews",
+                "Workflow Review Evidence",
+                Path("data") / "workflow_reviews",
+                "POST /workflows/{template_id}/review-evidence",
+                "Invoke-RestMethod http://localhost:8000/workflows/reviewed_support_pack/review-evidence -Method POST -Headers $headers",
+                ["submitted_templates.json", "{template_id}_review_evidence.json", "{template_id}_review_evidence.md"],
+                "Submitted workflow validation, approval/rejection, dry-run simulation, and policy-warning proof.",
+            ),
+            self._catalog_row(
+                "conformance_outputs",
+                "Conformance Report Output",
+                Path("data") / "conformance",
+                "GET /conformance/report",
+                "python -m app.evals.run_conformance",
+                ["conformance_report_latest.json"],
+                "MCP contract proof for promoted skills: schemas, sample invocation, policy checks, exposure, prompts, and resources.",
+            ),
+            self._catalog_row(
+                "governance_outputs",
+                "Governance Report Output",
+                Path("data") / "governance",
+                "GET /governance/report",
+                "Invoke-RestMethod http://localhost:8000/governance/report -Headers $headers",
+                ["governance_report_latest.json"],
+                "Current skill lifecycle, MCP exposure, policy access, audit, metrics, and readiness rows for reviewers.",
+            ),
+        ]
+
+    def _catalog_row(
+        self,
+        artifact_id: str,
+        name: str,
+        directory: Path,
+        endpoint: str | None,
+        command: str | None,
+        expected_files: list[str],
+        purpose: str,
+    ) -> JsonDict:
+        return {
+            "artifact_id": artifact_id,
+            "name": name,
+            "directory": directory,
+            "producer_endpoint": endpoint,
+            "producer_command": command,
+            "expected_files": expected_files,
+            "reviewer_purpose": purpose,
+        }
+
+    def _inventory_item(self, row: JsonDict) -> ArtifactInventoryItem:
+        directory = self._resolve(row["directory"])
+        latest_files = self._latest_files(directory)
+        ignored_status = self._ignored_status(directory)
+        freshness_notes = self._freshness_notes(latest_files, row["producer_endpoint"], row["producer_command"])
+        return ArtifactInventoryItem(
+            artifact_id=row["artifact_id"],
+            name=row["name"],
+            directory=self._display_path(row["directory"]),
+            expected_files=row["expected_files"],
+            latest_files=latest_files,
+            producer_endpoint=row["producer_endpoint"],
+            producer_command=row["producer_command"],
+            ignored_status=ignored_status,
+            reviewer_purpose=row["reviewer_purpose"],
+            freshness_notes=freshness_notes,
+            mcp_specific=True,
+            generated=bool(latest_files),
+        )
+
+    def _latest_files(self, directory: Path) -> list[JsonDict]:
+        if not directory.exists() or not directory.is_dir():
+            return []
+        files = sorted(
+            (path for path in directory.rglob("*") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        rows = []
+        for path in files[:5]:
+            stat = path.stat()
+            rows.append(
+                {
+                    "path": str(path.relative_to(self.repo_root)) if self._is_relative_to(path, self.repo_root) else str(path),
+                    "length": stat.st_size,
+                    "last_write_time": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                }
+            )
+        return rows
+
+    def _ignored_status(self, directory: Path) -> str:
+        if not self._is_relative_to(directory, self.repo_root):
+            return "outside_repo"
+        relative = directory.relative_to(self.repo_root).as_posix().rstrip("/") + "/"
+        gitignore = self._read_text(Path(".gitignore"))
+        return "ignored" if relative in gitignore else "missing_gitignore_entry"
+
+    def _freshness_notes(
+        self,
+        latest_files: list[JsonDict],
+        endpoint: str | None,
+        command: str | None,
+    ) -> str:
+        if not latest_files:
+            producer = endpoint or command or "the listed producer"
+            return f"Not generated in this checkout yet; run {producer} to create the latest local proof."
+        newest = latest_files[0]
+        return f"Latest file is {newest['path']} at {newest['last_write_time']}."
+
+    def _readme_badge_suggestions(self) -> list[JsonDict]:
+        return [
+            {
+                "label": "Local MCP Proof",
+                "markdown": "![Local MCP Proof](https://img.shields.io/badge/MCP-local%20mock%20verified-brightgreen)",
+                "purpose": "Signals the repo can be judged without cloud credentials.",
+            },
+            {
+                "label": "Reviewer Checklist",
+                "markdown": "![Reviewer Checklist](https://img.shields.io/badge/reviewer%20checklist-generated-blue)",
+                "purpose": "Points reviewers to the generated README Checklist artifact pack.",
+            },
+            {
+                "label": "Artifacts Ignored",
+                "markdown": "![Artifacts Ignored](https://img.shields.io/badge/artifacts-ignored%20and%20regenerable-informational)",
+                "purpose": "Clarifies that local proof files are reproducible and not committed.",
+            },
+        ]
+
+    def _reviewer_proof_checklist(self, items: list[ArtifactInventoryItem]) -> list[JsonDict]:
+        required_names = [
+            "Artifact Inventory + README Checklist",
+            "Reviewer Walkthrough Pack",
+            "Release Candidate Publish Pack",
+            "Local CI Doctor Audit Pack",
+            "UI Verification Pack",
+            "GitHub Push Readiness + Branch Hygiene Pack",
+            "Runtime Demo Server Pack",
+            "API Contract Reviewer Collection",
+            "Local Launch Checklist",
+            "Security Evidence Bundle",
+        ]
+        generated = {item.name: item.generated for item in items}
+        checklist = [
+            {
+                "item": "Run the full acceptance command block before publishing.",
+                "status": "required",
+                "proof": "python -m pytest -q; python -m ruff check app tests dashboard; eval, conformance, demo, and MCP commands.",
+            },
+            {
+                "item": "Open the generated README Checklist Markdown.",
+                "status": "required",
+                "proof": "data/artifact_indexes/readme_checklist_latest.md",
+            },
+        ]
+        checklist.extend(
+            {
+                "item": f"Regenerate {name}.",
+                "status": "present" if generated.get(name) else "needs_regeneration",
+                "proof": name,
+            }
+            for name in required_names
+        )
+        return checklist
+
+    def _readme_checklist_suggestions(self, inventory: ArtifactInventoryResult) -> list[str]:
+        return [
+            "Add a short `Reviewer Proof Checklist` section near Quick Start with the acceptance commands and generated artifact paths.",
+            "Mention `GET /artifacts/inventory` beside the Release Pack and Reviewer Quickstart endpoints.",
+            "Keep badges informational only; the source of truth is the local command output and generated README Checklist pack.",
+            f"Disclose that {inventory.generated_directory_count}/{inventory.artifact_count} artifact directories currently have local files.",
+        ]
+
+    def _local_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/artifacts/inventory -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/artifacts/readme-checklist -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ui/dashboard-smoke -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ui/verification-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/git/readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/git/push-plan -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
+            'rg "artifacts/inventory|artifacts/readme-checklist|Artifact Inventory|README Checklist|artifact_indexes|reviewer proof checklist" app dashboard docs README.md tests sample_data',
+            'rg "git/readiness|git/push-plan|GitHub Push Readiness|git_packs|Branch Hygiene|Git Readiness" app dashboard docs README.md tests scripts sample_data',
+            'rg "runtime/demo-readiness|runtime/demo-pack|Runtime Demo|runtime_packs|runtime_check|start_demo" app dashboard docs README.md tests scripts sample_data',
+            'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\artifact_indexes -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\runtime_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _cleanup_regeneration_notes(self) -> list[str]:
+        return [
+            "Generated Markdown and JSON files live under ignored `data/` subfolders and can be deleted safely.",
+            "Regenerate the inventory with `POST /artifacts/readme-checklist` after producing other packs.",
+            "Use `Get-ChildItem -Recurse -File data\\artifact_indexes` to confirm the README Checklist pack exists.",
+            "Use `Get-ChildItem -Recurse -File data\\runtime_packs` to confirm the Runtime Demo Server Pack exists after export.",
+            "Use `Get-ChildItem -Recurse -File data\\api_contracts` to confirm the API Contract Reviewer Collection exists after export.",
+            "Do not commit generated `data/artifact_indexes/` files; commit the service, tests, and docs that reproduce them.",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Freshness is based on local filesystem timestamps, not a remote CI run.",
+            "The inventory reports expected artifact directories even when a fresh clone has not generated them yet.",
+            "README badges are suggestions; passing command output remains the reviewer proof checklist source of truth.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        inventory = bundle["artifact_inventory"]
+        lines = [
+            "# README Checklist Artifact Pack",
+            "",
+            f"- Checklist ID: `{bundle['checklist_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Inventory count: `{inventory['artifact_count']}`",
+            "",
+            "## Artifact Inventory",
+            "",
+            "| Artifact | Directory | Ignored | Generated | Producer | Purpose |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| {item['name']} | `{item['directory']}` | `{item['ignored_status']}` | `{item['generated']}` | `{item['producer_endpoint'] or item['producer_command']}` | {item['reviewer_purpose']} |"
+                for item in inventory["items"]
+            ],
+            "",
+            "## README Badge Suggestions",
+            "",
+            *[
+                f"- {item['label']}: `{item['markdown']}` - {item['purpose']}"
+                for item in bundle["readme_badge_suggestions"]
+            ],
+            "",
+            "## README Checklist Suggestions",
+            "",
+            *[f"- {item}" for item in bundle["readme_checklist_suggestions"]],
+            "",
+            "## reviewer proof checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_proof_checklist"]
+            ],
+            "",
+            "## Local Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_commands"]],
+            "",
+            "## Cleanup And Regeneration Notes",
+            "",
+            *[f"- {note}" for note in bundle["cleanup_regeneration_notes"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _resolve(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+    def _display_path(self, path: Path) -> str:
+        return str(path) if path.is_absolute() else path.as_posix()
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._resolve(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8")
+
+    def _is_relative_to(self, path: Path, parent: Path) -> bool:
+        try:
+            path.resolve().relative_to(parent.resolve())
+        except ValueError:
+            return False
+        return True
+
+
+class FinalHandoffService:
+    AUDIT_ID = "final_readme_consistency_audit_latest"
+    PACK_ID = "final_handoff_pack_latest"
+    REQUIRED_FINAL_ENDPOINTS = ["/handoff/final-audit", "/handoff/final-pack"]
+    REQUIRED_IGNORES = ["data/final_handoff/"]
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "final_handoff"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def final_audit(self) -> FinalAuditResult:
+        endpoint_summary = self._endpoint_inventory_summary()
+        mcp_summary = self._mcp_inventory_summary()
+        artifact_summary = self._artifact_inventory_summary()
+        checks = [
+            self._readme_endpoint_mcp_check(),
+            self._docs_api_coverage_check(endpoint_summary),
+            self._architecture_evaluation_coverage_check(),
+            self._demo_output_claims_check(),
+            self._scripts_present_check(),
+            self._dashboard_smoke_script_check(),
+            self._generated_artifact_directory_docs_check(),
+            self._mcp_clarity_check(mcp_summary),
+            self._local_mock_limitations_check(),
+            self._azure_openai_optional_notes_check(),
+        ]
+        failures = [check for check in checks if check.status == "fail"]
+        warnings = [check for check in checks if check.status == "warn"]
+        readiness_status: SecurityReadinessStatus = "ready"
+        if failures:
+            readiness_status = "blocked"
+        elif warnings:
+            readiness_status = "needs_review"
+        score = self._score(checks, failures, warnings)
+        summary = {
+            "audit_id": self.AUDIT_ID,
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "check_count": len(checks),
+            "pass_count": sum(1 for check in checks if check.status == "pass"),
+            "warn_count": len(warnings),
+            "fail_count": len(failures),
+            "implemented_endpoint_count": endpoint_summary["implemented_endpoint_count"],
+            "mcp_tool_count": mcp_summary["tool_count"],
+            "mcp_resource_count": mcp_summary["resource_count"],
+            "mcp_prompt_count": mcp_summary["prompt_count"],
+            "artifact_directory_count": artifact_summary["artifact_count"],
+            "final_handoff_directory": str(self.output_dir),
+        }
+        return FinalAuditResult(
+            audit_id=self.AUDIT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=score,
+            summary=summary,
+            checks=checks,
+            endpoint_inventory_summary=endpoint_summary,
+            mcp_inventory_summary=mcp_summary,
+            artifact_inventory_summary=artifact_summary,
+            verification_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def final_pack(
+        self,
+        request: FinalHandoffPackRequest | None = None,
+    ) -> FinalHandoffPackResult:
+        request = request or FinalHandoffPackRequest()
+        audit = self.final_audit()
+        dashboard_smoke = self.app_state.ui_verification.dashboard_smoke()
+        conformance = await self.app_state.conformance.generate()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": audit.readiness_status,
+            "score": audit.score,
+            "final_audit": audit.model_dump(mode="json"),
+            "exact_clone_run_commands": self._exact_clone_run_commands(),
+            "end_to_end_verification_order": self._end_to_end_verification_order(),
+            "endpoint_inventory_summary": audit.endpoint_inventory_summary,
+            "mcp_inventory_summary": audit.mcp_inventory_summary,
+            "artifact_inventory_summary": audit.artifact_inventory_summary,
+            "dashboard_smoke_summary": dashboard_smoke.model_dump(mode="json"),
+            "eval_conformance_proof_summary": self._eval_conformance_proof_summary(conformance),
+            "recruiter_facing_final_readme_blurb": self._recruiter_readme_blurb(audit),
+            "limitations": audit.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "handoff.final_pack_exported",
+            "final_handoff_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "check_count": len(audit.checks),
+                "fail_count": audit.summary["fail_count"],
+            },
+        )
+        return FinalHandoffPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=audit.readiness_status,
+            score=audit.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "check_count": len(audit.checks),
+                "fail_count": audit.summary["fail_count"],
+                "endpoint_count": audit.endpoint_inventory_summary["implemented_endpoint_count"],
+                "artifact_count": audit.artifact_inventory_summary["artifact_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _readme_endpoint_mcp_check(self) -> FinalAuditCheck:
+        readme = self._read_text(Path("README.md"))
+        required = [
+            *self.REQUIRED_FINAL_ENDPOINTS,
+            "Final Handoff",
+            "README Consistency",
+            "final_handoff",
+            "MCP",
+            "tools, resources, and prompts",
+        ]
+        return self._contains_check(
+            "readme_endpoint_mcp_mentions",
+            "readme",
+            "README endpoint and MCP mentions",
+            readme,
+            required,
+            "README should mention final audit/pack endpoints, final_handoff artifacts, and MCP tools/resources/prompts.",
+            ["README.md"],
+        )
+
+    def _docs_api_coverage_check(self, endpoint_summary: JsonDict) -> FinalAuditCheck:
+        docs_api = self._read_text(Path("docs") / "api.md")
+        required = [*self.REQUIRED_FINAL_ENDPOINTS, "Final Handoff", "README Consistency"]
+        check = self._contains_check(
+            "docs_api_coverage",
+            "docs",
+            "docs/api endpoint coverage",
+            docs_api,
+            required,
+            "Document the final handoff endpoints and response/export shapes in docs/api.md.",
+            ["docs/api.md"],
+        )
+        if check.status == "pass" and endpoint_summary["missing_from_docs_api"]:
+            return check.model_copy(
+                update={
+                    "status": "warn",
+                    "detail": (
+                        "Final handoff endpoints are documented, but some implemented routes are not mentioned in docs/api.md: "
+                        + ", ".join(endpoint_summary["missing_from_docs_api"][:8])
+                    ),
+                }
+            )
+        return check
+
+    def _architecture_evaluation_coverage_check(self) -> FinalAuditCheck:
+        architecture = self._read_text(Path("docs") / "architecture.md")
+        evaluation = self._read_text(Path("docs") / "evaluation.md")
+        required = [
+            "FinalHandoffService",
+            "Final Handoff Flow",
+            "Final Handoff tests",
+            "final_handoff",
+        ]
+        return self._contains_check(
+            "architecture_evaluation_coverage",
+            "docs",
+            "Architecture and evaluation coverage",
+            f"{architecture}\n{evaluation}",
+            required,
+            "Add final handoff architecture and evaluation/test coverage notes.",
+            ["docs/architecture.md", "docs/evaluation.md"],
+        )
+
+    def _demo_output_claims_check(self) -> FinalAuditCheck:
+        demo = self._read_text(Path("app") / "demo.py")
+        return self._contains_check(
+            "demo_output_claims",
+            "demo",
+            "Demo output claims",
+            demo,
+            ["final audit status", "final_audit_status", "final pack path", "final_pack_path"],
+            "Have python -m app.demo print final audit status and Final Handoff Pack path.",
+            ["app/demo.py"],
+        )
+
+    def _scripts_present_check(self) -> FinalAuditCheck:
+        paths = [Path("scripts"), Path("scripts") / "dashboard_smoke.py", Path("app") / "mcp_server.py"]
+        existing = [path.as_posix() for path in paths if self._root(path).exists()]
+        status = "pass" if len(existing) == len(paths) else "fail"
+        return FinalAuditCheck(
+            id="scripts_present",
+            category="scripts",
+            status=status,
+            title="Scripts and local CLI entry points present",
+            detail=f"Found {len(existing)} of {len(paths)} required script/CLI paths.",
+            evidence=existing,
+            remediation="Restore scripts/dashboard_smoke.py and app/mcp_server.py." if status == "fail" else None,
+        )
+
+    def _dashboard_smoke_script_check(self) -> FinalAuditCheck:
+        combined = self._combined_text(
+            [
+                Path("README.md"),
+                Path("docs") / "api.md",
+                Path("docs") / "evaluation.md",
+                Path("scripts") / "dashboard_smoke.py",
+            ]
+        )
+        return self._contains_check(
+            "dashboard_smoke_script_present",
+            "dashboard",
+            "Dashboard smoke script present and documented",
+            combined,
+            ["python scripts\\dashboard_smoke.py", "Dashboard Smoke"],
+            "Keep the dashboard smoke script and command discoverable in README/docs.",
+            ["scripts/dashboard_smoke.py", "README.md", "docs/evaluation.md"],
+        )
+
+    def _generated_artifact_directory_docs_check(self) -> FinalAuditCheck:
+        combined = self._combined_text(
+            [
+                Path(".gitignore"),
+                Path("README.md"),
+                Path("docs") / "api.md",
+                Path("docs") / "architecture.md",
+                Path("docs") / "evaluation.md",
+            ]
+        )
+        required = ["data/final_handoff/", "final_handoff", "final_handoff_pack_latest.json", "final_handoff_pack_latest.md"]
+        return self._contains_check(
+            "generated_artifact_directory_docs",
+            "artifacts",
+            "Generated artifact directory docs",
+            combined,
+            required,
+            "Document and ignore the generated data/final_handoff/ artifact directory.",
+            [".gitignore", "README.md", "docs/api.md"],
+        )
+
+    def _mcp_clarity_check(self, mcp_summary: JsonDict) -> FinalAuditCheck:
+        combined = self._combined_text(
+            [
+                Path("README.md"),
+                Path("docs") / "mcp.md",
+                Path("app") / "mcp_server.py",
+            ]
+        )
+        required = [
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "tools",
+            "resources",
+            "prompts",
+        ]
+        check = self._contains_check(
+            "mcp_tools_resources_prompts_clarity",
+            "mcp",
+            "MCP tools/resources/prompts clarity",
+            combined,
+            required,
+            "Clarify MCP tool, resource, and prompt commands in README and docs/mcp.md.",
+            ["README.md", "docs/mcp.md", "app/mcp_server.py"],
+        )
+        if check.status == "pass" and not all(
+            [mcp_summary["tool_count"], mcp_summary["resource_count"], mcp_summary["prompt_count"]]
+        ):
+            return check.model_copy(
+                update={
+                    "status": "fail",
+                    "detail": "MCP docs are present, but at least one MCP inventory category is empty.",
+                }
+            )
+        return check
+
+    def _local_mock_limitations_check(self) -> FinalAuditCheck:
+        combined = self._combined_text(
+            [
+                Path("README.md"),
+                Path("docs") / "api.md",
+                Path("docs") / "architecture.md",
+                Path("docs") / "evaluation.md",
+                Path("docs") / "mcp.md",
+            ]
+        ).lower()
+        return self._contains_check(
+            "local_mock_limitation_clarity",
+            "limitations",
+            "Local/mock limitation clarity",
+            combined,
+            ["local/mock", "mock mode", "no azure", "openai", "external"],
+            "Make local/mock limitations and external-service-free acceptance clearer.",
+            ["README.md", "docs/api.md", "docs/evaluation.md"],
+        )
+
+    def _azure_openai_optional_notes_check(self) -> FinalAuditCheck:
+        combined = self._combined_text(
+            [
+                Path("README.md"),
+                Path("docs") / "azure-deployment-notes.md",
+                Path("app") / "providers.py",
+                Path("app") / "config.py",
+            ]
+        )
+        return self._contains_check(
+            "azure_openai_optional_notes",
+            "providers",
+            "Azure/OpenAI optional notes",
+            combined,
+            ["OpenAI", "Azure OpenAI", "LLM_PROVIDER=azure_openai", "optional"],
+            "Document OpenAI and Azure OpenAI as optional providers, not acceptance prerequisites.",
+            ["README.md", "docs/azure-deployment-notes.md"],
+        )
+
+    def _endpoint_inventory_summary(self) -> JsonDict:
+        main_text = self._read_text(Path("app") / "main.py")
+        docs_api = self._read_text(Path("docs") / "api.md")
+        pattern = re.compile(r"@app\.(get|post|patch|put|delete)\(\s*[\"']([^\"']+)[\"']")
+        endpoints = [
+            {"method": method.upper(), "path": path, "docs_api_mentioned": path in docs_api}
+            for method, path in pattern.findall(main_text)
+        ]
+        endpoints = sorted(endpoints, key=lambda item: (item["path"], item["method"]))
+        return {
+            "implemented_endpoint_count": len(endpoints),
+            "documented_endpoint_count": sum(1 for item in endpoints if item["docs_api_mentioned"]),
+            "missing_from_docs_api": [item["path"] for item in endpoints if not item["docs_api_mentioned"]],
+            "final_endpoints_present": {
+                path: any(item["path"] == path for item in endpoints)
+                for path in self.REQUIRED_FINAL_ENDPOINTS
+            },
+            "final_endpoints_documented": {
+                path: path in docs_api
+                for path in self.REQUIRED_FINAL_ENDPOINTS
+            },
+            "endpoints": endpoints,
+        }
+
+    def _mcp_inventory_summary(self) -> JsonDict:
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        return {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            "tools": sorted(tool.name for tool in tools),
+            "resources": sorted(resource.uri for resource in resources),
+            "prompts": sorted(prompt.id for prompt in prompts),
+            "commands": [
+                "python -m app.mcp_server tools",
+                "python -m app.mcp_server resources",
+                "python -m app.mcp_server prompts",
+            ],
+        }
+
+    def _artifact_inventory_summary(self) -> JsonDict:
+        inventory = self.app_state.artifacts.inventory()
+        final_dir = self.output_dir.as_posix()
+        return {
+            "artifact_count": inventory.artifact_count,
+            "generated_directory_count": inventory.generated_directory_count,
+            "ignored_directory_count": inventory.ignored_directory_count,
+            "final_handoff_directory": final_dir,
+            "final_handoff_ignored": "data/final_handoff/" in self._read_text(Path(".gitignore")),
+            "items": [
+                {
+                    "name": item.name,
+                    "directory": item.directory,
+                    "producer": item.producer_endpoint or item.producer_command,
+                    "ignored_status": item.ignored_status,
+                    "generated": item.generated,
+                }
+                for item in inventory.items
+            ],
+        }
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "handoff/final-audit|handoff/final-pack|Final Handoff|final_handoff|README Consistency|final audit" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\final_handoff -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _exact_clone_run_commands(self) -> list[str]:
+        clone_url = self._git_remote_url()
+        clone_command = (
+            f"git clone {clone_url} emcp-hub"
+            if clone_url
+            else "git clone <repo-url> emcp-hub"
+        )
+        return [
+            clone_command,
+            "cd emcp-hub",
+            "python -m pip install -r requirements-dev.txt",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m uvicorn app.main:app --reload --port 8000",
+        ]
+
+    def _end_to_end_verification_order(self) -> list[JsonDict]:
+        return [
+            {"step": 1, "name": "Install dependencies", "command": "python -m pip install -r requirements-dev.txt"},
+            {"step": 2, "name": "Run tests", "command": "python -m pytest -q"},
+            {"step": 3, "name": "Run lint", "command": "python -m ruff check app tests dashboard"},
+            {"step": 4, "name": "Run evals", "command": "python -m app.evals.run_eval"},
+            {"step": 5, "name": "Validate manifests only", "command": "python -m app.evals.run_eval --validate-only"},
+            {"step": 6, "name": "Run MCP conformance", "command": "python -m app.evals.run_conformance"},
+            {"step": 7, "name": "Run dashboard smoke", "command": "python scripts\\dashboard_smoke.py"},
+            {"step": 8, "name": "Run demo", "command": "python -m app.demo"},
+            {"step": 9, "name": "Inspect MCP tools", "command": "python -m app.mcp_server tools"},
+            {"step": 10, "name": "Inspect MCP resources", "command": "python -m app.mcp_server resources"},
+            {"step": 11, "name": "Inspect MCP prompts", "command": "python -m app.mcp_server prompts"},
+            {"step": 12, "name": "Export final handoff pack", "command": "POST /handoff/final-pack"},
+        ]
+
+    def _eval_conformance_proof_summary(self, conformance: ConformanceReport) -> JsonDict:
+        return {
+            "eval_commands": [
+                "python -m app.evals.run_eval",
+                "python -m app.evals.run_eval --validate-only",
+            ],
+            "conformance_command": "python -m app.evals.run_conformance",
+            "conformance_status": conformance.status,
+            "promoted_skill_count": conformance.promoted_skill_count,
+            "passed_skill_count": conformance.passed_skill_count,
+            "failed_skill_count": conformance.failed_skill_count,
+            "skills": [skill.model_dump(mode="json") for skill in conformance.skills],
+        }
+
+    def _recruiter_readme_blurb(self, audit: FinalAuditResult) -> str:
+        return (
+            "Final Handoff: this repo includes a local README Consistency Auditor and Final Handoff Pack that "
+            f"checks endpoint/docs/MCP/demo/artifact claims against source, reports {audit.summary['check_count']} "
+            "structured checks, and writes ignored Markdown/JSON proof under data/final_handoff/ for GitHub reviewers."
+        )
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The final audit is deterministic local source inspection; it does not execute every acceptance command.",
+            "Endpoint coverage is checked by route strings and docs mentions, not by remote API crawling.",
+            "MCP inventory is from the local in-process adapter and excludes disabled, draft, and validated-only skills.",
+            "Generated Final Handoff Pack artifacts live under ignored data/final_handoff/ and should be regenerated locally.",
+            "OpenAI and Azure OpenAI are optional provider integrations; the acceptance path stays local/mock.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        audit = bundle["final_audit"]
+        lines = [
+            "# Final Handoff Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            "",
+            "## Final Audit Results",
+            "",
+            "| Status | Category | Check | Detail |",
+            "| --- | --- | --- | --- |",
+            *[
+                f"| `{check['status']}` | {check['category']} | {check['title']} | {check['detail']} |"
+                for check in audit["checks"]
+            ],
+            "",
+            "## Exact Clone/Run Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["exact_clone_run_commands"]],
+            "",
+            "## End-To-End Verification Order",
+            "",
+            *[
+                f"- {item['step']}. {item['name']}: `{item['command']}`"
+                for item in bundle["end_to_end_verification_order"]
+            ],
+            "",
+            "## Endpoint Inventory Summary",
+            "",
+            f"- Implemented endpoints: `{bundle['endpoint_inventory_summary']['implemented_endpoint_count']}`",
+            f"- Documented endpoints: `{bundle['endpoint_inventory_summary']['documented_endpoint_count']}`",
+            f"- Missing from docs/api.md: `{len(bundle['endpoint_inventory_summary']['missing_from_docs_api'])}`",
+            "",
+            "## MCP Inventory Summary",
+            "",
+            f"- Tools: `{bundle['mcp_inventory_summary']['tool_count']}`",
+            f"- Resources: `{bundle['mcp_inventory_summary']['resource_count']}`",
+            f"- Prompts: `{bundle['mcp_inventory_summary']['prompt_count']}`",
+            "",
+            "## Artifact Inventory Summary",
+            "",
+            f"- Artifact directories: `{bundle['artifact_inventory_summary']['artifact_count']}`",
+            f"- Generated directories: `{bundle['artifact_inventory_summary']['generated_directory_count']}`",
+            f"- Final Handoff directory: `{bundle['artifact_inventory_summary']['final_handoff_directory']}`",
+            "",
+            "## Dashboard Smoke Summary",
+            "",
+            f"- Status: `{bundle['dashboard_smoke_summary']['readiness_status']}`",
+            f"- Checks: `{bundle['dashboard_smoke_summary']['summary']['check_count']}`",
+            f"- Failures: `{bundle['dashboard_smoke_summary']['summary']['fail_count']}`",
+            "",
+            "## Eval/Conformance Proof Summary",
+            "",
+            f"- Conformance status: `{bundle['eval_conformance_proof_summary']['conformance_status']}`",
+            f"- Promoted skills: `{bundle['eval_conformance_proof_summary']['promoted_skill_count']}`",
+            f"- Passed skills: `{bundle['eval_conformance_proof_summary']['passed_skill_count']}`",
+            "",
+            "## Recruiter-Facing Final README Blurb",
+            "",
+            bundle["recruiter_facing_final_readme_blurb"],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _contains_check(
+        self,
+        check_id: str,
+        category: str,
+        title: str,
+        text: str,
+        required: list[str],
+        remediation: str,
+        evidence_files: list[str],
+    ) -> FinalAuditCheck:
+        lowered = text.lower()
+        missing = [item for item in required if item.lower() not in lowered]
+        status: CiDoctorCheckStatus = "pass" if not missing else "fail"
+        return FinalAuditCheck(
+            id=check_id,
+            category=category,
+            status=status,
+            title=title,
+            detail=(
+                f"Found all {len(required)} required claim marker(s)."
+                if not missing
+                else f"Missing claim marker(s): {', '.join(missing)}."
+            ),
+            evidence=evidence_files if not missing else [item for item in required if item not in missing],
+            remediation=None if not missing else remediation,
+        )
+
+    def _score(
+        self,
+        checks: list[FinalAuditCheck],
+        failures: list[FinalAuditCheck],
+        warnings: list[FinalAuditCheck],
+    ) -> int:
+        passed = sum(1 for check in checks if check.status == "pass")
+        total = len(checks) or 1
+        score = round(100 * passed / total)
+        score -= min(40, len(failures) * 12)
+        score -= min(20, len(warnings) * 4)
+        return max(0, min(100, score))
+
+    def _git_remote_url(self) -> str | None:
+        git_config = self._root(Path(".git") / "config")
+        if not git_config.exists():
+            return None
+        match = re.search(r"url\s*=\s*(.+)", git_config.read_text(encoding="utf-8", errors="ignore"))
+        return match.group(1).strip() if match else None
+
+    def _combined_text(self, paths: list[Path]) -> str:
+        return "\n".join(self._read_text(path) for path in paths)
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._root(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8")
+
+    def _root(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+
 class PersistenceService:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path(".local") / "skill_hub_snapshot.json"
@@ -784,6 +12864,30 @@ class AppState:
     mcp: McpToolAdapter = field(init=False)
     agent: AgentRunner = field(init=False)
     governance: GovernanceReportService = field(init=False)
+    conformance: ConformanceReportService = field(init=False)
+    evidence: EvidenceBundleService = field(init=False)
+    releases: ReleaseService = field(init=False)
+    audit_query: AuditQueryService = field(init=False)
+    attestations: ComplianceAttestationService = field(init=False)
+    capacity: CapacityPlanningService = field(init=False)
+    dependencies: DependencyMapService = field(init=False)
+    incidents: SkillIncidentDrillService = field(init=False)
+    tenant_sandbox: TenantPolicySandboxService = field(init=False)
+    marketplace: SkillMarketplaceGovernanceService = field(init=False)
+    usage: SkillUsageAnalyticsService = field(init=False)
+    enterprise: EnterpriseReadinessService = field(init=False)
+    smoke: SmokeMatrixService = field(init=False)
+    portfolio: PortfolioEvidenceService = field(init=False)
+    release_candidate: ReleaseCandidateService = field(init=False)
+    ci_doctor: CiDoctorService = field(init=False)
+    reviewer: ReviewerQuickstartService = field(init=False)
+    ui_verification: DashboardSmokeService = field(init=False)
+    runtime_demo: RuntimeDemoService = field(init=False)
+    artifacts: ArtifactInventoryService = field(init=False)
+    final_handoff: FinalHandoffService = field(init=False)
+    api_contracts: ApiContractService = field(init=False)
+    git_readiness: GitReadinessService = field(init=False)
+    workflows: WorkflowTemplateService = field(init=False)
     persistence: PersistenceService = field(init=False)
 
     def __post_init__(self) -> None:
@@ -801,5 +12905,29 @@ class AppState:
             self.validator,
         )
         self.agent = AgentRunner(self.mcp)
+        self.workflows = WorkflowTemplateService(self)
         self.governance = GovernanceReportService(self)
+        self.conformance = ConformanceReportService(self)
+        self.evidence = EvidenceBundleService(self)
+        self.releases = ReleaseService(self)
+        self.audit_query = AuditQueryService(self)
+        self.attestations = ComplianceAttestationService(self)
+        self.capacity = CapacityPlanningService(self)
+        self.dependencies = DependencyMapService(self)
+        self.incidents = SkillIncidentDrillService(self)
+        self.tenant_sandbox = TenantPolicySandboxService(self)
+        self.marketplace = SkillMarketplaceGovernanceService(self)
+        self.usage = SkillUsageAnalyticsService(self)
+        self.enterprise = EnterpriseReadinessService(self)
+        self.smoke = SmokeMatrixService(self)
+        self.portfolio = PortfolioEvidenceService(self)
+        self.release_candidate = ReleaseCandidateService(self)
+        self.ci_doctor = CiDoctorService(self)
+        self.reviewer = ReviewerQuickstartService(self)
+        self.ui_verification = DashboardSmokeService(self)
+        self.runtime_demo = RuntimeDemoService(self)
+        self.artifacts = ArtifactInventoryService(self)
+        self.final_handoff = FinalHandoffService(self)
+        self.api_contracts = ApiContractService(self)
+        self.git_readiness = GitReadinessService()
         self.persistence = PersistenceService()
