@@ -1444,6 +1444,41 @@ class ApiContractDriftPackResult(BaseModel):
     summary: JsonDict
 
 
+class ApiContractRemediationRunRequest(BaseModel):
+    actor: str = "contract-remediation-reviewer"
+    max_steps: int = Field(default=6, ge=1, le=12)
+    include_pack_export: bool = False
+
+
+class ApiContractRemediationRunResult(BaseModel):
+    run_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    observations: JsonDict
+    bounded_steps: list[JsonDict] = Field(default_factory=list)
+    remediation_backlog: list[JsonDict] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    artifacts: JsonDict = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ApiContractRemediationPackRequest(BaseModel):
+    actor: str = "contract-remediation-reviewer"
+    max_steps: int = Field(default=6, ge=1, le=12)
+
+
+class ApiContractRemediationPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class FinalAuditCheck(BaseModel):
     id: str
     category: str

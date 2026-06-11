@@ -17259,6 +17259,8 @@ class DashboardSmokeService:
             self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
             self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
             self._endpoint_ref("api_contract_drift_pack", "POST", "/api/contract-drift-pack", "Writes Tool Contract Drift Pack artifacts."),
+            self._endpoint_ref("api_contract_remediation_run", "GET", "/api/contract-remediation-run", "Read-only bounded contract remediation run."),
+            self._endpoint_ref("api_contract_remediation_pack", "POST", "/api/contract-remediation-pack", "Writes Contract Remediation Run artifacts."),
         ]
 
     def _endpoint_ref(self, ref_id: str, method: str, path: str, purpose: str) -> JsonDict:
@@ -17303,6 +17305,7 @@ class DashboardSmokeService:
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
             self._artifact_tab("api_contract", "API Contract", "Reviewer Collection", "data/api_contracts/"),
+            self._artifact_tab("api_contract_remediation", "API Contract", "Remediation Run", "data/api_contracts/"),
         ]
 
     def _artifact_tab(self, tab_id: str, view: str, tab_label: str, artifact_dir: str) -> JsonDict:
@@ -18787,6 +18790,18 @@ class ArtifactInventoryService:
                     "contract_drift_pack_latest.md",
                 ],
                 "FastAPI invoke schema hashes, MCP-vs-manifest schema fingerprints, manifest version checks, tool governance notes, and remediation actions.",
+            ),
+            self._catalog_row(
+                "api_contract_remediation",
+                "Contract Remediation Run Pack",
+                Path("data") / "api_contracts",
+                "POST /api/contract-remediation-pack",
+                "Invoke-RestMethod http://localhost:8000/api/contract-remediation-pack -Method POST -Headers $headers",
+                [
+                    "contract_remediation_pack_latest.json",
+                    "contract_remediation_pack_latest.md",
+                ],
+                "Read-only contract remediation run with state observation, bounded action loop, step verification, backlog, and reviewer handoff evidence.",
             ),
             self._catalog_row(
                 "launch_checklists",

@@ -13,6 +13,10 @@ from app.models import (
     ApiContractCheck,
     ApiContractDriftPackRequest,
     ApiContractDriftPackResult,
+    ApiContractRemediationPackRequest,
+    ApiContractRemediationPackResult,
+    ApiContractRemediationRunRequest,
+    ApiContractRemediationRunResult,
     ApiReviewerCollectionRequest,
     ApiReviewerCollectionResult,
     CiDoctorCheckStatus,
@@ -28,6 +32,8 @@ class ApiContractService:
     AUDIT_ID = "api_contract_audit_latest"
     COLLECTION_ID = "reviewer_collection_latest"
     DRIFT_PACK_ID = "contract_drift_pack_latest"
+    REMEDIATION_RUN_ID = "contract_remediation_run_latest"
+    REMEDIATION_PACK_ID = "contract_remediation_pack_latest"
 
     IMPORTANT_ENDPOINTS = [
         ("POST", "/auth/demo-token"),
@@ -77,6 +83,8 @@ class ApiContractService:
         ("GET", "/api/contract-audit"),
         ("POST", "/api/reviewer-collection"),
         ("POST", "/api/contract-drift-pack"),
+        ("GET", "/api/contract-remediation-run"),
+        ("POST", "/api/contract-remediation-pack"),
         ("GET", "/handoff/final-audit"),
         ("POST", "/handoff/final-pack"),
         ("GET", "/runtime/demo-readiness"),
@@ -134,6 +142,8 @@ class ApiContractService:
         ("GET", "/api/contract-audit"),
         ("POST", "/api/reviewer-collection"),
         ("POST", "/api/contract-drift-pack"),
+        ("GET", "/api/contract-remediation-run"),
+        ("POST", "/api/contract-remediation-pack"),
         ("GET", "/repository/automation-plan"),
         ("POST", "/repository/automation-pack"),
         ("GET", "/platform/pack"),
@@ -355,6 +365,144 @@ class ApiContractService:
             },
         )
 
+    def remediation_run(
+        self,
+        request: ApiContractRemediationRunRequest | None = None,
+    ) -> ApiContractRemediationRunResult:
+        request = request or ApiContractRemediationRunRequest()
+        audit = self.contract_audit()
+        drift = audit.contract_drift
+        observations = self._remediation_observations(audit)
+        all_steps = self._remediation_steps(audit)
+        bounded_steps = all_steps[: request.max_steps]
+        truncated_steps = all_steps[request.max_steps :]
+        related_artifacts: JsonDict = {}
+        if request.include_pack_export:
+            drift_pack = self.contract_drift_pack(ApiContractDriftPackRequest(actor=request.actor))
+            related_artifacts["contract_drift_pack"] = {
+                "json_path": drift_pack.json_path,
+                "markdown_path": drift_pack.markdown_path,
+            }
+        step_fail_count = sum(1 for step in bounded_steps if step["status"] == "fail")
+        step_warn_count = sum(1 for step in bounded_steps if step["status"] == "warn")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if drift["drift_count"] or step_fail_count:
+            readiness_status = "blocked"
+        elif drift["warning_count"] or step_warn_count or truncated_steps:
+            readiness_status = "needs_review"
+        backlog = [
+            item
+            for item in drift["remediation_plan"]
+            if item["severity"] in {"blocker", "review"}
+        ]
+        if truncated_steps:
+            backlog.append(
+                {
+                    "target": "bounded remediation loop",
+                    "severity": "review",
+                    "reason": f"{len(truncated_steps)} step(s) were outside max_steps={request.max_steps}.",
+                    "action": "Increase max_steps or review remaining steps manually before release.",
+                }
+            )
+        result = ApiContractRemediationRunResult(
+            run_id=self.REMEDIATION_RUN_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=audit.score,
+            observations=observations,
+            bounded_steps=bounded_steps,
+            remediation_backlog=backlog,
+            verification_commands=self._remediation_verification_commands(),
+            patterns_used=[
+                "state observation",
+                "bounded action loop",
+                "run transparency",
+                "step verification",
+                "task sandbox",
+            ],
+            artifacts=related_artifacts,
+            limitations=[
+                "The remediation run is read-only and never edits manifests, FastAPI routes, or MCP schemas automatically.",
+                "Step results are derived from local source inspection and in-process services; no external OpenAI, Azure, browser, or GitHub calls are required.",
+                "Generated artifacts are local reviewer evidence and should be regenerated after schema, route, or manifest changes.",
+            ],
+        )
+        self.app_state.audit.record(
+            "api.contract_remediation_run_observed",
+            "api_contract_remediation",
+            self.REMEDIATION_RUN_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": result.readiness_status,
+                "score": result.score,
+                "step_count": len(result.bounded_steps),
+                "backlog_count": len(result.remediation_backlog),
+            },
+        )
+        return result
+
+    def remediation_pack(
+        self,
+        request: ApiContractRemediationPackRequest | None = None,
+    ) -> ApiContractRemediationPackResult:
+        request = request or ApiContractRemediationPackRequest()
+        run = self.remediation_run(
+            ApiContractRemediationRunRequest(
+                actor=request.actor,
+                max_steps=request.max_steps,
+                include_pack_export=True,
+            )
+        )
+        bundle = {
+            "pack_id": self.REMEDIATION_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": run.readiness_status,
+            "score": run.score,
+            "remediation_run": run.model_dump(mode="json"),
+            "observations": run.observations,
+            "bounded_steps": run.bounded_steps,
+            "remediation_backlog": run.remediation_backlog,
+            "patterns_used": run.patterns_used,
+            "local_verification_commands": run.verification_commands,
+            "limitations": run.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.REMEDIATION_PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.REMEDIATION_PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._remediation_markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "api.contract_remediation_pack_exported",
+            "api_contract_remediation",
+            self.REMEDIATION_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": run.readiness_status,
+                "score": run.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ApiContractRemediationPackResult(
+            pack_id=self.REMEDIATION_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=run.readiness_status,
+            score=run.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": run.readiness_status,
+                "score": run.score,
+                "step_count": len(run.bounded_steps),
+                "backlog_count": len(run.remediation_backlog),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
     def _route_inventory(self) -> list[JsonDict]:
         source = self._read_text(Path("app") / "main.py")
         pattern = re.compile(
@@ -422,12 +570,20 @@ class ApiContractService:
         contract_refs = [
             endpoint
             for endpoint in endpoint_refs
-            if endpoint["path"] in {"/api/contract-audit", "/api/reviewer-collection"}
+            if endpoint["path"]
+            in {
+                "/api/contract-audit",
+                "/api/reviewer-collection",
+                "/api/contract-drift-pack",
+                "/api/contract-remediation-run",
+                "/api/contract-remediation-pack",
+            }
         ]
+        expected_contract_ref_count = 5
         return {
             "smoke_id": smoke.smoke_id,
             "readiness_status": smoke.readiness_status,
-            "aligned": not missing_routes and len(contract_refs) == 2,
+            "aligned": not missing_routes and len(contract_refs) >= expected_contract_ref_count,
             "endpoint_reference_count": len(endpoint_refs),
             "missing_route_references": missing_routes,
             "contract_endpoint_references": contract_refs,
@@ -790,6 +946,8 @@ class ApiContractService:
             "mcp_tools": ("GET", "/mcp/tools"),
             "contract_audit": ("GET", "/api/contract-audit"),
             "contract_drift_pack": ("POST", "/api/contract-drift-pack"),
+            "contract_remediation_run": ("GET", "/api/contract-remediation-run"),
+            "contract_remediation_pack": ("POST", "/api/contract-remediation-pack"),
         }
         route_alignment = {
             name: {"method": method, "path": path, "implemented": (method, path) in route_keys}
@@ -847,6 +1005,186 @@ class ApiContractService:
             )
         return plan
 
+    def _remediation_observations(self, audit: ApiContractAuditResult) -> JsonDict:
+        drift = audit.contract_drift
+        non_aligned = [
+            {
+                "skill_id": item["skill_id"],
+                "status": item["status"],
+                "reasons": item["drift_reasons"],
+                "remediation": item["remediation"],
+            }
+            for item in drift["mcp_manifest_matrix"]
+            if item["status"] != "aligned"
+        ]
+        return {
+            "observed_at": utc_now().isoformat(),
+            "audit_id": audit.audit_id,
+            "audit_readiness": audit.readiness_status,
+            "contract_drift_status": drift["status"],
+            "drift_count": drift["drift_count"],
+            "warning_count": drift["warning_count"],
+            "aligned_tool_count": drift["aligned_count"],
+            "openapi_route_count": audit.openapi_route_count,
+            "auth_protected_endpoint_count": audit.auth_protected_endpoint_count,
+            "mcp_tool_count": audit.mcp_inventory["tool_count"],
+            "mcp_resource_count": audit.mcp_inventory["resource_count"],
+            "mcp_prompt_count": audit.mcp_inventory["prompt_count"],
+            "dashboard_smoke_aligned": audit.dashboard_smoke_alignment["aligned"],
+            "fastapi_contract_status": drift["fastapi_contract"]["status"],
+            "non_aligned_contracts": non_aligned,
+            "source_of_truth": "Promoted skill manifests drive MCP tool schemas; FastAPI keeps a generic governed invocation envelope.",
+        }
+
+    def _remediation_steps(self, audit: ApiContractAuditResult) -> list[JsonDict]:
+        drift = audit.contract_drift
+        route_ok = audit.openapi_route_count > 0 and audit.auth_protected_endpoint_count > 0
+        schema_status = "fail" if drift["drift_count"] else "pass"
+        if drift["warning_count"] and schema_status == "pass":
+            schema_status = "warn"
+        artifact_paths = [
+            item["producer_endpoint"]
+            for item in audit.generated_artifact_endpoint_coverage
+            if item["producer_endpoint"]
+            in {
+                "POST /api/contract-drift-pack",
+                "POST /api/contract-remediation-pack",
+                "POST /api/reviewer-collection",
+            }
+            and item["implemented"]
+        ]
+        docs_paths = {
+            item["path"]: item
+            for item in audit.docs_api_coverage
+            if item["path"]
+            in {
+                "/api/contract-audit",
+                "/api/contract-drift-pack",
+                "/api/contract-remediation-run",
+                "/api/contract-remediation-pack",
+            }
+        }
+        docs_ok = all(item["implemented"] and item["docs_api_mentioned"] for item in docs_paths.values())
+        return [
+            self._remediation_step(
+                1,
+                "observe_contract_state",
+                "state observation",
+                "Observe FastAPI, auth, MCP, dashboard, and artifact contract state.",
+                "pass" if route_ok else "fail",
+                f"{audit.openapi_route_count} route(s), {audit.auth_protected_endpoint_count} protected endpoint(s), {audit.mcp_inventory['tool_count']} MCP tool(s).",
+                ["GET /api/contract-audit", "GET /mcp/tools"],
+                "python -m app.mcp_server tools",
+                "platform reviewer",
+            ),
+            self._remediation_step(
+                2,
+                "compare_manifest_mcp_fingerprints",
+                "step verification",
+                "Compare promoted manifest schema/version hashes with MCP tool schema/version annotations.",
+                schema_status,
+                f"{drift['aligned_count']} aligned tool(s), {drift['drift_count']} drift item(s), {drift['warning_count']} warning(s).",
+                [
+                    f"{item['skill_id']}:{item['status']}"
+                    for item in drift["mcp_manifest_matrix"]
+                ],
+                "python -m app.evals.run_conformance",
+                "skill platform owner",
+            ),
+            self._remediation_step(
+                3,
+                "verify_fastapi_governance_envelope",
+                "typed contracts",
+                "Verify FastAPI invocation request and response models retain governance and trace fields.",
+                "pass" if drift["fastapi_contract"]["status"] == "aligned" else "warn",
+                drift["fastapi_contract"]["note"],
+                [
+                    f"request_hash={drift['fastapi_contract']['request_schema_hash']}",
+                    f"response_hash={drift['fastapi_contract']['response_schema_hash']}",
+                ],
+                "python -m pytest tests/test_api_contracts.py -q",
+                "api maintainer",
+            ),
+            self._remediation_step(
+                4,
+                "check_docs_dashboard_artifacts",
+                "run transparency",
+                "Verify docs, dashboard smoke wiring, and generated artifact inventory expose the remediation surface.",
+                "pass" if docs_ok and audit.dashboard_smoke_alignment["aligned"] and artifact_paths else "warn",
+                f"docs_ok={docs_ok}; dashboard_aligned={audit.dashboard_smoke_alignment['aligned']}; artifact_refs={len(artifact_paths)}.",
+                [*artifact_paths, *[f"docs:{path}" for path in sorted(docs_paths)]],
+                "python scripts\\dashboard_smoke.py",
+                "docs and dashboard reviewer",
+            ),
+            self._remediation_step(
+                5,
+                "export_reviewer_evidence",
+                "task sandbox",
+                "Write local JSON/Markdown evidence without mutating repository source, remotes, or external services.",
+                "pass",
+                "The pack endpoints write ignored artifacts under data/api_contracts/ only.",
+                [
+                    "contract_drift_pack_latest.json",
+                    "contract_remediation_pack_latest.json",
+                ],
+                "Invoke-RestMethod http://localhost:8000/api/contract-remediation-pack -Method POST -Headers $headers",
+                "contract remediation reviewer",
+            ),
+            self._remediation_step(
+                6,
+                "handoff_release_gate",
+                "bounded action loop",
+                "Stop the remediation loop with a release-gate decision and clear backlog.",
+                "pass" if not drift["drift_count"] else "fail",
+                (
+                    "No blocking contract drift remains."
+                    if not drift["drift_count"]
+                    else f"{drift['drift_count']} blocking drift item(s) require owner remediation."
+                ),
+                [item["target"] for item in drift["remediation_plan"]],
+                "python -m app.demo",
+                "release reviewer",
+            ),
+        ]
+
+    def _remediation_step(
+        self,
+        index: int,
+        step_id: str,
+        pattern: str,
+        objective: str,
+        status: CiDoctorCheckStatus,
+        observation: str,
+        evidence: list[str],
+        verification_command: str,
+        owner: str,
+    ) -> JsonDict:
+        return {
+            "index": index,
+            "id": step_id,
+            "pattern": pattern,
+            "mode": "read_only",
+            "status": status,
+            "owner": owner,
+            "objective": objective,
+            "observation": observation,
+            "evidence": evidence[:12],
+            "verification_command": verification_command,
+            "next_action": "No action required." if status == "pass" else "Review evidence and apply the listed remediation before release.",
+        }
+
+    def _remediation_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_api_contracts.py -q",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "Invoke-RestMethod http://localhost:8000/api/contract-remediation-run -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-remediation-pack -Method POST -Headers $headers",
+            "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
     def _schema_hash(self, schema: JsonDict) -> str:
         return sha256(self._canonical_json(schema).encode("utf-8")).hexdigest()[:16]
 
@@ -875,6 +1213,18 @@ class ApiContractService:
             {"method": "GET", "path": "/skills", "with_api_key": True, "expected_status": 200},
             {"method": "GET", "path": "/api/contract-audit", "with_api_key": True, "expected_status": 200},
             {"method": "POST", "path": "/api/contract-drift-pack", "with_api_key": True, "expected_status": 200},
+            {
+                "method": "GET",
+                "path": "/api/contract-remediation-run",
+                "with_api_key": True,
+                "expected_status": 200,
+            },
+            {
+                "method": "POST",
+                "path": "/api/contract-remediation-pack",
+                "with_api_key": True,
+                "expected_status": 200,
+            },
             {"method": "GET", "path": "/marketplace/catalog", "with_api_key": True, "expected_status": 200},
             {"method": "GET", "path": "/skills/compatibility", "with_api_key": True, "expected_status": 200},
             {
@@ -952,6 +1302,8 @@ class ApiContractService:
                 "$headers = @{ $token.header = $token.token }",
                 "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/api/contract-remediation-run -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/api/contract-remediation-pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/marketplace/approvals -Headers $headers",
@@ -978,6 +1330,8 @@ class ApiContractService:
                 "curl.exe -s -X POST http://localhost:8000/auth/demo-token",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-audit",
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-drift-pack",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-remediation-run",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-remediation-pack",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/catalog",
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/rollout-pack",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/approvals",
@@ -1052,11 +1406,12 @@ class ApiContractService:
             "python -m app.mcp_server resources",
             "python -m app.mcp_server prompts",
             "Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/api/contract-remediation-pack -Method POST -Headers $headers",
             'rg "marketplace/catalog|marketplace/rollout-pack|marketplace/approvals|marketplace/approval-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             'rg "skills/compatibility|compatibility-pack|Skill Compatibility|compatibility_packs|deprecated skill|migration recommendations" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
-            'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
+            'rg "api/contract-audit|api/reviewer-collection|api/contract-remediation|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
         return [
@@ -1223,6 +1578,8 @@ class ApiContractService:
             "/api/contract-audit": "state.api_contracts.contract_audit",
             "/api/reviewer-collection": "state.api_contracts.reviewer_collection",
             "/api/contract-drift-pack": "state.api_contracts.contract_drift_pack",
+            "/api/contract-remediation-run": "state.api_contracts.remediation_run",
+            "/api/contract-remediation-pack": "state.api_contracts.remediation_pack",
             "/repository/automation-plan": "state.git_readiness.automation_plan",
             "/repository/automation-pack": "state.git_readiness.automation_pack",
             "/agents/collaborate": "state.agent_collaboration.run",
@@ -1294,6 +1651,57 @@ class ApiContractService:
             "## Governance Patterns",
             "",
             *[f"- {pattern}" for pattern in bundle["governance_patterns"]],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _remediation_markdown(self, bundle: JsonDict) -> str:
+        observations = bundle["observations"]
+        lines = [
+            "# Contract Remediation Run Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            "",
+            "## State Observation",
+            "",
+            f"- Contract drift status: `{observations['contract_drift_status']}`",
+            f"- Drift count: `{observations['drift_count']}`",
+            f"- Warning count: `{observations['warning_count']}`",
+            f"- Aligned MCP tools: `{observations['aligned_tool_count']}`",
+            f"- FastAPI contract status: `{observations['fastapi_contract_status']}`",
+            f"- Dashboard aligned: `{observations['dashboard_smoke_aligned']}`",
+            "",
+            "## Bounded Action Loop",
+            "",
+            "| Step | Status | Pattern | Owner | Verification |",
+            "| --- | --- | --- | --- | --- |",
+            *[
+                f"| {step['index']} `{step['id']}` | `{step['status']}` | {step['pattern']} | {step['owner']} | `{step['verification_command']}` |"
+                for step in bundle["bounded_steps"]
+            ],
+            "",
+            "## Remediation Backlog",
+            "",
+            *[
+                f"- `{item['severity']}` {item['target']}: {item['reason']} Action: {item['action']}"
+                for item in bundle["remediation_backlog"]
+            ],
+            "",
+            "## Patterns Used",
+            "",
+            *[f"- {pattern}" for pattern in bundle["patterns_used"]],
             "",
             "## Local Verification Commands",
             "",

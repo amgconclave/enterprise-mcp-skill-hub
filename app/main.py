@@ -21,6 +21,10 @@ from app.models import (
     ApiContractAuditResult,
     ApiContractDriftPackRequest,
     ApiContractDriftPackResult,
+    ApiContractRemediationPackRequest,
+    ApiContractRemediationPackResult,
+    ApiContractRemediationRunRequest,
+    ApiContractRemediationRunResult,
     ApiReviewerCollectionRequest,
     ApiReviewerCollectionResult,
     ArtifactInventoryResult,
@@ -648,6 +652,19 @@ def api_contract_drift_pack(
     _: str = Depends(require_api_key),
 ) -> ApiContractDriftPackResult:
     return state.api_contracts.contract_drift_pack(request or ApiContractDriftPackRequest())
+
+
+@app.get("/api/contract-remediation-run", response_model=ApiContractRemediationRunResult)
+def api_contract_remediation_run(_: str = Depends(require_api_key)) -> ApiContractRemediationRunResult:
+    return state.api_contracts.remediation_run(ApiContractRemediationRunRequest())
+
+
+@app.post("/api/contract-remediation-pack", response_model=ApiContractRemediationPackResult)
+def api_contract_remediation_pack(
+    request: ApiContractRemediationPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ApiContractRemediationPackResult:
+    return state.api_contracts.remediation_pack(request or ApiContractRemediationPackRequest())
 
 
 @app.get("/artifacts/inventory", response_model=ArtifactInventoryResult)

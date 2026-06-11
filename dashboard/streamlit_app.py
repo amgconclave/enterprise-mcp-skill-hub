@@ -14,6 +14,7 @@ from app.models import (
     AgentCollaborationRequest,
     AgentSocietyEvalRequest,
     ApiContractDriftPackRequest,
+    ApiContractRemediationPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
     AuditPackRequest,
@@ -1656,8 +1657,8 @@ elif view == "API Contract":
     col_routes.metric("OpenAPI routes", audit.openapi_route_count)
     col_auth.metric("Protected", audit.auth_protected_endpoint_count)
 
-    tab_checks, tab_endpoints, tab_mcp, tab_drift, tab_collection, tab_json = st.tabs(
-        ["Checks", "Endpoints", "MCP", "Contract Drift", "Reviewer Collection", "Audit JSON"]
+    tab_checks, tab_endpoints, tab_mcp, tab_drift, tab_remediation, tab_collection, tab_json = st.tabs(
+        ["Checks", "Endpoints", "MCP", "Contract Drift", "Remediation Run", "Reviewer Collection", "Audit JSON"]
     )
     with tab_checks:
         st.dataframe(
@@ -1722,6 +1723,29 @@ elif view == "API Contract":
         if st.button("Export Contract Drift Pack", use_container_width=True):
             export = state.api_contracts.contract_drift_pack(ApiContractDriftPackRequest(actor=drift_actor))
             st.success("Contract Drift Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
+    with tab_remediation:
+        remediation = state.api_contracts.remediation_run()
+        col_status, col_steps, col_backlog = st.columns(3)
+        col_status.metric("Run status", remediation.readiness_status)
+        col_steps.metric("Bounded steps", len(remediation.bounded_steps))
+        col_backlog.metric("Backlog", len(remediation.remediation_backlog))
+        st.dataframe(remediation.bounded_steps, use_container_width=True, hide_index=True)
+        st.json(
+            {
+                "observations": remediation.observations,
+                "patterns_used": remediation.patterns_used,
+                "remediation_backlog": remediation.remediation_backlog,
+                "verification_commands": remediation.verification_commands,
+            }
+        )
+        remediation_actor = st.text_input("Remediation pack actor", value="streamlit-contract-remediation-reviewer")
+        if st.button("Export Remediation Pack", use_container_width=True):
+            export = state.api_contracts.remediation_pack(
+                ApiContractRemediationPackRequest(actor=remediation_actor)
+            )
+            st.success("Contract Remediation Pack exported.")
             st.write(f"Artifact path: `{export.markdown_path}`")
             st.json(export.model_dump(mode="json"))
     with tab_collection:

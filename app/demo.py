@@ -9,6 +9,7 @@ from app.models import (
     AgentCollaborationRequest,
     AgentSocietyEvalRequest,
     ApiContractDriftPackRequest,
+    ApiContractRemediationPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
     AuditPackRequest,
@@ -327,6 +328,10 @@ async def main() -> None:
     api_contract_drift_pack = state.api_contracts.contract_drift_pack(
         ApiContractDriftPackRequest(actor="demo-contract-drift-reviewer")
     )
+    api_contract_remediation = state.api_contracts.remediation_run()
+    api_contract_remediation_pack = state.api_contracts.remediation_pack(
+        ApiContractRemediationPackRequest(actor="demo-contract-remediation-reviewer")
+    )
     print(
         json.dumps(
             {
@@ -616,6 +621,12 @@ async def main() -> None:
                 "reviewer_collection_path": api_reviewer_collection.markdown_path,
                 "contract drift pack path": api_contract_drift_pack.markdown_path,
                 "contract_drift_pack_path": api_contract_drift_pack.markdown_path,
+                "contract remediation readiness": api_contract_remediation.readiness_status,
+                "contract_remediation_readiness": api_contract_remediation.readiness_status,
+                "contract remediation steps": len(api_contract_remediation.bounded_steps),
+                "contract_remediation_steps": len(api_contract_remediation.bounded_steps),
+                "contract remediation pack path": api_contract_remediation_pack.markdown_path,
+                "contract_remediation_pack_path": api_contract_remediation_pack.markdown_path,
             },
             indent=2,
         )
