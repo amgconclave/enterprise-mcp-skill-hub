@@ -48,6 +48,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /reliability/skills` - returns per-skill failure counts, latency SLO posture, circuit breaker state, disable/re-enable recommendations, trace evidence, and local/mock limitations.
 - `PATCH /reliability/circuit-breakers/{skill_id}` - manually opens, half-opens, or closes a local in-memory circuit breaker for a skill and records audit evidence.
 - `POST /reliability/pack` - writes the Skill Reliability + Circuit Breaker Pack Markdown/JSON under ignored local folder `data/reliability_packs/`.
+- `GET /slo/report` - returns per-skill availability SLOs, error budget burn, latency budget, release-gate decisions, proof commands, and local/mock limitations.
+- `POST /slo/pack` - writes the Skill SLO + Error Budget Pack Markdown/JSON under ignored local folder `data/slo_packs/`.
 - `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
@@ -412,6 +414,22 @@ Invoke-RestMethod http://localhost:8000/reliability/pack `
 The reliability response combines deterministic local fixtures with live invocation history. It reports per-skill failure counts, blocked events, consecutive failures, p95 latency, latency SLO breaches, circuit state, recommended disable/re-enable action, recent failure traces, and local limitations.
 
 The Reliability Pack writes `reliability_pack_latest.json` and `.md` under ignored `data/reliability_packs/`. The pack includes the circuit breaker policy, recommendations, reviewer checklist, local proof commands, and limitations. Breaker state is local and in-memory by default.
+
+## Skill SLO And Error Budget
+
+```powershell
+Invoke-RestMethod http://localhost:8000/slo/report -Headers $headers
+
+Invoke-RestMethod http://localhost:8000/slo/pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"slo-reviewer"}'
+```
+
+The SLO report derives per-skill availability SLOs, error budget burn, latency budget remaining, burn-rate alerts, and release-gate decisions from the local reliability report. Promoted MCP skills with exhausted error budget or latency SLO breach are listed as release blockers; disabled or unexposed skills remain evidence rows without becoming release blockers.
+
+The SLO Pack writes `slo_pack_latest.json` and `.md` under ignored `data/slo_packs/`. It includes blocking skill IDs, burn-rate alerts, reviewer checklist, local proof commands, and limitations. It is deterministic and local/mock by default.
 
 ## Prompt Governance And Injection Risk
 

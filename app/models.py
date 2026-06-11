@@ -629,6 +629,55 @@ class SkillReliabilityPackResult(BaseModel):
     summary: JsonDict
 
 
+class SkillSloRecord(BaseModel):
+    skill_id: str
+    name: str
+    version: str
+    enabled: bool
+    mcp_exposed: bool
+    objective_name: str
+    availability_slo_pct: float
+    success_rate_pct: float
+    error_budget_pct: float
+    error_budget_remaining_pct: float
+    error_budget_burn_pct: float
+    latency_slo_ms: float
+    p95_latency_ms: float
+    latency_budget_remaining_ms: float
+    total_observations: int
+    failed_observations: int
+    blocked_observations: int
+    error_budget_status: str
+    release_gate: str
+    recommended_action: str
+    evidence_trace_ids: list[str] = Field(default_factory=list)
+
+
+class SkillSloReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    objectives: JsonDict
+    skills: list[SkillSloRecord]
+    burn_rate_alerts: list[JsonDict] = Field(default_factory=list)
+    release_gate: JsonDict
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillSloPackRequest(BaseModel):
+    actor: str = "slo-reviewer"
+
+
+class SkillSloPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class ProviderReadinessReport(BaseModel):
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

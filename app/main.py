@@ -111,6 +111,9 @@ from app.models import (
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
     SkillReliabilityReport,
+    SkillSloPackRequest,
+    SkillSloPackResult,
+    SkillSloReport,
     SkillStatusRequest,
     SkillVersion,
     SmokeMatrixResult,
@@ -316,6 +319,19 @@ def skill_reliability_pack(
     _: str = Depends(require_api_key),
 ) -> SkillReliabilityPackResult:
     return state.reliability.pack(request or SkillReliabilityPackRequest())
+
+
+@app.get("/slo/report", response_model=SkillSloReport)
+def skill_slo_report(_: str = Depends(require_api_key)) -> SkillSloReport:
+    return state.slo.report()
+
+
+@app.post("/slo/pack", response_model=SkillSloPackResult)
+def skill_slo_pack(
+    request: SkillSloPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillSloPackResult:
+    return state.slo.pack(request or SkillSloPackRequest())
 
 
 @app.get("/providers/readiness", response_model=ProviderReadinessReport)

@@ -29,6 +29,7 @@ from app.models import (
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillReliabilityPackRequest,
+    SkillSloPackRequest,
     TenantEntitlementPackRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
@@ -176,6 +177,8 @@ async def main() -> None:
     reliability_pack = state.reliability.pack(
         SkillReliabilityPackRequest(actor="demo-platform-sre")
     )
+    slo_report = state.slo.report()
+    slo_pack = state.slo.pack(SkillSloPackRequest(actor="demo-slo-reviewer"))
     provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
     provider_fallback_pack = state.provider_readiness.fallback_pack(
         ProviderFallbackPackRequest(actor="demo-provider-reviewer")
@@ -342,6 +345,18 @@ async def main() -> None:
                 ],
                 "reliability pack path": reliability_pack.markdown_path,
                 "reliability_pack_path": reliability_pack.markdown_path,
+                "skill slo readiness": slo_report.readiness_status,
+                "skill_slo_readiness": slo_report.readiness_status,
+                "skill slo release gate": slo_report.release_gate["status"],
+                "skill_slo_release_gate": slo_report.release_gate["status"],
+                "skill slo blocked release skills": slo_report.summary[
+                    "blocked_release_skill_count"
+                ],
+                "skill_slo_blocked_release_skills": slo_report.summary[
+                    "blocked_release_skill_count"
+                ],
+                "slo pack path": slo_pack.markdown_path,
+                "slo_pack_path": slo_pack.markdown_path,
                 "provider readiness": provider_readiness.readiness_status,
                 "provider_readiness": provider_readiness.readiness_status,
                 "provider current": provider_readiness.current_provider["name"],

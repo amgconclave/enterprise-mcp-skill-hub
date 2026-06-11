@@ -43,6 +43,7 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillManifest,
     SkillReliabilityPackRequest,
+    SkillSloPackRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantPolicySimulationRequest,
@@ -85,6 +86,7 @@ view = st.sidebar.radio(
         "Skill Compatibility",
         "Skill Usage Analytics",
         "Skill Reliability",
+        "Skill SLO",
         "Provider Readiness",
         "Prompt Governance",
         "Privacy Retention",
@@ -669,6 +671,44 @@ elif view == "Skill Reliability":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(reliability.model_dump(mode="json"))
+
+elif view == "Skill SLO":
+    st.subheader("Skill SLO")
+    st.caption("Error budgets and release gates derived from local reliability evidence.")
+    slo = state.slo.report()
+    col_ready, col_blocked, col_review, col_alerts = st.columns(4)
+    col_ready.metric("Readiness", slo.readiness_status.upper())
+    col_blocked.metric("Release blockers", slo.summary["blocked_release_skill_count"])
+    col_review.metric("Review skills", slo.summary["review_skill_count"])
+    col_alerts.metric("Burn alerts", slo.summary["burn_rate_alert_count"])
+
+    tab_skills, tab_gate, tab_export, tab_json = st.tabs(
+        ["SLO Rows", "Release Gate", "SLO Pack", "JSON"]
+    )
+    with tab_skills:
+        st.dataframe(
+            [skill.model_dump(mode="json") for skill in slo.skills],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(slo.burn_rate_alerts, use_container_width=True, hide_index=True)
+    with tab_gate:
+        st.json(slo.objectives)
+        st.json(slo.release_gate)
+        st.dataframe(
+            [{"command": command} for command in slo.local_proof_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/slo_packs/.")
+        actor = st.text_input("SLO pack actor", value="streamlit-slo-reviewer")
+        if st.button("Export SLO Pack", use_container_width=True):
+            export = state.slo.pack(SkillSloPackRequest(actor=actor))
+            st.success("SLO Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(slo.model_dump(mode="json"))
 
 elif view == "Provider Readiness":
     st.subheader("Provider Readiness")

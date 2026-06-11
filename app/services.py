@@ -139,6 +139,10 @@ from app.models import (
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
     SkillReliabilityReport,
+    SkillSloPackRequest,
+    SkillSloPackResult,
+    SkillSloRecord,
+    SkillSloReport,
     SkillVersion,
     SmokeMatrixEndpoint,
     SmokeMatrixResult,
@@ -8612,6 +8616,309 @@ class SkillReliabilityService:
         return "\n".join(lines)
 
 
+class SkillSloService:
+    PACK_ID = "slo_pack_latest"
+    AVAILABILITY_SLO_PCT = 99.0
+    LATENCY_SLO_MS = SkillReliabilityService.LATENCY_SLO_MS
+    BURN_REVIEW_THRESHOLD_PCT = 100.0
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "slo_packs"
+
+    def report(self) -> SkillSloReport:
+        reliability = self.app_state.reliability.report()
+        skills = [self._record_for_skill(skill) for skill in reliability.skills]
+        burn_alerts = [self._alert_row(skill) for skill in skills if skill.error_budget_status in {"exhausted", "breached"}]
+        blocked = [skill for skill in skills if skill.release_gate == "block_release"]
+        review = [skill for skill in skills if skill.release_gate == "needs_review"]
+        readiness: SecurityReadinessStatus = "ready"
+        if blocked:
+            readiness = "blocked"
+        elif review or burn_alerts:
+            readiness = "needs_review"
+        release_gate = {
+            "status": "blocked" if blocked else "needs_review" if review else "ready",
+            "blocking_skill_ids": [skill.skill_id for skill in blocked],
+            "review_skill_ids": [skill.skill_id for skill in review],
+            "policy": "Promoted MCP skills with exhausted error budget or latency SLO breach block release until reviewed.",
+            "recommended_verification": [
+                "python -m app.evals.run_conformance",
+                "python -m app.demo",
+                "python -m app.mcp_server tools",
+            ],
+        }
+        summary = {
+            "skill_count": len(skills),
+            "mcp_skill_count": sum(1 for skill in skills if skill.mcp_exposed),
+            "blocked_release_skill_count": len(blocked),
+            "review_skill_count": len(review),
+            "burn_rate_alert_count": len(burn_alerts),
+            "availability_slo_pct": self.AVAILABILITY_SLO_PCT,
+            "latency_slo_ms": self.LATENCY_SLO_MS,
+            "local_only": True,
+            "source_report_readiness": reliability.readiness_status,
+        }
+        return SkillSloReport(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            objectives=self._objectives(),
+            skills=skills,
+            burn_rate_alerts=burn_alerts,
+            release_gate=release_gate,
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: SkillSloPackRequest | None = None) -> SkillSloPackResult:
+        request = request or SkillSloPackRequest()
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "slo_report": report.model_dump(mode="json"),
+            "release_gate": report.release_gate,
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        bundle["summary"] = {
+            **report.summary,
+            "readiness_status": report.readiness_status,
+            "blocking_skill_ids": report.release_gate["blocking_skill_ids"],
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "slo.pack_exported",
+            "slo_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "blocked_release_skill_count": report.summary["blocked_release_skill_count"],
+            },
+        )
+        return SkillSloPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _record_for_skill(self, reliability: SkillReliabilityRecord) -> SkillSloRecord:
+        total = reliability.success_count + reliability.failure_count
+        success_rate = round((reliability.success_count / total) * 100, 2) if total else 100.0
+        failed_pct = round(100.0 - success_rate, 2)
+        error_budget_pct = round(100.0 - self.AVAILABILITY_SLO_PCT, 2)
+        remaining_pct = round(max(0.0, error_budget_pct - failed_pct), 2)
+        burn_pct = round((failed_pct / error_budget_pct) * 100, 2) if error_budget_pct else 0.0
+        latency_remaining = round(self.LATENCY_SLO_MS - reliability.p95_latency_ms, 2)
+        error_status = self._error_budget_status(reliability, total, failed_pct, burn_pct, latency_remaining)
+        release_gate = self._release_gate(reliability, error_status, latency_remaining)
+        return SkillSloRecord(
+            skill_id=reliability.skill_id,
+            name=reliability.name,
+            version=reliability.version,
+            enabled=reliability.enabled,
+            mcp_exposed=reliability.mcp_exposed,
+            objective_name="default_local_skill_slo",
+            availability_slo_pct=self.AVAILABILITY_SLO_PCT,
+            success_rate_pct=success_rate,
+            error_budget_pct=error_budget_pct,
+            error_budget_remaining_pct=remaining_pct,
+            error_budget_burn_pct=burn_pct,
+            latency_slo_ms=self.LATENCY_SLO_MS,
+            p95_latency_ms=reliability.p95_latency_ms,
+            latency_budget_remaining_ms=latency_remaining,
+            total_observations=total,
+            failed_observations=reliability.failure_count,
+            blocked_observations=reliability.blocked_count,
+            error_budget_status=error_status,
+            release_gate=release_gate,
+            recommended_action=self._recommended_action(reliability, error_status, release_gate),
+            evidence_trace_ids=reliability.audit_trace_ids,
+        )
+
+    def _error_budget_status(
+        self,
+        reliability: SkillReliabilityRecord,
+        total: int,
+        failed_pct: float,
+        burn_pct: float,
+        latency_remaining: float,
+    ) -> str:
+        if not reliability.enabled:
+            return "disabled_excluded"
+        if total == 0:
+            return "no_traffic"
+        if latency_remaining < 0:
+            return "breached"
+        if failed_pct > (100.0 - self.AVAILABILITY_SLO_PCT):
+            return "exhausted"
+        if burn_pct >= self.BURN_REVIEW_THRESHOLD_PCT * 0.75:
+            return "watch"
+        return "within_budget"
+
+    def _release_gate(
+        self,
+        reliability: SkillReliabilityRecord,
+        error_status: str,
+        latency_remaining: float,
+    ) -> str:
+        if not reliability.enabled or not reliability.mcp_exposed:
+            return "not_release_blocking"
+        if error_status in {"exhausted", "breached"} or latency_remaining < 0:
+            return "block_release"
+        if error_status in {"watch", "no_traffic"}:
+            return "needs_review"
+        return "ready"
+
+    def _recommended_action(
+        self,
+        reliability: SkillReliabilityRecord,
+        error_status: str,
+        release_gate: str,
+    ) -> str:
+        if release_gate == "block_release":
+            return "hold_release_run_canary_and_conformance"
+        if release_gate == "needs_review":
+            return "review_owner_signoff_before_release"
+        if error_status == "disabled_excluded":
+            return "keep_excluded_until_reenabled_and_promoted"
+        return "ship_with_standard_monitoring"
+
+    def _alert_row(self, skill: SkillSloRecord) -> JsonDict:
+        return {
+            "skill_id": skill.skill_id,
+            "status": skill.error_budget_status,
+            "release_gate": skill.release_gate,
+            "error_budget_burn_pct": skill.error_budget_burn_pct,
+            "p95_latency_ms": skill.p95_latency_ms,
+            "recommended_action": skill.recommended_action,
+        }
+
+    def _objectives(self) -> JsonDict:
+        return {
+            "default_local_skill_slo": {
+                "availability_slo_pct": self.AVAILABILITY_SLO_PCT,
+                "latency_slo_ms": self.LATENCY_SLO_MS,
+                "error_budget_pct": round(100.0 - self.AVAILABILITY_SLO_PCT, 2),
+                "scope": "promoted MCP skills use release gates; disabled and unexposed skills remain evidence rows only",
+                "source": "SkillReliabilityService deterministic fixtures plus live invocation history",
+            }
+        }
+
+    def _reviewer_checklist(self, report: SkillSloReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "SLO rows cover every registered skill.",
+                "status": "pass" if report.summary["skill_count"] == len(self.app_state.registry.list()) else "fail",
+                "proof": f"{report.summary['skill_count']} skill SLO row(s).",
+            },
+            {
+                "item": "Release gate calls out blocking MCP skills.",
+                "status": "pass" if "blocking_skill_ids" in report.release_gate else "fail",
+                "proof": f"{len(report.release_gate['blocking_skill_ids'])} blocking skill(s).",
+            },
+            {
+                "item": "Burn-rate alerts include remediation actions.",
+                "status": "pass" if report.burn_rate_alerts else "warn",
+                "proof": f"{len(report.burn_rate_alerts)} burn-rate alert(s).",
+            },
+            {
+                "item": "Run conformance and demo commands before clearing blocked release gates.",
+                "status": "manual",
+                "proof": "Local proof commands are included in the pack.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\slo_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "SLO math is deterministic local governance evidence, not a substitute for production telemetry windows.",
+            "Fresh-clone reports use reliability fixtures; live invocation history is added as local API, MCP, eval, and demo calls run.",
+            "Release gates are advisory in this portfolio repo and do not deploy, roll back, or page operators automatically.",
+            "OpenAI, Azure OpenAI, and hosted observability remain optional and are not required for this pack.",
+            "Generated SLO artifacts are written under ignored data/slo_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["slo_report"]
+        lines = [
+            "# Skill SLO + Error Budget Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Release gate: `{bundle['release_gate']['status']}`",
+            "",
+            "## Skill SLOs",
+            "",
+            "| Skill | Success Rate | Burn | p95 Latency | Budget Status | Release Gate | Action |",
+            "| --- | ---: | ---: | ---: | --- | --- | --- |",
+            *[
+                f"| `{row['skill_id']}` | {row['success_rate_pct']}% | {row['error_budget_burn_pct']}% | {row['p95_latency_ms']}ms | `{row['error_budget_status']}` | `{row['release_gate']}` | `{row['recommended_action']}` |"
+                for row in report["skills"]
+            ],
+            "",
+            "## Burn Rate Alerts",
+            "",
+            *[
+                f"- `{item['skill_id']}`: `{item['status']}` burn `{item['error_budget_burn_pct']}%`, p95 `{item['p95_latency_ms']}ms`, action `{item['recommended_action']}`"
+                for item in report["burn_rate_alerts"]
+            ],
+            "",
+            "## Release Gate",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["release_gate"].items()],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class PromptGovernanceService:
     PACK_ID = "prompt_governance_pack_latest"
     SEVERITY_RANK: dict[str, int] = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -10539,6 +10846,7 @@ class SmokeMatrixService:
         marketplace = await self.app_state.marketplace.catalog()
         usage = self.app_state.usage.analytics()
         reliability = self.app_state.reliability.report()
+        slo = self.app_state.slo.report()
         prompt_governance = self.app_state.prompt_governance.report()
         enterprise = await self.app_state.enterprise.scorecard()
         tools = self.app_state.mcp.list_tools()
@@ -10556,6 +10864,7 @@ class SmokeMatrixService:
                 marketplace.readiness_status,
                 usage.readiness_status,
                 reliability.readiness_status,
+                slo.readiness_status,
                 prompt_governance.readiness_status,
                 enterprise.readiness_status,
             ],
@@ -10575,6 +10884,7 @@ class SmokeMatrixService:
                 "marketplace",
                 "usage analytics",
                 "skill reliability",
+                "skill slo",
                 "prompt governance",
                 "incidents",
                 "enterprise readiness",
@@ -10605,6 +10915,9 @@ class SmokeMatrixService:
             "reliability_readiness": reliability.readiness_status,
             "open_circuit_count": reliability.summary["open_circuit_count"],
             "disable_recommendation_count": reliability.summary["disable_recommendation_count"],
+            "slo_readiness": slo.readiness_status,
+            "slo_release_gate": slo.release_gate["status"],
+            "slo_blocked_release_skill_count": slo.summary["blocked_release_skill_count"],
             "prompt_governance_readiness": prompt_governance.readiness_status,
             "prompt_governance_findings": prompt_governance.summary["finding_count"],
             "prompt_governance_approvals": prompt_governance.summary["approval_required_count"],
@@ -10893,6 +11206,29 @@ class SmokeMatrixService:
                     "data/reliability_packs/reliability_pack_latest.md",
                 ],
                 "Writes Skill Reliability and Circuit Breaker reviewer artifacts.",
+            ),
+            self._endpoint(
+                "skill slo",
+                "GET",
+                "/slo/report",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/slo/report -Headers $headers",
+                [],
+                "Returns per-skill availability SLO, error budget burn, latency budget, and release-gate decisions.",
+            ),
+            self._endpoint(
+                "skill slo",
+                "POST",
+                "/slo/pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/slo/pack -Method POST -Headers $headers",
+                [
+                    "data/slo_packs/slo_pack_latest.json",
+                    "data/slo_packs/slo_pack_latest.md",
+                ],
+                "Writes Skill SLO and Error Budget reviewer artifacts.",
             ),
             self._endpoint(
                 "provider readiness",
@@ -11207,6 +11543,11 @@ class SmokeMatrixService:
                 "Skill Reliability + Circuit Breaker Pack",
                 "POST /reliability/pack",
                 Path("data") / "reliability_packs" / SkillReliabilityService.PACK_ID,
+            ),
+            (
+                "Skill SLO + Error Budget Pack",
+                "POST /slo/pack",
+                Path("data") / "slo_packs" / SkillSloService.PACK_ID,
             ),
             (
                 "Provider Readiness + Fallback Pack",
@@ -13810,6 +14151,7 @@ class DashboardSmokeService:
             {"id": "skill_compatibility", "label": "Skill Compatibility", "purpose": "Semantic version and migration readiness."},
             {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
+            {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
@@ -13849,6 +14191,8 @@ class DashboardSmokeService:
             self._endpoint_ref("usage_chargeback_pack", "POST", "/usage/chargeback-pack", "Writes Cost Chargeback artifacts."),
             self._endpoint_ref("skill_reliability", "GET", "/reliability/skills", "Skill reliability and breaker signals."),
             self._endpoint_ref("reliability_pack", "POST", "/reliability/pack", "Writes Reliability Pack artifacts."),
+            self._endpoint_ref("skill_slo", "GET", "/slo/report", "Skill SLO and error budget release gates."),
+            self._endpoint_ref("slo_pack", "POST", "/slo/pack", "Writes SLO Error Budget artifacts."),
             self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
@@ -13887,6 +14231,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_compatibility", "Skill Compatibility", "Compatibility Pack", "data/compatibility_packs/"),
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
+            self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
@@ -13972,6 +14317,7 @@ class DashboardSmokeService:
             'rg "skills/compatibility|compatibility-pack|Skill Compatibility|compatibility_packs|deprecated skill|migration recommendations" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
+            'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -14481,6 +14827,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
                 ["reliability_pack_latest.json", "reliability_pack_latest.md"],
                 "Per-skill failure, latency SLO, circuit breaker state, disable/re-enable recommendations, and reviewer proof.",
+            ),
+            self._catalog_row(
+                "slo_packs",
+                "Skill SLO + Error Budget Pack",
+                Path("data") / "slo_packs",
+                "POST /slo/pack",
+                "Invoke-RestMethod http://localhost:8000/slo/pack -Method POST -Headers $headers",
+                ["slo_pack_latest.json", "slo_pack_latest.md"],
+                "Per-skill availability SLO, error budget burn, latency budget, release-gate blockers, and reviewer proof.",
             ),
             self._catalog_row(
                 "provider_packs",
@@ -15846,6 +16201,7 @@ class AppState:
     marketplace: SkillMarketplaceGovernanceService = field(init=False)
     usage: SkillUsageAnalyticsService = field(init=False)
     reliability: SkillReliabilityService = field(init=False)
+    slo: SkillSloService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
@@ -15902,6 +16258,7 @@ class AppState:
         self.usage = SkillUsageAnalyticsService(self)
         self.reliability = SkillReliabilityService(self)
         self.invocation_service.reliability = self.reliability
+        self.slo = SkillSloService(self)
         self.provider_readiness = ProviderReadinessService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)
