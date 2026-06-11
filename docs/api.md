@@ -78,6 +78,7 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
 - `POST /prompt-governance/validate` - validates submitted prompt or resource text with local deterministic prompt-governance rules.
 - `POST /prompt-governance/pack` - writes the Prompt Governance + Injection Risk Pack Markdown/JSON under ignored local folder `data/prompt_governance/`.
+- `POST /prompt-governance/remediation-plan` - writes an audit-backed prompt remediation plan with owner roles, approval gates, bounded action-loop stages, and step verification commands.
 - `GET /privacy/retention-report` - scans local invocation inputs, outputs, audit metadata, and deterministic fixtures for PII-like retention risks with redacted previews.
 - `POST /privacy/redact` - previews deterministic local redaction for an ad hoc JSON payload.
 - `POST /privacy/retention-pack` - writes the Privacy Retention + Redaction Pack Markdown/JSON under ignored local folder `data/privacy_packs/`.
@@ -514,11 +515,19 @@ Invoke-RestMethod http://localhost:8000/prompt-governance/pack `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"actor":"prompt-security-reviewer"}'
+
+Invoke-RestMethod http://localhost:8000/prompt-governance/remediation-plan `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"prompt-remediation-reviewer"}'
 ```
 
 The report scans MCP prompt templates, MCP resources, and a deterministic red-team fixture for instruction overrides, safety bypasses, role impersonation, credential exfiltration, endpoint/tool abuse, external URLs, and approval-required language. Critical findings in real MCP prompt/resource content block readiness; red-team fixture findings demonstrate review gates without requiring external services.
 
 The Prompt Governance Pack writes `prompt_governance_pack_latest.json` and `.md` under ignored `data/prompt_governance/`. It includes high-risk findings, endpoint review rows, approval policy, reviewer checklist, prompt_governance audit events, local proof commands, and limitations.
+
+The remediation plan writes `prompt_governance_remediation_plan_latest.json` and `.md` under the same ignored folder. It groups findings into owner-assigned steps, approval queue rows, run-transparency events, and per-step verification commands so prompt changes have a bounded review loop before MCP exposure.
 
 ## Privacy Retention And Redaction
 

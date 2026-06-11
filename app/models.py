@@ -959,6 +959,41 @@ class PromptGovernancePackResult(BaseModel):
     summary: JsonDict
 
 
+class PromptGovernanceRemediationRequest(BaseModel):
+    actor: str = "prompt-remediation-reviewer"
+    include_low_risk: bool = False
+
+
+class PromptGovernanceRemediationStep(BaseModel):
+    step_id: str
+    target_type: PromptGovernanceTargetType
+    target_id: str
+    severity: PromptGovernanceSeverity
+    category: str
+    action: str
+    owner_role: str
+    approval_gate: str
+    verification_command: str
+    completion_signal: str
+    source_finding_ids: list[str] = Field(default_factory=list)
+
+
+class PromptGovernanceRemediationPlan(BaseModel):
+    plan_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    steps: list[PromptGovernanceRemediationStep]
+    bounded_action_loop: list[JsonDict] = Field(default_factory=list)
+    approval_queue: list[JsonDict] = Field(default_factory=list)
+    run_transparency: list[JsonDict] = Field(default_factory=list)
+    audit_evidence: list[JsonDict] = Field(default_factory=list)
+    json_path: str
+    markdown_path: str
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class PrivacyRetentionFinding(BaseModel):
     finding_id: str
     source_type: PrivacyRetentionSourceType

@@ -28,6 +28,7 @@ from app.models import (
     PortfolioInterviewPackRequest,
     PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
+    PromptGovernanceRemediationRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
     RepositoryAutomationPackRequest,
@@ -245,6 +246,9 @@ async def main() -> None:
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
         PromptGovernancePackRequest(actor="demo-prompt-security")
+    )
+    prompt_governance_remediation = state.prompt_governance.remediation_plan(
+        PromptGovernanceRemediationRequest(actor="demo-prompt-remediation")
     )
     privacy_retention_report = state.privacy_retention.report(actor="demo-privacy-reviewer")
     privacy_retention_pack = state.privacy_retention.pack(
@@ -497,6 +501,14 @@ async def main() -> None:
                 ],
                 "prompt governance pack path": prompt_governance_pack.markdown_path,
                 "prompt_governance_pack_path": prompt_governance_pack.markdown_path,
+                "prompt governance remediation plan path": prompt_governance_remediation.markdown_path,
+                "prompt_governance_remediation_plan_path": prompt_governance_remediation.markdown_path,
+                "prompt governance remediation steps": prompt_governance_remediation.summary[
+                    "step_count"
+                ],
+                "prompt_governance_remediation_steps": prompt_governance_remediation.summary[
+                    "step_count"
+                ],
                 "privacy retention readiness": privacy_retention_report.readiness_status,
                 "privacy_retention_readiness": privacy_retention_report.readiness_status,
                 "privacy retention findings": privacy_retention_report.summary["finding_count"],

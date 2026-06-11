@@ -96,6 +96,8 @@ from app.models import (
     PromptDefinition,
     PromptGovernancePackRequest,
     PromptGovernancePackResult,
+    PromptGovernanceRemediationPlan,
+    PromptGovernanceRemediationRequest,
     PromptGovernanceReport,
     PromptGovernanceTargetResult,
     PromptGovernanceValidationRequest,
@@ -450,6 +452,14 @@ def prompt_governance_pack(
     _: str = Depends(require_api_key),
 ) -> PromptGovernancePackResult:
     return state.prompt_governance.pack(request or PromptGovernancePackRequest())
+
+
+@app.post("/prompt-governance/remediation-plan", response_model=PromptGovernanceRemediationPlan)
+def prompt_governance_remediation_plan(
+    request: PromptGovernanceRemediationRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> PromptGovernanceRemediationPlan:
+    return state.prompt_governance.remediation_plan(request or PromptGovernanceRemediationRequest())
 
 
 @app.get("/privacy/retention-report", response_model=PrivacyRetentionReport)

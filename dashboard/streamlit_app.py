@@ -41,6 +41,7 @@ from app.models import (
     PrivacyRedactionRequest,
     PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
+    PromptGovernanceRemediationRequest,
     PromptGovernanceValidationRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
@@ -1149,8 +1150,8 @@ elif view == "Prompt Governance":
     col_findings.metric("Findings", report.summary["finding_count"])
     col_approvals.metric("Approvals", report.summary["approval_required_count"])
 
-    tab_targets, tab_findings, tab_validate, tab_export, tab_json = st.tabs(
-        ["Targets", "High Risk", "Validate", "Governance Pack", "JSON"]
+    tab_targets, tab_findings, tab_validate, tab_remediate, tab_export, tab_json = st.tabs(
+        ["Targets", "High Risk", "Validate", "Remediation", "Governance Pack", "JSON"]
     )
     with tab_targets:
         st.dataframe(
@@ -1193,6 +1194,39 @@ elif view == "Prompt Governance":
                 )
             )
             st.json(result.model_dump(mode="json"))
+    with tab_remediate:
+        st.caption("Builds a bounded, audit-backed remediation plan under data/prompt_governance/.")
+        include_low_risk = st.checkbox("Include low-risk advisory findings", value=False)
+        remediation_actor = st.text_input(
+            "Remediation actor",
+            value="streamlit-prompt-remediation",
+        )
+        if st.button("Generate Remediation Plan", use_container_width=True):
+            plan = state.prompt_governance.remediation_plan(
+                PromptGovernanceRemediationRequest(
+                    actor=remediation_actor,
+                    include_low_risk=include_low_risk,
+                )
+            )
+            st.success("Prompt remediation plan exported.")
+            col_steps, col_approvals, col_critical = st.columns(3)
+            col_steps.metric("Steps", plan.summary["step_count"])
+            col_approvals.metric("Approval queue", plan.summary["approval_queue_count"])
+            col_critical.metric("Critical steps", plan.summary["critical_step_count"])
+            st.dataframe(
+                [step.model_dump(mode="json") for step in plan.steps],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.json(
+                {
+                    "bounded_action_loop": plan.bounded_action_loop,
+                    "approval_queue": plan.approval_queue,
+                    "run_transparency": plan.run_transparency,
+                    "json_path": plan.json_path,
+                    "markdown_path": plan.markdown_path,
+                }
+            )
     with tab_export:
         st.caption("Writes Markdown and JSON under data/prompt_governance/.")
         actor = st.text_input("Prompt governance pack actor", value="streamlit-prompt-security")

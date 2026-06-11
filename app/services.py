@@ -119,6 +119,9 @@ from app.models import (
     PromptGovernanceFinding,
     PromptGovernancePackRequest,
     PromptGovernancePackResult,
+    PromptGovernanceRemediationPlan,
+    PromptGovernanceRemediationRequest,
+    PromptGovernanceRemediationStep,
     PromptGovernanceReport,
     PromptGovernanceSeverity,
     PromptGovernanceTargetResult,
@@ -10513,6 +10516,7 @@ class SkillSloService:
 
 class PromptGovernanceService:
     PACK_ID = "prompt_governance_pack_latest"
+    REMEDIATION_PLAN_ID = "prompt_governance_remediation_plan_latest"
     SEVERITY_RANK: dict[str, int] = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
     PATTERNS: list[JsonDict] = [
         {
@@ -10718,6 +10722,86 @@ class PromptGovernanceService:
             summary=bundle["summary"],
         )
 
+    def remediation_plan(
+        self,
+        request: PromptGovernanceRemediationRequest | None = None,
+    ) -> PromptGovernanceRemediationPlan:
+        request = request or PromptGovernanceRemediationRequest()
+        report = self.report(actor=request.actor)
+        steps = self._remediation_steps(report, request.include_low_risk)
+        approval_queue = [
+            {
+                "step_id": step.step_id,
+                "target_type": step.target_type,
+                "target_id": step.target_id,
+                "severity": step.severity,
+                "category": step.category,
+                "approval_gate": step.approval_gate,
+                "owner_role": step.owner_role,
+            }
+            for step in steps
+            if step.approval_gate != "none"
+        ]
+        bounded_action_loop = self._bounded_action_loop(steps)
+        audit_evidence = [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.action.startswith("prompt_governance.")
+        ]
+        summary = {
+            **report.summary,
+            "step_count": len(steps),
+            "approval_queue_count": len(approval_queue),
+            "critical_step_count": sum(1 for step in steps if step.severity == "critical"),
+            "high_step_count": sum(1 for step in steps if step.severity == "high"),
+            "include_low_risk": request.include_low_risk,
+            "audit_event_count": len(audit_evidence),
+        }
+        readiness: SecurityReadinessStatus = "ready"
+        if summary["critical_step_count"]:
+            readiness = "blocked"
+        elif summary["step_count"] or approval_queue:
+            readiness = "needs_review"
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.REMEDIATION_PLAN_ID}.json"
+        markdown_path = self.output_dir / f"{self.REMEDIATION_PLAN_ID}.md"
+        plan = PromptGovernanceRemediationPlan(
+            plan_id=self.REMEDIATION_PLAN_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            steps=steps,
+            bounded_action_loop=bounded_action_loop,
+            approval_queue=approval_queue,
+            run_transparency=self._remediation_run_transparency(report, steps),
+            audit_evidence=audit_evidence,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        json_path.write_text(
+            json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        markdown_path.write_text(self._remediation_markdown(plan), encoding="utf-8")
+        self.app_state.audit.record(
+            "prompt_governance.remediation_plan_exported",
+            "prompt_governance_remediation_plan",
+            self.REMEDIATION_PLAN_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness,
+                "step_count": len(steps),
+                "approval_queue_count": len(approval_queue),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return plan
+
     def _inventory_targets(self) -> list[tuple[PromptGovernanceTargetType, str, str, str]]:
         targets: list[tuple[PromptGovernanceTargetType, str, str, str]] = []
         for prompt in self.app_state.mcp.list_prompts():
@@ -10852,6 +10936,140 @@ class PromptGovernanceService:
             },
         ]
 
+    def _remediation_steps(
+        self,
+        report: PromptGovernanceReport,
+        include_low_risk: bool,
+    ) -> list[PromptGovernanceRemediationStep]:
+        grouped: dict[tuple[PromptGovernanceTargetType, str, str], list[PromptGovernanceFinding]] = defaultdict(
+            list
+        )
+        minimum_rank = self.SEVERITY_RANK["low" if include_low_risk else "medium"]
+        for target in report.targets:
+            for finding in target.findings:
+                if self.SEVERITY_RANK[finding.severity] >= minimum_rank:
+                    grouped[(target.target_type, target.target_id, finding.category)].append(finding)
+
+        steps: list[PromptGovernanceRemediationStep] = []
+        for index, ((target_type, target_id, category), findings) in enumerate(
+            sorted(grouped.items(), key=lambda item: (item[0][1], item[0][2])),
+            start=1,
+        ):
+            severity = self._max_severity(findings)
+            steps.append(
+                PromptGovernanceRemediationStep(
+                    step_id=f"prompt-remediation-{index:03d}",
+                    target_type=target_type,
+                    target_id=target_id,
+                    severity=severity,
+                    category=category,
+                    action=self._remediation_action(category, severity),
+                    owner_role=self._remediation_owner(category, severity),
+                    approval_gate=self._remediation_approval_gate(severity),
+                    verification_command=self._remediation_verification_command(target_id),
+                    completion_signal=self._remediation_completion_signal(category, severity),
+                    source_finding_ids=[finding.finding_id for finding in findings],
+                )
+            )
+        return steps
+
+    def _remediation_action(self, category: str, severity: str) -> str:
+        category_actions = {
+            "instruction_override": "Remove override language and reframe the template around approved task boundaries.",
+            "secret_exfiltration": "Block publication, redact credential references, and attach credential-rotation evidence if source content was real.",
+            "safety_bypass": "Replace bypass wording with explicit allowed/denied behaviors and reviewer-owned safety constraints.",
+            "tool_or_endpoint_abuse": "Move network or shell instructions into governed MCP tools with sandbox and policy enforcement.",
+            "external_endpoint": "Replace unapproved URLs with local resource URIs or document endpoint approval evidence.",
+            "approval_required": "Attach reviewer approval before promotion, production use, customer data use, or write/send/delete actions.",
+            "role_impersonation": "Replace impersonation language with a named, bounded role owned by the prompt registry.",
+        }
+        return category_actions.get(
+            category,
+            f"Review {category} finding at {severity} severity and record the remediation decision.",
+        )
+
+    def _remediation_owner(self, category: str, severity: str) -> str:
+        if severity == "critical" or category in {"secret_exfiltration", "instruction_override"}:
+            return "prompt_security_reviewer"
+        if category in {"tool_or_endpoint_abuse", "external_endpoint"}:
+            return "platform_tool_owner"
+        if category == "approval_required":
+            return "business_control_owner"
+        return "prompt_registry_owner"
+
+    def _remediation_approval_gate(self, severity: str) -> str:
+        if severity == "critical":
+            return "block_until_security_reviewer_approves"
+        if severity == "high":
+            return "manual_approval_before_mcp_exposure"
+        if severity == "medium":
+            return "reviewer_approval_before_promotion"
+        return "none"
+
+    def _remediation_verification_command(self, target_id: str) -> str:
+        safe_target = target_id.replace('"', "")
+        return (
+            "python -m pytest tests/test_prompt_governance.py -q; "
+            f'rg "{re.escape(safe_target)}|prompt_governance" app dashboard docs README.md tests'
+        )
+
+    def _remediation_completion_signal(self, category: str, severity: str) -> str:
+        if severity == "critical":
+            return f"No remaining critical {category} finding and audit event references reviewer approval."
+        if severity == "high":
+            return f"{category} finding downgraded or removed with approval queue entry resolved."
+        return f"{category} finding is documented, approved, or replaced by governed prompt/resource text."
+
+    def _bounded_action_loop(self, steps: list[PromptGovernanceRemediationStep]) -> list[JsonDict]:
+        loop = [
+            {
+                "stage": "observe",
+                "description": "Run the scanner against MCP prompts, resources, and red-team fixtures.",
+                "evidence": "PromptGovernanceReport targets and findings.",
+            },
+            {
+                "stage": "prioritize",
+                "description": "Group findings by target/category and order by severity for review.",
+                "evidence": f"{len(steps)} remediation step(s) generated.",
+            },
+            {
+                "stage": "act",
+                "description": "Apply only the bounded remediation action assigned to each owner role.",
+                "evidence": "Each step carries one action, owner, approval gate, and source finding ids.",
+            },
+            {
+                "stage": "verify",
+                "description": "Run the step verification command and regenerate the remediation plan.",
+                "evidence": "Completion signal must be satisfied before promotion or MCP exposure.",
+            },
+        ]
+        return loop
+
+    def _remediation_run_transparency(
+        self,
+        report: PromptGovernanceReport,
+        steps: list[PromptGovernanceRemediationStep],
+    ) -> list[JsonDict]:
+        return [
+            {
+                "event": "scan_completed",
+                "target_count": report.summary["target_count"],
+                "finding_count": report.summary["finding_count"],
+                "readiness_status": report.readiness_status,
+            },
+            {
+                "event": "remediation_steps_generated",
+                "step_count": len(steps),
+                "source_patterns": [rule["category"] for rule in self.PATTERNS],
+            },
+            {
+                "event": "artifacts_written",
+                "directory": str(self.output_dir),
+                "json": f"{self.REMEDIATION_PLAN_ID}.json",
+                "markdown": f"{self.REMEDIATION_PLAN_ID}.md",
+            },
+        ]
+
     def _local_proof_commands(self) -> list[str]:
         return [
             "python -m pytest -q",
@@ -10864,6 +11082,7 @@ class PromptGovernanceService:
             "python -m app.mcp_server tools",
             "python -m app.mcp_server resources",
             "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/prompt-governance/remediation-plan -Method POST -Headers $headers",
             'rg "prompt-governance|prompt_governance|Prompt Governance|injection" app dashboard docs README.md tests',
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
@@ -10876,6 +11095,58 @@ class PromptGovernanceService:
             "Production deployments should connect these findings to durable approval workflows and prompt registry controls.",
             "Generated prompt governance artifacts are written under ignored data/prompt_governance/.",
         ]
+
+    def _remediation_markdown(self, plan: PromptGovernanceRemediationPlan) -> str:
+        plan_data = plan.model_dump(mode="json")
+        lines = [
+            "# Prompt Governance Remediation Plan",
+            "",
+            f"- Plan ID: `{plan.plan_id}`",
+            f"- Generated at: `{plan.generated_at.isoformat()}`",
+            f"- Readiness: `{plan.readiness_status}`",
+            f"- Steps: `{plan.summary['step_count']}`",
+            f"- Approval queue: `{plan.summary['approval_queue_count']}`",
+            "",
+            "## Bounded Action Loop",
+            "",
+            *[
+                f"- `{stage['stage']}`: {stage['description']} Proof: {stage['evidence']}"
+                for stage in plan_data["bounded_action_loop"]
+            ],
+            "",
+            "## Remediation Steps",
+            "",
+            "| Step | Target | Severity | Category | Owner | Gate |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| `{step['step_id']}` | `{step['target_id']}` | `{step['severity']}` | `{step['category']}` | `{step['owner_role']}` | `{step['approval_gate']}` |"
+                for step in plan_data["steps"]
+            ],
+            "",
+            "## Step Verification",
+            "",
+            *[
+                f"- `{step['step_id']}` `{step['verification_command']}` -> {step['completion_signal']}"
+                for step in plan_data["steps"]
+            ],
+            "",
+            "## Run Transparency",
+            "",
+            *[
+                f"- `{row['event']}`: `{json.dumps(row, sort_keys=True)}`"
+                for row in plan_data["run_transparency"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in plan.local_proof_commands],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in plan.limitations],
+            "",
+        ]
+        return "\n".join(lines)
 
     def _markdown(self, bundle: JsonDict) -> str:
         report = bundle["prompt_governance_report"]
@@ -12935,6 +13206,19 @@ class SmokeMatrixService:
                 "Writes Prompt Governance + Injection Risk reviewer artifacts.",
             ),
             self._endpoint(
+                "prompt governance",
+                "POST",
+                "/prompt-governance/remediation-plan",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/prompt-governance/remediation-plan -Method POST -Headers $headers",
+                [
+                    "data/prompt_governance/prompt_governance_remediation_plan_latest.json",
+                    "data/prompt_governance/prompt_governance_remediation_plan_latest.md",
+                ],
+                "Writes an audit-backed Prompt Governance remediation plan with bounded action-loop verification steps.",
+            ),
+            self._endpoint(
                 "privacy retention",
                 "GET",
                 "/privacy/retention-report",
@@ -13211,6 +13495,11 @@ class SmokeMatrixService:
                 "Prompt Governance + Injection Risk Pack",
                 "POST /prompt-governance/pack",
                 Path("data") / "prompt_governance" / PromptGovernanceService.PACK_ID,
+            ),
+            (
+                "Prompt Governance Remediation Plan",
+                "POST /prompt-governance/remediation-plan",
+                Path("data") / "prompt_governance" / PromptGovernanceService.REMEDIATION_PLAN_ID,
             ),
             (
                 "Portfolio demo pack",
@@ -16347,6 +16636,12 @@ class DashboardSmokeService:
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
+            self._endpoint_ref(
+                "prompt_governance_remediation",
+                "POST",
+                "/prompt-governance/remediation-plan",
+                "Writes Prompt Governance remediation action-loop artifacts.",
+            ),
             self._endpoint_ref("privacy_retention", "GET", "/privacy/retention-report", "Privacy and retention scan signals."),
             self._endpoint_ref("privacy_redact", "POST", "/privacy/redact", "Previews local redaction for JSON payloads."),
             self._endpoint_ref("privacy_retention_pack", "POST", "/privacy/retention-pack", "Writes Privacy Retention artifacts."),
@@ -18072,8 +18367,13 @@ class ArtifactInventoryService:
                 Path("data") / "prompt_governance",
                 "POST /prompt-governance/pack",
                 "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
-                ["prompt_governance_pack_latest.json", "prompt_governance_pack_latest.md"],
-                "MCP prompt/resource injection-risk findings, endpoint review, approval gates, and audit-backed reviewer proof.",
+                [
+                    "prompt_governance_pack_latest.json",
+                    "prompt_governance_pack_latest.md",
+                    "prompt_governance_remediation_plan_latest.json",
+                    "prompt_governance_remediation_plan_latest.md",
+                ],
+                "MCP prompt/resource injection-risk findings, remediation action-loop plan, endpoint review, approval gates, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
                 "privacy_packs",

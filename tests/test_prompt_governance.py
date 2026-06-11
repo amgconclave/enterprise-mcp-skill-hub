@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.bootstrap import create_state
 from app.main import app
-from app.models import PromptGovernancePackRequest, PromptGovernanceValidationRequest
+from app.models import (
+    PromptGovernancePackRequest,
+    PromptGovernanceRemediationRequest,
+    PromptGovernanceValidationRequest,
+)
 from app.services import PromptGovernanceService
 
 HEADERS = {"X-API-Key": "dev-local-token"}
@@ -101,6 +105,32 @@ def test_prompt_governance_pack_exports_audit_backed_artifacts(tmp_path: Path) -
     assert "Endpoint Review" in markdown
 
 
+def test_prompt_governance_remediation_plan_exports_bounded_steps(tmp_path: Path) -> None:
+    state = prompt_governance_state(tmp_path)
+
+    plan = state.prompt_governance.remediation_plan(
+        PromptGovernanceRemediationRequest(actor="pytest-prompt-remediator")
+    )
+
+    json_path = Path(plan.json_path)
+    markdown_path = Path(plan.markdown_path)
+    assert plan.plan_id == "prompt_governance_remediation_plan_latest"
+    assert plan.summary["step_count"] >= 1
+    assert plan.summary["approval_queue_count"] >= 1
+    assert any(step.category == "instruction_override" for step in plan.steps)
+    assert any(stage["stage"] == "verify" for stage in plan.bounded_action_loop)
+    assert any(row["event"] == "remediation_steps_generated" for row in plan.run_transparency)
+    assert json_path.exists()
+    assert markdown_path.exists()
+    assert "Prompt Governance Remediation Plan" in markdown_path.read_text(encoding="utf-8")
+    bundle = json.loads(json_path.read_text(encoding="utf-8"))
+    assert bundle["summary"]["step_count"] == plan.summary["step_count"]
+    assert any(
+        event.action == "prompt_governance.remediation_plan_exported"
+        for event in state.audit.events
+    )
+
+
 def test_prompt_governance_endpoints_dashboard_artifacts_and_api_contract(tmp_path: Path) -> None:
     state = prompt_governance_state(tmp_path)
     state.artifacts.output_dir = tmp_path / "artifact_indexes"
@@ -123,6 +153,11 @@ def test_prompt_governance_endpoints_dashboard_artifacts_and_api_contract(tmp_pa
         json={"actor": "pytest-prompt-reviewer"},
         headers=HEADERS,
     )
+    remediation = client.post(
+        "/prompt-governance/remediation-plan",
+        json={"actor": "pytest-prompt-remediator"},
+        headers=HEADERS,
+    )
     smoke = state.ui_verification.dashboard_smoke()
     inventory = state.artifacts.inventory()
     api_contract = state.api_contracts.contract_audit()
@@ -133,11 +168,22 @@ def test_prompt_governance_endpoints_dashboard_artifacts_and_api_contract(tmp_pa
     assert validation.json()["approval_required"] is True
     assert export.status_code == 200
     assert Path(export.json()["json_path"]).exists()
+    assert remediation.status_code == 200
+    assert remediation.json()["summary"]["step_count"] >= 1
+    assert Path(remediation.json()["json_path"]).exists()
     assert any(view["label"] == "Prompt Governance" for view in smoke.expected_views)
     assert any(
         endpoint["path"] == "/prompt-governance/report"
         for endpoint in smoke.endpoint_references
     )
+    assert any(
+        endpoint["path"] == "/prompt-governance/remediation-plan"
+        for endpoint in smoke.endpoint_references
+    )
     assert any(tab["artifact_dir"] == "data/prompt_governance/" for tab in smoke.generated_artifact_tabs)
     assert any(item.directory == "data/prompt_governance" for item in inventory.items)
     assert any(item["path"] == "/prompt-governance/report" for item in api_contract.docs_api_coverage)
+    assert any(
+        item["path"] == "/prompt-governance/remediation-plan"
+        for item in api_contract.docs_api_coverage
+    )
