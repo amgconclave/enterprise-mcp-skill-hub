@@ -16,6 +16,12 @@ from app.api_contracts import ApiContractService
 from app.config import get_settings
 from app.git_readiness import GitReadinessService
 from app.models import (
+    AgentCollaborationPackRequest,
+    AgentCollaborationPackResult,
+    AgentCollaborationRequest,
+    AgentCollaborationRun,
+    AgentCollaborationTurn,
+    AgentHandoffDecision,
     AgentRun,
     ArtifactInventoryItem,
     ArtifactInventoryResult,
@@ -1866,6 +1872,410 @@ class AgentRunner:
     def _compose_final(self, prompt: str, trace: list[JsonDict]) -> str:
         skill_names = ", ".join(step["skill"] for step in trace)
         return f"Processed compound task with {len(trace)} governed skills: {skill_names}. Original task: {prompt[:160]}"
+
+
+class AgentCollaborationService:
+    PACK_ID = "agent_collaboration_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "agent_collaboration"
+
+    async def run(
+        self,
+        request: AgentCollaborationRequest | None = None,
+    ) -> AgentCollaborationRun:
+        request = request or AgentCollaborationRequest()
+        participants = self._participants()
+        shared_state: JsonDict = {
+            "task": request.prompt,
+            "memory": [],
+            "artifacts": {},
+            "handoffs": [],
+            "tool_governance": {
+                "available_mcp_tools": [tool.name for tool in self.app_state.mcp.list_tools()],
+                "enforce_policy": request.enforce_policy,
+                "enforce_entitlements": request.enforce_entitlements,
+            },
+        }
+        turns: list[AgentCollaborationTurn] = []
+        usage = TokenUsage()
+
+        with Timer() as timer:
+            for turn_index, step in enumerate(self._execution_plan(request.prompt), start=1):
+                turn = await self._execute_turn(turn_index, step, request, shared_state)
+                turns.append(turn)
+                usage.input_tokens += turn.token_usage.input_tokens
+                usage.output_tokens += turn.token_usage.output_tokens
+                usage.estimated_cost += turn.token_usage.estimated_cost
+                if turn.status == "failed":
+                    break
+
+        status = "ready" if turns and all(turn.status == "succeeded" for turn in turns) else "needs_review"
+        final_output = self._compose_final_output(turns, shared_state)
+        run = AgentCollaborationRun(
+            id=new_id("collab"),
+            prompt=request.prompt,
+            actor=request.actor,
+            participants=participants,
+            shared_state=shared_state,
+            turns=turns,
+            final_output=final_output,
+            token_usage=usage.model_copy(update={"estimated_cost": round(usage.estimated_cost, 6)}),
+            estimated_cost=round(usage.estimated_cost, 6),
+            latency_ms=round(timer.elapsed_ms, 2),
+            readiness_status=status,
+            governance_summary=self._governance_summary(turns, shared_state),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "agents.collaboration_run",
+            "agent_collaboration",
+            run.id,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": run.readiness_status,
+                "turn_count": len(run.turns),
+                "tool_count": len({turn.skill_id for turn in run.turns}),
+                "estimated_cost": run.estimated_cost,
+            },
+        )
+        return run
+
+    async def export(
+        self,
+        request: AgentCollaborationPackRequest | None = None,
+    ) -> AgentCollaborationPackResult:
+        request = request or AgentCollaborationPackRequest()
+        run = await self.run(
+            AgentCollaborationRequest(
+                actor=request.actor,
+                prompt=(
+                    "Classify a regulated RFP request, search approved policy context, summarize the governed answer, "
+                    "and create action items for human follow-up."
+                ),
+            )
+        )
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": run.readiness_status,
+            "collaboration_run": run.model_dump(mode="json"),
+            "architecture_patterns": [
+                "multi-agent conversation",
+                "shared state",
+                "handoffs",
+                "tool governance",
+                "agent cost tracking",
+            ],
+            "local_proof_commands": self._local_proof_commands(),
+            "limitations": self._limitations(),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "agents.collaboration_pack_exported",
+            "agent_collaboration_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": run.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "turn_count": len(run.turns),
+            },
+        )
+        return AgentCollaborationPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=run.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "turn_count": len(run.turns),
+                "successful_turn_count": sum(1 for turn in run.turns if turn.status == "succeeded"),
+                "estimated_cost": run.estimated_cost,
+                "shared_artifact_count": len(run.shared_state["artifacts"]),
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    async def _execute_turn(
+        self,
+        turn_index: int,
+        step: JsonDict,
+        request: AgentCollaborationRequest,
+        shared_state: JsonDict,
+    ) -> AgentCollaborationTurn:
+        skill_id = step["skill_id"]
+        trace_id = new_trace_id()
+        payload = self._payload(skill_id, request.prompt, shared_state)
+        manifest = self.app_state.registry.get(skill_id)
+        policy_decision = self.app_state.policy.simulate(
+            manifest,
+            PolicySimulationRequest(
+                skill_id=skill_id,
+                role=request.role,
+                environment=request.environment,
+                data_sensitivity=request.data_sensitivity,
+                requested_action="invoke",
+            ),
+        )
+        handoff = AgentHandoffDecision(
+            from_agent=step["from_agent"],
+            to_agent=step["to_agent"],
+            skill_id=skill_id,
+            reason=step["reason"],
+            approved=policy_decision.decision == "allow" and self.app_state.registry.is_mcp_exposed(manifest),
+            governance_checks=[
+                "mcp_tool_exposed" if self.app_state.registry.is_mcp_exposed(manifest) else "mcp_tool_not_exposed",
+                f"policy_{policy_decision.decision}",
+                "entitlement_enforced" if request.enforce_entitlements else "entitlement_observed",
+            ],
+            trace_id=trace_id,
+        )
+        shared_state["handoffs"].append(handoff.model_dump(mode="json"))
+
+        if request.enforce_policy and policy_decision.decision == "deny":
+            return AgentCollaborationTurn(
+                turn_index=turn_index,
+                agent_id=step["to_agent"],
+                skill_id=skill_id,
+                status="failed",
+                input=payload,
+                handoff=handoff.model_copy(update={"approved": False}),
+                policy_decision=policy_decision,
+                trace_id=trace_id,
+                error="Policy denied collaboration handoff before tool execution.",
+            )
+
+        context = PolicyInvocationContext(
+            role=request.role,
+            environment=request.environment,
+            data_sensitivity=request.data_sensitivity,
+            requested_action="invoke",
+            enforce=request.enforce_policy,
+            tenant_id="internal_demo",
+            user_id=request.actor,
+            user_scopes=["skill.invoke"],
+            enforce_entitlements=request.enforce_entitlements,
+            endpoint=f"agent-collaboration:{step['to_agent']}/{skill_id}",
+        )
+        result = await self.app_state.mcp.call_tool(skill_id, payload, request.actor, context)
+        invocation = self._invocation_for_trace(result.get("trace_id"))
+        token_usage = invocation.token_usage if invocation else self._estimate_usage(payload, result)
+        latency_ms = invocation.latency_ms if invocation else 0.0
+        status = "succeeded" if result.get("status") == "succeeded" else "failed"
+        output = result.get("result") if status == "succeeded" else None
+        if output is not None:
+            shared_state["artifacts"][skill_id] = output
+            shared_state["memory"].append(
+                {
+                    "turn": turn_index,
+                    "agent": step["to_agent"],
+                    "skill_id": skill_id,
+                    "trace_id": result.get("trace_id"),
+                    "summary": self._artifact_summary(skill_id, output),
+                }
+            )
+        return AgentCollaborationTurn(
+            turn_index=turn_index,
+            agent_id=step["to_agent"],
+            skill_id=skill_id,
+            status=status,
+            input=payload,
+            output=output,
+            handoff=handoff,
+            policy_decision=policy_decision,
+            trace_id=result.get("trace_id", trace_id),
+            latency_ms=latency_ms,
+            token_usage=token_usage,
+            error=result.get("error") if status == "failed" else None,
+        )
+
+    def _execution_plan(self, prompt: str) -> list[JsonDict]:
+        lower = prompt.lower()
+        plan = [
+            {
+                "from_agent": "governance_reviewer",
+                "to_agent": "intake_agent",
+                "skill_id": "classify_request",
+                "reason": "Classify the request before routing downstream tool access.",
+            },
+            {
+                "from_agent": "intake_agent",
+                "to_agent": "retrieval_agent",
+                "skill_id": "search_knowledge_base",
+                "reason": "Ground the collaboration in approved local resources.",
+            },
+            {
+                "from_agent": "retrieval_agent",
+                "to_agent": "synthesis_agent",
+                "skill_id": "summarize_document",
+                "reason": "Synthesize shared context into a concise governed answer.",
+            },
+        ]
+        if any(term in lower for term in ["action", "owner", "follow-up", "next step", "meeting", "todo"]):
+            plan.append(
+                {
+                    "from_agent": "synthesis_agent",
+                    "to_agent": "action_agent",
+                    "skill_id": "generate_action_items",
+                    "reason": "Create human follow-up tasks from the shared state.",
+                }
+            )
+        return plan
+
+    def _payload(self, skill_id: str, prompt: str, shared_state: JsonDict) -> JsonDict:
+        if skill_id == "classify_request":
+            return {"request": prompt}
+        if skill_id == "search_knowledge_base":
+            return {"query": prompt, "limit": 3}
+        context = self._shared_context(prompt, shared_state)
+        if skill_id == "summarize_document":
+            return {"text": context}
+        if skill_id == "generate_action_items":
+            return {"text": context}
+        return {"text": context}
+
+    def _shared_context(self, prompt: str, shared_state: JsonDict) -> str:
+        memory = "\n".join(
+            f"{item['agent']} used {item['skill_id']}: {item['summary']}"
+            for item in shared_state["memory"]
+        )
+        return f"Original task:\n{prompt}\n\nShared memory:\n{memory}"
+
+    def _invocation_for_trace(self, trace_id: str | None) -> SkillInvocation | None:
+        if not trace_id:
+            return None
+        for invocation in reversed(self.app_state.invocation_service.invocations):
+            if invocation.trace_id == trace_id:
+                return invocation
+        return None
+
+    def _estimate_usage(self, payload: JsonDict, result: JsonDict) -> TokenUsage:
+        return TokenUsage(
+            input_tokens=len(str(payload).split()),
+            output_tokens=len(str(result).split()),
+            estimated_cost=0.0,
+        )
+
+    def _artifact_summary(self, skill_id: str, output: JsonDict) -> str:
+        if skill_id == "classify_request":
+            return f"category={output.get('category')} priority={output.get('priority')}"
+        if skill_id == "search_knowledge_base":
+            return f"{len(output.get('results', []))} approved snippet(s)"
+        if skill_id == "summarize_document":
+            return str(output.get("summary", ""))[:180]
+        if skill_id == "generate_action_items":
+            return f"{output.get('count', 0)} action item(s)"
+        return str(output)[:180]
+
+    def _compose_final_output(self, turns: list[AgentCollaborationTurn], shared_state: JsonDict) -> str:
+        succeeded = [turn for turn in turns if turn.status == "succeeded"]
+        if not succeeded:
+            return "No collaboration turns completed; review policy and tool governance decisions."
+        skill_path = " -> ".join(turn.skill_id for turn in succeeded)
+        return (
+            f"Completed governed multi-agent collaboration across {len(succeeded)} turn(s): {skill_path}. "
+            f"Shared artifacts: {', '.join(shared_state['artifacts'].keys())}."
+        )
+
+    def _governance_summary(self, turns: list[AgentCollaborationTurn], shared_state: JsonDict) -> JsonDict:
+        return {
+            "architecture_patterns": [
+                "multi-agent conversation",
+                "shared state",
+                "handoffs",
+                "tool governance",
+                "agent cost tracking",
+            ],
+            "turn_count": len(turns),
+            "successful_turn_count": sum(1 for turn in turns if turn.status == "succeeded"),
+            "failed_turn_count": sum(1 for turn in turns if turn.status == "failed"),
+            "handoff_count": len(shared_state["handoffs"]),
+            "shared_artifact_count": len(shared_state["artifacts"]),
+            "mcp_tool_count": len(shared_state["tool_governance"]["available_mcp_tools"]),
+            "policy_denial_count": sum(
+                1 for turn in turns if turn.policy_decision and turn.policy_decision.decision == "deny"
+            ),
+            "trace_ids": [turn.trace_id for turn in turns],
+        }
+
+    def _participants(self) -> list[JsonDict]:
+        return [
+            {"id": "governance_reviewer", "purpose": "Approves deterministic handoff route and checks policy posture."},
+            {"id": "intake_agent", "purpose": "Classifies business request and risk context."},
+            {"id": "retrieval_agent", "purpose": "Searches approved local resources through MCP tools."},
+            {"id": "synthesis_agent", "purpose": "Summarizes shared state into a governed response."},
+            {"id": "action_agent", "purpose": "Creates human follow-up tasks when the prompt requires action."},
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/agents/collaborate -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers",
+            'rg "agents/collaborate|Agent Collaboration|agent_collaboration" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\agent_collaboration -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Collaboration routing is deterministic and local; it is not an autonomous planner.",
+            "Shared state is in-memory for the run and exported to ignored local artifacts when requested.",
+            "All tool execution uses existing local/mock MCP skill handlers unless optional providers are configured elsewhere.",
+            "Cost values reuse local token estimates and are not provider invoices.",
+            "Generated collaboration artifacts are written under ignored data/agent_collaboration/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        run = bundle["collaboration_run"]
+        lines = [
+            "# Agent Collaboration Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Turns: `{len(run['turns'])}`",
+            f"- Estimated cost: `${run['estimated_cost']:.6f}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Handoffs",
+            "",
+            *[
+                f"- `{turn['handoff']['from_agent']}` -> `{turn['handoff']['to_agent']}` via `{turn['skill_id']}`: `{turn['status']}`"
+                for turn in run["turns"]
+            ],
+            "",
+            "## Shared State",
+            "",
+            f"- Artifacts: `{', '.join(run['shared_state']['artifacts'].keys())}`",
+            f"- Handoff count: `{run['governance_summary']['handoff_count']}`",
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
 
 
 class WorkflowTemplateService:
@@ -15240,6 +15650,7 @@ class DashboardSmokeService:
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
+            {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
@@ -15287,6 +15698,8 @@ class DashboardSmokeService:
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
+            self._endpoint_ref("agent_collaborate", "POST", "/agents/collaborate", "Runs governed multi-agent collaboration over MCP skills."),
+            self._endpoint_ref("agent_collaboration_pack", "POST", "/agents/collaboration-pack", "Writes Agent Collaboration Pack artifacts."),
             self._endpoint_ref("worker_runs", "GET", "/workers/runs", "Worker run history and transparent timelines."),
             self._endpoint_ref("worker_run_submit", "POST", "/workers/runs", "Queues and executes a sandboxed local worker run."),
             self._endpoint_ref("worker_scale_plan", "GET", "/workers/scale-plan", "Worker pool scale plan and backlog forecast."),
@@ -15337,6 +15750,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
+            self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
@@ -16950,6 +17364,15 @@ class ArtifactInventoryService:
                 "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
             ),
             self._catalog_row(
+                "agent_collaboration",
+                "Agent Collaboration Pack",
+                Path("data") / "agent_collaboration",
+                "POST /agents/collaboration-pack",
+                "Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers",
+                ["agent_collaboration_pack_latest.json", "agent_collaboration_pack_latest.md"],
+                "Multi-agent conversation proof with shared state, governed handoffs, MCP tool use, trace IDs, and local cost tracking.",
+            ),
+            self._catalog_row(
                 "worker_runbooks",
                 "Worker Scale-Out Runbook",
                 Path("data") / "worker_runbooks",
@@ -18310,6 +18733,7 @@ class AppState:
     resources: ResourceRegistry = field(init=False)
     mcp: McpToolAdapter = field(init=False)
     agent: AgentRunner = field(init=False)
+    agent_collaboration: AgentCollaborationService = field(init=False)
     governance: GovernanceReportService = field(init=False)
     conformance: ConformanceReportService = field(init=False)
     evidence: EvidenceBundleService = field(init=False)
@@ -18369,6 +18793,7 @@ class AppState:
             self.validator,
         )
         self.agent = AgentRunner(self.mcp)
+        self.agent_collaboration = AgentCollaborationService(self)
         self.workflows = WorkflowTemplateService(self)
         self.governance = GovernanceReportService(self)
         self.conformance = ConformanceReportService(self)

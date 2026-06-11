@@ -25,6 +25,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `PATCH /skills/{skill_id}/status` - enables/promotes or disables a skill for backward-compatible admin flows.
 - `GET /skills/{skill_id}/versions` - returns registration history for a skill.
 - `POST /agents/run` - runs the demo agent against dynamically discovered skills.
+- `POST /agents/collaborate` - runs a deterministic local multi-agent collaboration over promoted MCP skills with shared state, handoff decisions, policy/entitlement enforcement, traces, and token/cost accounting.
+- `POST /agents/collaboration-pack` - writes the Agent Collaboration Pack Markdown/JSON under ignored local folder `data/agent_collaboration/`.
 - `GET /audit/events` - returns governance audit events.
 - `POST /audit/query` - searches normalized audit, invocation, governance, workflow, and release evidence by action/type, actor, skill id, workflow template id, status, date range, and free text; returns matches, action/status counts, related invocations, related release/workflow evidence, trace/correlation ids, and missing-evidence warnings.
 - `POST /compliance/attestation` - writes a procurement-ready Compliance Attestation Pack as JSON and Markdown under ignored local folder `data/attestations/`.
@@ -57,6 +59,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
 - `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
+- `POST /agents/collaborate` - runs a governed multi-agent conversation using intake, retrieval, synthesis, action, and governance reviewer roles over MCP tools.
+- `POST /agents/collaboration-pack` - writes the Agent Collaboration Pack Markdown/JSON under ignored local folder `data/agent_collaboration/`.
 - `GET /workers/runs` - returns local worker run history with transparent timelines, sandbox decisions, invocation ids, trace ids, and structured outputs.
 - `POST /workers/runs` - queues and executes one deterministic local/mock skill run through a worker pool with optional sandbox preflight.
 - `GET /workers/scale-plan` - returns worker pool status, forecast-backed backlog by skill, scale recommendations, recent run history, and local proof commands.
@@ -591,6 +595,23 @@ The API Contract audit response includes `audit_id`, readiness, score, OpenAPI r
 The Reviewer Collection export writes `reviewer_collection_latest.json` and `reviewer_collection_latest.md` under ignored `data/api_contracts/`. It includes grouped endpoint inventory, MCP tool/resource/prompt inventory, sample PowerShell and curl commands with `X-API-Key`, the demo-token flow, MCP CLI commands, expected status codes, auth notes, generated artifact endpoints, one-command verification order, and recruiter/engineer explanations.
 
 The Tool Contract Drift Pack export writes `contract_drift_pack_latest.json` and `contract_drift_pack_latest.md` under ignored `data/api_contracts/`. It fingerprints promoted manifest input/output schemas, MCP tool input/output schemas, MCP version annotations, registry manifest hashes, and the generic FastAPI `InvokeSkillRequest`/`SkillInvocation` governance fields. It uses tool registry and tool governance patterns to keep manifests as the source of truth, then emits a remediation plan for stale MCP schemas, missing promoted tools, intentionally hidden skills, or FastAPI trace/governance field gaps.
+
+## Agent Collaboration Pack
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/agents/collaborate `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"prompt":"Classify the RFP, search approved AI governance policy, summarize it, and create action items.","actor":"platform-agent-reviewer"}'
+Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\agent_collaboration -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`POST /agents/collaborate` runs a deterministic local collaboration among governance reviewer, intake, retrieval, synthesis, and action roles. Each turn records the MCP skill used, shared-state artifact, handoff approval, policy decision, trace ID, latency, and token/cost estimate.
+
+`POST /agents/collaboration-pack` writes `agent_collaboration_pack_latest.json` and `.md` under ignored `data/agent_collaboration/`. The pack demonstrates multi-agent conversation, shared state, handoffs, tool governance, and agent cost tracking without adding an external agent runtime.
 
 ## Worker Scale-Out And Run Transparency
 

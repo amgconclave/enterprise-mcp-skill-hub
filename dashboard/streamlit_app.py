@@ -10,6 +10,8 @@ import yaml
 from app.bootstrap import create_state
 from app.evals.golden import GoldenEvalRunner, load_cases
 from app.models import (
+    AgentCollaborationPackRequest,
+    AgentCollaborationRequest,
     ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
@@ -97,6 +99,7 @@ view = st.sidebar.radio(
         "Skill SLO",
         "Provider Readiness",
         "Platform Pack",
+        "Agent Collaboration",
         "Worker Scale-Out",
         "Prompt Governance",
         "Privacy Retention",
@@ -872,6 +875,68 @@ elif view == "Platform Pack":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Agent Collaboration":
+    st.subheader("Agent Collaboration")
+    st.caption("Governed multi-agent handoffs over promoted MCP tools with shared state and local cost traces.")
+    default_prompt = (
+        "Classify the RFP, search approved AI governance policy, summarize the answer, "
+        "and create action items for Priya Shah."
+    )
+    prompt = st.text_area("Task", value=default_prompt, height=150)
+    col_actor, col_role, col_sensitivity = st.columns(3)
+    actor = col_actor.text_input("Actor", value="streamlit-agent-platform")
+    role = col_role.selectbox("Role", ["admin", "reviewer", "agent", "viewer"], index=2)
+    sensitivity = col_sensitivity.selectbox("Data sensitivity", ["public", "internal", "confidential"], index=1)
+    col_policy, col_entitlements = st.columns(2)
+    enforce_policy = col_policy.checkbox("Enforce policy", value=True)
+    enforce_entitlements = col_entitlements.checkbox("Enforce entitlements", value=True)
+    collaboration_request = AgentCollaborationRequest(
+        prompt=prompt,
+        actor=actor,
+        role=role,
+        data_sensitivity=sensitivity,
+        enforce_policy=enforce_policy,
+        enforce_entitlements=enforce_entitlements,
+    )
+    run = run_async(state.agent_collaboration.run(collaboration_request))
+    col_ready, col_turns, col_handoffs, col_cost = st.columns(4)
+    col_ready.metric("Readiness", run.readiness_status.upper())
+    col_turns.metric("Turns", len(run.turns))
+    col_handoffs.metric("Handoffs", run.governance_summary["handoff_count"])
+    col_cost.metric("Estimated cost", f"${run.estimated_cost:.4f}")
+    tab_turns, tab_shared, tab_export, tab_json = st.tabs(["Turns", "Shared State", "Pack", "JSON"])
+    with tab_turns:
+        st.dataframe(
+            [
+                {
+                    "turn": turn.turn_index,
+                    "agent": turn.agent_id,
+                    "skill": turn.skill_id,
+                    "status": turn.status,
+                    "handoff": f"{turn.handoff.from_agent} -> {turn.handoff.to_agent}",
+                    "policy": turn.policy_decision.decision if turn.policy_decision else "not_checked",
+                    "trace_id": turn.trace_id,
+                }
+                for turn in run.turns
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json(run.governance_summary)
+    with tab_shared:
+        st.json(run.shared_state)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/agent_collaboration/.")
+        pack_actor = st.text_input("Collaboration pack actor", value="streamlit-agent-platform-reviewer")
+        if st.button("Export Agent Collaboration Pack", use_container_width=True):
+            export = run_async(
+                state.agent_collaboration.export(AgentCollaborationPackRequest(actor=pack_actor))
+            )
+            st.success("Agent Collaboration Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(run.model_dump(mode="json"))
 
 elif view == "Worker Scale-Out":
     st.subheader("Worker Scale-Out")

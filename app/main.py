@@ -9,6 +9,10 @@ from app.bootstrap import create_state
 from app.config import get_settings
 from app.evals.golden import GoldenEvalRunner
 from app.models import (
+    AgentCollaborationPackRequest,
+    AgentCollaborationPackResult,
+    AgentCollaborationRequest,
+    AgentCollaborationRun,
     AgentRun,
     AgentRunRequest,
     ApiContractAuditResult,
@@ -711,6 +715,25 @@ def skill_versions(skill_id: str, _: str = Depends(require_api_key)) -> list[Ski
 @app.post("/agents/run", response_model=AgentRun)
 async def run_agent(request: AgentRunRequest, _: str = Depends(require_api_key)) -> AgentRun:
     return await state.agent.run(request.prompt, request.actor)
+
+
+@app.post("/agents/collaborate", response_model=AgentCollaborationRun)
+async def run_agent_collaboration(
+    request: AgentCollaborationRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> AgentCollaborationRun:
+    try:
+        return await state.agent_collaboration.run(request or AgentCollaborationRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/agents/collaboration-pack", response_model=AgentCollaborationPackResult)
+async def export_agent_collaboration_pack(
+    request: AgentCollaborationPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> AgentCollaborationPackResult:
+    return await state.agent_collaboration.export(request or AgentCollaborationPackRequest())
 
 
 @app.get("/workflows/templates", response_model=list[WorkflowTemplate])

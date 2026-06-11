@@ -5,6 +5,8 @@ import json
 
 from app.bootstrap import create_state
 from app.models import (
+    AgentCollaborationPackRequest,
+    AgentCollaborationRequest,
     ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
@@ -192,6 +194,18 @@ async def main() -> None:
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
         GovernedSkillPlatformPackRequest(actor="demo-platform-owner")
+    )
+    agent_collaboration_run = await state.agent_collaboration.run(
+        AgentCollaborationRequest(
+            prompt=(
+                "Classify the RFP, search approved AI governance policy, summarize the governed answer, "
+                "and create action items for Priya Shah."
+            ),
+            actor="demo-agent-platform",
+        )
+    )
+    agent_collaboration_pack = await state.agent_collaboration.export(
+        AgentCollaborationPackRequest(actor="demo-agent-platform")
     )
     worker_run = await state.worker_scaleout.submit_run(
         WorkerSkillRunRequest(
@@ -403,6 +417,12 @@ async def main() -> None:
                 "platform_pack_controls": len(platform_pack_report.capability_controls),
                 "platform pack path": platform_pack_export.markdown_path,
                 "platform_pack_path": platform_pack_export.markdown_path,
+                "agent collaboration readiness": agent_collaboration_run.readiness_status,
+                "agent_collaboration_readiness": agent_collaboration_run.readiness_status,
+                "agent collaboration handoffs": agent_collaboration_run.governance_summary["handoff_count"],
+                "agent_collaboration_handoffs": agent_collaboration_run.governance_summary["handoff_count"],
+                "agent collaboration pack path": agent_collaboration_pack.markdown_path,
+                "agent_collaboration_pack_path": agent_collaboration_pack.markdown_path,
                 "worker scaleout readiness": worker_scale_plan.readiness_status,
                 "worker_scaleout_readiness": worker_scale_plan.readiness_status,
                 "worker run status": worker_run.status,

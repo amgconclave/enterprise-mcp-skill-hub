@@ -12,6 +12,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `PromptRegistry` stores reusable prompt templates for support replies, RFP answers, and meeting summaries.
 - `ResourceRegistry` exposes file-backed policy/product resources, workflow templates, and a dynamic skill catalog.
 - `AgentRunner` dynamically discovers MCP tools and selects multiple skills for compound tasks.
+- `AgentCollaborationService` runs deterministic local multi-agent conversations with governance reviewer, intake, retrieval, synthesis, and action roles; each turn shares state, records handoff decisions, enforces existing MCP/policy/entitlement gates, tracks trace IDs and token/cost estimates, and writes Agent Collaboration Pack artifacts under `data/agent_collaboration/`.
 - `WorkflowTemplateService` loads approved file-backed templates, stores local review submissions, validates composition readiness, gates approval/rejection, simulates ordered skill composition with per-step policy decisions, and exports review evidence.
 - `AuditService` records governance events.
 - `MetricsService` aggregates invocation count, failures, latency, tokens, cost, and per-skill usage.
@@ -63,6 +64,17 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 14. Security review summaries and evidence bundles combine those reports with policy denials and MCP exposure.
 15. Audit query and compliance attestation endpoints assemble local review evidence across audit, invocation, governance, workflow, release, and MCP sources.
 16. The API returns a structured invocation record.
+
+## Agent Collaboration Flow
+
+1. A platform reviewer calls `POST /agents/collaborate` with a task, actor, role, environment, and data sensitivity.
+2. `AgentCollaborationService` creates an in-memory shared state with the original task, tool-governance settings, memory entries, artifacts, and handoff records.
+3. The governance reviewer hands off to the intake agent for `classify_request`, then intake hands off to retrieval for `search_knowledge_base`, retrieval hands off to synthesis for `summarize_document`, and synthesis hands off to the action agent for `generate_action_items` when the prompt asks for follow-up work.
+4. Before each MCP tool call, the service simulates policy for the target skill and records a typed handoff decision with governance checks.
+5. If policy enforcement denies the step, the collaboration stops before tool execution and returns a `needs_review` run.
+6. Allowed turns call the existing MCP adapter with policy and entitlement context, then store the tool output in shared artifacts and a compact memory entry for later turns.
+7. The run returns participants, turns, shared state, final output, trace IDs, latency, token usage, estimated local cost, and limitations.
+8. `POST /agents/collaboration-pack` writes `agent_collaboration_pack_latest.json` and `.md` under ignored `data/agent_collaboration/` for reviewer evidence.
 
 ## Worker Scale-Out Flow
 
@@ -142,6 +154,8 @@ The project keeps governance close to the skill runtime:
 - Cost Chargeback Packs are saved with `POST /usage/chargeback-pack` under ignored local folder `data/usage_packs/`.
 - Governed Skill Platform Pack reports are available at `GET /platform/pack`.
 - Governed Skill Platform Pack artifacts are saved with `POST /platform/pack/export` under ignored local folder `data/platform_packs/`.
+- Agent Collaboration runs are available at `POST /agents/collaborate`.
+- Agent Collaboration Pack artifacts are saved with `POST /agents/collaboration-pack` under ignored local folder `data/agent_collaboration/`.
 - Enterprise readiness is available at `GET /enterprise/readiness-scorecard`.
 - Portfolio demo packs are saved with `POST /enterprise/portfolio-demo-pack` under ignored local folder `data/portfolio_demo/`.
 - Portfolio Evidence indexes are returned by `GET /portfolio/evidence-index`.

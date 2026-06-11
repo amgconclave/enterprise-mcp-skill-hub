@@ -32,6 +32,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill SLO + Error Budget Pack for per-skill availability SLOs, error budget burn, latency budget, release-gate blockers, reviewer proof commands, and ignored `data/slo_packs/` artifacts.
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
+- Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
 - Worker Scale-Out Runbook for local worker pools, sandbox preflight, transparent queued runs, capacity-backed scale recommendations, and ignored `data/worker_runbooks/` artifacts.
 - Invocation Sandbox Policy Pack for mock tool payload limits, blocked action classes, risk labels, FastAPI/MCP endpoint policy, enforced denied invocations, and ignored `data/sandbox_policies/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, audit events, and ignored `data/prompt_governance/` artifacts.
@@ -50,7 +51,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Platform Pack, Worker Scale-Out, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Platform Pack, Agent Collaboration, Worker Scale-Out, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -112,6 +113,8 @@ Invoke-RestMethod http://localhost:8000/slo/report -Headers $headers
 Invoke-RestMethod http://localhost:8000/slo/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers
 Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/agents/collaborate -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers
 Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers
@@ -527,6 +530,23 @@ Get-ChildItem -Recurse -File data\platform_packs -ErrorAction SilentlyContinue |
 ```
 
 `GET /platform/pack` rolls up durable workflow templates, human-in-the-loop review state, governance/conformance posture, provider fallback readiness, MCP tool governance, estimated cost/trace signals, and handoff readiness into one platform-team report. `POST /platform/pack/export` writes `governed_skill_platform_pack_latest.json` and `.md` under ignored `data/platform_packs/`. The Streamlit dashboard has a `Platform Pack` view, and `python -m app.demo` prints platform pack readiness plus the artifact path.
+
+## Agent Collaboration Pack
+
+Run a governed local multi-agent conversation over promoted MCP skills:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/agents/collaborate `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"prompt":"Classify the RFP, search approved AI governance policy, summarize it, and create action items.","actor":"platform-agent-reviewer"}'
+Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\agent_collaboration -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`POST /agents/collaborate` uses governance reviewer, intake, retrieval, synthesis, and action roles. Every turn records the MCP tool, shared-state artifact, handoff approval, policy decision, trace ID, latency, token usage, and estimated local cost. `POST /agents/collaboration-pack` writes `agent_collaboration_pack_latest.json` and `.md` under ignored `data/agent_collaboration/`. The Streamlit dashboard has an `Agent Collaboration` view, and `python -m app.demo` prints collaboration readiness plus the artifact path.
 
 ## Worker Scale-Out And Run Transparency
 

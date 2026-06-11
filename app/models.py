@@ -73,6 +73,14 @@ PrivacyRetentionSourceType = Literal[
 ]
 WorkerRunStatus = Literal["queued", "running", "succeeded", "failed"]
 WorkerPoolKey = Literal["local_mock_general", "retrieval_heavy", "governance_review"]
+AgentCollaborationTurnStatus = Literal["succeeded", "failed", "skipped"]
+AgentCollaborationRole = Literal[
+    "intake_agent",
+    "retrieval_agent",
+    "synthesis_agent",
+    "action_agent",
+    "governance_reviewer",
+]
 
 
 class TokenUsage(BaseModel):
@@ -183,6 +191,73 @@ class AgentRun(BaseModel):
     trace: list[JsonDict]
     token_usage: TokenUsage
     latency_ms: float
+
+
+class AgentHandoffDecision(BaseModel):
+    from_agent: AgentCollaborationRole
+    to_agent: AgentCollaborationRole
+    skill_id: str
+    reason: str
+    approved: bool
+    governance_checks: list[str] = Field(default_factory=list)
+    trace_id: str
+
+
+class AgentCollaborationTurn(BaseModel):
+    turn_index: int
+    agent_id: AgentCollaborationRole
+    skill_id: str
+    status: AgentCollaborationTurnStatus
+    input: JsonDict
+    output: JsonDict | None = None
+    handoff: AgentHandoffDecision
+    policy_decision: PolicySimulationResult | None = None
+    trace_id: str
+    latency_ms: float = 0.0
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    error: str | None = None
+
+
+class AgentCollaborationRequest(BaseModel):
+    prompt: str = (
+        "Classify this RFP request, find approved governance policy context, summarize the answer, "
+        "and create owner action items for the platform team."
+    )
+    actor: str = "collaboration-demo-user"
+    role: PolicyRole = "agent"
+    environment: str = "local"
+    data_sensitivity: DataSensitivity = "internal"
+    enforce_policy: bool = True
+    enforce_entitlements: bool = True
+
+
+class AgentCollaborationRun(BaseModel):
+    id: str
+    prompt: str
+    actor: str
+    participants: list[JsonDict]
+    shared_state: JsonDict
+    turns: list[AgentCollaborationTurn]
+    final_output: str
+    token_usage: TokenUsage
+    estimated_cost: float
+    latency_ms: float
+    readiness_status: SecurityReadinessStatus
+    governance_summary: JsonDict
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AgentCollaborationPackRequest(BaseModel):
+    actor: str = "agent-platform-reviewer"
+
+
+class AgentCollaborationPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
 
 
 class UsageMetric(BaseModel):
