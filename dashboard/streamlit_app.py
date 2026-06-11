@@ -38,6 +38,7 @@ from app.models import (
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
+    SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillManifest,
@@ -81,6 +82,7 @@ view = st.sidebar.radio(
         "Tenant Policy Sandbox",
         "Tenant RBAC / Entitlements",
         "Skill Marketplace",
+        "Skill Compatibility",
         "Skill Usage Analytics",
         "Skill Reliability",
         "Provider Readiness",
@@ -532,6 +534,45 @@ elif view == "Skill Marketplace":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(catalog.model_dump(mode="json"))
+
+elif view == "Skill Compatibility":
+    st.subheader("Skill Compatibility")
+    st.caption("Semantic version compatibility checks with deprecated skill warnings, migration recommendations, and local artifacts.")
+    report = state.compatibility.report()
+    col_ready, col_skills, col_deprecated, col_migrations = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_skills.metric("Skills", report.coverage_summary["skill_count"])
+    col_deprecated.metric("Deprecated", report.coverage_summary["deprecated_count"])
+    col_migrations.metric("Migrations", report.coverage_summary["migration_recommendation_count"])
+
+    tab_matrix, tab_deprecated, tab_migrations, tab_export, tab_json = st.tabs(
+        ["Matrix", "Deprecated Skills", "Migration Recommendations", "Compatibility Pack", "JSON"]
+    )
+    with tab_matrix:
+        st.dataframe(report.compatibility_matrix, use_container_width=True, hide_index=True)
+        st.json(report.coverage_summary)
+    with tab_deprecated:
+        st.dataframe(report.deprecated_skill_warnings, use_container_width=True, hide_index=True)
+    with tab_migrations:
+        st.dataframe(report.migration_recommendations, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/compatibility_packs/.")
+        selected = st.multiselect(
+            "Optional skill subset",
+            [skill.id for skill in state.registry.list()],
+            default=[],
+        )
+        if st.button("Export Compatibility Pack", use_container_width=True):
+            export = state.compatibility.pack(
+                SkillCompatibilityPackRequest(
+                    actor="streamlit-compatibility-reviewer",
+                    skill_ids=selected,
+                )
+            )
+            st.success("Compatibility Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Skill Usage Analytics":
     st.subheader("Skill Usage Analytics")

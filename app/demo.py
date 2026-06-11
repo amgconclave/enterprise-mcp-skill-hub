@@ -25,6 +25,7 @@ from app.models import (
     ReleasePublishPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
+    SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillReliabilityPackRequest,
@@ -162,6 +163,10 @@ async def main() -> None:
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
         MarketplaceRolloutPackRequest(actor="demo-marketplace-reviewer")
+    )
+    compatibility_report = state.compatibility.report()
+    compatibility_pack = state.compatibility.pack(
+        SkillCompatibilityPackRequest(actor="demo-compatibility-reviewer")
     )
     usage_analytics = state.usage.analytics()
     usage_chargeback_pack = state.usage.chargeback_pack(
@@ -315,6 +320,10 @@ async def main() -> None:
                 "marketplace_catalog_listings": marketplace_catalog.coverage_summary["listing_count"],
                 "tenant rollout approval pack path": marketplace_pack.markdown_path,
                 "tenant_rollout_approval_pack_path": marketplace_pack.markdown_path,
+                "skill compatibility readiness": compatibility_report.readiness_status,
+                "skill_compatibility_readiness": compatibility_report.readiness_status,
+                "skill compatibility pack path": compatibility_pack.markdown_path,
+                "skill_compatibility_pack_path": compatibility_pack.markdown_path,
                 "skill usage analytics readiness": usage_analytics.readiness_status,
                 "skill_usage_analytics_readiness": usage_analytics.readiness_status,
                 "cost chargeback estimated cost": usage_analytics.summary["estimated_cost"],

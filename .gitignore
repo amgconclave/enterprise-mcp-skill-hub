@@ -16,6 +16,7 @@ data/incident_runbooks/
 data/tenant_sandboxes/
 data/entitlement_packs/
 data/marketplace_packs/
+data/compatibility_packs/
 data/usage_packs/
 data/reliability_packs/
 data/provider_packs/

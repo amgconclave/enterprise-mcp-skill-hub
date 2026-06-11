@@ -26,6 +26,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Tenant Policy Sandbox + Data Sensitivity Simulator for healthcare, fintech, public sector, and internal demo tenants, returning allowed, blocked, and review-required MCP skills/workflows plus guardrails and exportable evidence.
 - Tenant RBAC + Skill Entitlement Pack for local tenant/user scopes, allowed and denied skill policies, MCP-safe tool subsets, enforced denied invocation audit events, dashboard review, and ignored `data/entitlement_packs/` artifacts.
 - Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
+- Skill Version Compatibility Pack for SemVer checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, dashboard review, and ignored `data/compatibility_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
@@ -45,6 +46,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
 - Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Prompt Governance, Privacy Retention, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
 ## Quick Start
@@ -93,6 +95,8 @@ Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers
 Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/skills/compatibility -Headers $headers
+Invoke-RestMethod http://localhost:8000/skills/compatibility-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers
 Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers
@@ -431,6 +435,20 @@ Get-ChildItem -Recurse -File data\marketplace_packs -ErrorAction SilentlyContinu
 ```
 
 `GET /marketplace/catalog` returns approved/promoted/draft/disabled skill listings with versions, tenant eligibility for internal ops, regulated healthcare, fintech/confidential, and public-sector restricted scenarios, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollout rows, and coverage summary. `POST /marketplace/rollout-pack` writes `rollout_approval_pack_latest.json` and `.md` under ignored `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations. The Streamlit dashboard has a `Skill Marketplace` view, and `python -m app.demo` prints Skill Marketplace readiness plus the Tenant Rollout approval pack path.
+
+## Skill Version Compatibility Pack
+
+Generate semantic version compatibility checks and migration guidance:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/skills/compatibility -Headers $headers
+Invoke-RestMethod http://localhost:8000/skills/summarize_document/compatibility -Headers $headers
+Invoke-RestMethod http://localhost:8000/skills/compatibility-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\compatibility_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /skills/compatibility` returns per-skill SemVer validity, version deltas, deprecated skill warnings, schema/hash evidence, migration recommendations, and MCP exposure state. `POST /skills/compatibility-pack` writes `compatibility_pack_latest.json` and `.md` under ignored `data/compatibility_packs/`. The Streamlit dashboard has a `Skill Compatibility` view, and `python -m app.demo` prints compatibility readiness plus the pack path.
 
 ## Skill Usage Analytics And Cost Chargeback
 

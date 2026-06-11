@@ -40,6 +40,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /tenants/entitlements/pack` - writes `tenant_entitlement_pack_latest.json` and `.md` under ignored local folder `data/entitlement_packs/`.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
+- `GET /skills/compatibility` - returns semantic version compatibility checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, and coverage summary.
+- `GET /skills/{skill_id}/compatibility` - returns the compatibility record for one skill.
+- `POST /skills/compatibility-pack` - writes the Skill Version Compatibility Pack Markdown/JSON under ignored local folder `data/compatibility_packs/`.
 - `GET /usage/analytics` - returns Skill Usage Analytics by skill, tenant/environment, agent, status, MCP exposure, latency band, token/cost estimate, budget status, anomaly flag, disabled-skill blocked event, and coverage summary.
 - `POST /usage/chargeback-pack` - writes the Cost Chargeback Pack Markdown/JSON under ignored local folder `data/usage_packs/` with usage tables, cost allocation, budget/anomaly flags, recommended controls, reviewer checklist, local proof commands, and limitations.
 - `GET /reliability/skills` - returns per-skill failure counts, latency SLO posture, circuit breaker state, disable/re-enable recommendations, trace evidence, and local/mock limitations.

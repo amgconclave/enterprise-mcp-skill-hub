@@ -121,6 +121,10 @@ from app.models import (
     RuntimeDemoReadinessResult,
     SecurityReadinessStatus,
     SecurityReviewSummary,
+    SkillCompatibilityPackRequest,
+    SkillCompatibilityPackResult,
+    SkillCompatibilityRecord,
+    SkillCompatibilityReport,
     SkillEntitlementDecision,
     SkillGovernanceRecord,
     SkillIncidentDrillRequest,
@@ -6444,6 +6448,449 @@ class TenantPolicySandboxService:
                 "## Interviewer Talking Points",
                 "",
                 *[f"{index}. {point}" for index, point in enumerate(bundle["interviewer_talking_points"], start=1)],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class SkillVersionCompatibilityService:
+    PACK_ID = "compatibility_pack_latest"
+    SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$")
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "compatibility_packs"
+
+    def report(self, skill_ids: list[str] | None = None) -> SkillCompatibilityReport:
+        selected_ids = set(skill_ids or [])
+        skills = [
+            skill
+            for skill in self.app_state.registry.list()
+            if not selected_ids or skill.id in selected_ids
+        ]
+        unknown = sorted(selected_ids - {skill.id for skill in skills})
+        records = [self._record(skill) for skill in skills]
+        deprecated = [
+            {
+                "skill_id": record.skill_id,
+                "version": record.current_version,
+                "warnings": record.deprecation_warnings,
+                "recommended_action": "Keep hidden from new workflows, publish migration guidance, and remove after downstream owners confirm replacement.",
+            }
+            for record in records
+            if record.deprecated
+        ]
+        migrations = [
+            {
+                "skill_id": record.skill_id,
+                "from_version": record.previous_version,
+                "to_version": record.current_version,
+                "version_delta": record.version_delta,
+                "recommendations": record.migration_recommendations,
+            }
+            for record in records
+            if record.migration_recommendations
+        ]
+        readiness: SecurityReadinessStatus = "ready"
+        if any(record.compatibility_status == "incompatible" for record in records) or unknown:
+            readiness = "blocked"
+        elif any(record.compatibility_status in {"needs_review", "deprecated"} for record in records):
+            readiness = "needs_review"
+        return SkillCompatibilityReport(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            records=records,
+            compatibility_matrix=self._compatibility_matrix(records),
+            deprecated_skill_warnings=deprecated,
+            migration_recommendations=migrations,
+            coverage_summary={
+                "skill_count": len(records),
+                "unknown_skill_ids": unknown,
+                "semantic_version_valid_count": sum(1 for record in records if record.semantic_version_valid),
+                "compatible_count": sum(1 for record in records if record.compatibility_status == "compatible"),
+                "needs_review_count": sum(1 for record in records if record.compatibility_status == "needs_review"),
+                "incompatible_count": sum(1 for record in records if record.compatibility_status == "incompatible"),
+                "deprecated_count": len(deprecated),
+                "migration_recommendation_count": len(migrations),
+                "mcp_exposed_count": sum(1 for record in records if record.mcp_exposure_state.get("mcp_exposed")),
+            },
+            limitations=self._limitations(),
+        )
+
+    def skill_record(self, skill_id: str) -> SkillCompatibilityRecord:
+        return self._record(self.app_state.registry.get(skill_id))
+
+    def pack(
+        self,
+        request: SkillCompatibilityPackRequest | None = None,
+    ) -> SkillCompatibilityPackResult:
+        request = request or SkillCompatibilityPackRequest()
+        report = self.report(request.skill_ids)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "compatibility_report": report.model_dump(mode="json"),
+            "semantic_version_policy": self._semantic_version_policy(),
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "local_proof_commands": self._local_proof_commands(),
+            "limitations": report.limitations,
+        }
+        bundle["summary"] = {
+            "skill_count": report.coverage_summary["skill_count"],
+            "deprecated_count": report.coverage_summary["deprecated_count"],
+            "incompatible_count": report.coverage_summary["incompatible_count"],
+            "migration_recommendation_count": report.coverage_summary["migration_recommendation_count"],
+            "readiness_status": report.readiness_status,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "skills.compatibility_pack_exported",
+            "skill_compatibility_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "skill_count": report.coverage_summary["skill_count"],
+            },
+        )
+        return SkillCompatibilityPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _record(self, skill: SkillManifest) -> SkillCompatibilityRecord:
+        versions = self.app_state.registry.versions(skill.id)
+        current = versions[-1] if versions else None
+        previous = versions[-2] if len(versions) > 1 else None
+        current_semver = self._parse_semver(skill.version)
+        previous_semver = self._parse_semver(previous.version) if previous else None
+        version_delta = self._version_delta(current_semver, previous_semver, previous)
+        validation = self.app_state.validator.validate_manifest(skill.model_dump(mode="json"))
+        deprecated, deprecation_warnings = self._deprecation(skill)
+        schema_compatibility = self._schema_compatibility(skill, current, previous, validation.valid)
+        recommendations = self._migration_recommendations(
+            skill,
+            version_delta,
+            current_semver is not None,
+            schema_compatibility,
+            deprecated,
+            previous,
+        )
+        status = self._compatibility_status(
+            current_semver is not None,
+            version_delta,
+            validation.valid,
+            deprecated,
+            schema_compatibility,
+        )
+        mcp_exposed = self.app_state.registry.is_mcp_exposed(skill) and validation.valid and not deprecated
+        return SkillCompatibilityRecord(
+            skill_id=skill.id,
+            name=skill.name,
+            current_version=skill.version,
+            previous_version=previous.version if previous else None,
+            semantic_version_valid=current_semver is not None,
+            version_delta=version_delta,
+            compatibility_status=status,
+            deprecated=deprecated,
+            deprecation_warnings=deprecation_warnings,
+            schema_compatibility=schema_compatibility,
+            migration_recommendations=recommendations,
+            mcp_exposure_state={
+                "mcp_exposed": mcp_exposed,
+                "registry_mcp_exposed": self.app_state.registry.is_mcp_exposed(skill),
+                "schema_valid": validation.valid,
+                "deprecated": deprecated,
+                "exposure_status": "exposed" if mcp_exposed else "not_exposed",
+            },
+            evidence=[
+                {
+                    "type": "version_history",
+                    "version_count": len(versions),
+                    "latest_manifest_hash": current.manifest_hash if current else None,
+                    "previous_manifest_hash": previous.manifest_hash if previous else None,
+                },
+                {
+                    "type": "schema_validation",
+                    "valid": validation.valid,
+                    "errors": validation.errors,
+                },
+                {
+                    "type": "lifecycle",
+                    "status": skill.status,
+                    "enabled": skill.enabled,
+                    "provider": skill.provider,
+                    "tags": skill.tags,
+                },
+            ],
+        )
+
+    def _parse_semver(self, version: str | None) -> tuple[int, int, int] | None:
+        if not version:
+            return None
+        match = self.SEMVER_PATTERN.match(version)
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+    def _version_delta(
+        self,
+        current: tuple[int, int, int] | None,
+        previous: tuple[int, int, int] | None,
+        previous_record: SkillVersion | None,
+    ) -> str:
+        if current is None or (previous_record and previous is None):
+            return "non_semver"
+        if previous is None:
+            return "initial"
+        if current == previous:
+            return "same"
+        if current[0] != previous[0]:
+            return "major"
+        if current[1] != previous[1]:
+            return "minor"
+        return "patch"
+
+    def _deprecation(self, skill: SkillManifest) -> tuple[bool, list[str]]:
+        haystack = " ".join([skill.name, skill.description, *skill.tags]).lower()
+        warnings: list[str] = []
+        if "deprecated" in haystack or "legacy" in haystack:
+            warnings.append("Manifest text or tags mark this skill as deprecated/legacy.")
+        if not skill.enabled or skill.status == "disabled":
+            warnings.append("Skill is disabled and should be treated as retired for new agent workflows.")
+        return bool(warnings), warnings
+
+    def _schema_compatibility(
+        self,
+        skill: SkillManifest,
+        current: SkillVersion | None,
+        previous: SkillVersion | None,
+        schema_valid: bool,
+    ) -> JsonDict:
+        current_required = sorted(skill.input_schema.get("required", []))
+        current_output_required = sorted(skill.output_schema.get("required", []))
+        hash_changed = bool(current and previous and current.manifest_hash != previous.manifest_hash)
+        return {
+            "schema_valid": schema_valid,
+            "manifest_hash_changed": hash_changed,
+            "input_required_fields": current_required,
+            "output_required_fields": current_output_required,
+            "input_property_count": len(skill.input_schema.get("properties", {})),
+            "output_property_count": len(skill.output_schema.get("properties", {})),
+            "compatibility_basis": (
+                "Current manifest schema plus registry version hashes; historical manifest bodies are not persisted."
+            ),
+        }
+
+    def _migration_recommendations(
+        self,
+        skill: SkillManifest,
+        version_delta: str,
+        semver_valid: bool,
+        schema_compatibility: JsonDict,
+        deprecated: bool,
+        previous: SkillVersion | None,
+    ) -> list[str]:
+        recommendations: list[str] = []
+        if not semver_valid:
+            recommendations.append("Change the manifest version to MAJOR.MINOR.PATCH before rollout.")
+        if version_delta == "major":
+            recommendations.append("Treat as a breaking change: publish consumer migration notes and rerun conformance before promotion.")
+        elif version_delta == "minor":
+            recommendations.append("Document newly added behavior and verify backward-compatible inputs with golden evals.")
+        elif version_delta == "patch":
+            recommendations.append("Run regression, conformance, and MCP tool inspection before replacing the prior patch.")
+        if schema_compatibility["manifest_hash_changed"] and version_delta in {"same", "patch"}:
+            recommendations.append("Manifest hash changed without a major/minor bump; confirm schema changes are backward compatible.")
+        if deprecated:
+            recommendations.append("Identify replacement skills and update workflows before removing this skill from the catalog.")
+        if previous is None:
+            recommendations.append("No prior local version exists; capture this pack as the compatibility baseline.")
+        if skill.status != "promoted":
+            recommendations.append("Keep non-promoted skills out of MCP exposure until validation and approval finish.")
+        return recommendations
+
+    def _compatibility_status(
+        self,
+        semver_valid: bool,
+        version_delta: str,
+        schema_valid: bool,
+        deprecated: bool,
+        schema_compatibility: JsonDict,
+    ) -> str:
+        if not semver_valid or not schema_valid:
+            return "incompatible"
+        if deprecated:
+            return "deprecated"
+        if version_delta == "major" or schema_compatibility["manifest_hash_changed"]:
+            return "needs_review"
+        return "compatible"
+
+    def _compatibility_matrix(self, records: list[SkillCompatibilityRecord]) -> list[JsonDict]:
+        return [
+            {
+                "skill_id": record.skill_id,
+                "current_version": record.current_version,
+                "previous_version": record.previous_version,
+                "version_delta": record.version_delta,
+                "status": record.compatibility_status,
+                "deprecated": record.deprecated,
+                "mcp_exposed": record.mcp_exposure_state.get("mcp_exposed", False),
+                "migration_required": bool(record.migration_recommendations),
+            }
+            for record in records
+        ]
+
+    def _semantic_version_policy(self) -> list[JsonDict]:
+        return [
+            {
+                "delta": "patch",
+                "compatibility": "compatible after regression checks",
+                "rule": "Bug fixes should keep input/output contracts backward compatible.",
+            },
+            {
+                "delta": "minor",
+                "compatibility": "compatible after documented additive behavior",
+                "rule": "New optional fields or behavior require release notes and eval coverage.",
+            },
+            {
+                "delta": "major",
+                "compatibility": "needs_review",
+                "rule": "Breaking schema or behavior changes require migration guidance before rollout.",
+            },
+            {
+                "delta": "non_semver",
+                "compatibility": "incompatible",
+                "rule": "Manifest versions must use MAJOR.MINOR.PATCH.",
+            },
+        ]
+
+    def _reviewer_checklist(self, report: SkillCompatibilityReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "All skill versions use SemVer.",
+                "status": "pass" if report.coverage_summary["semantic_version_valid_count"] == report.coverage_summary["skill_count"] else "fail",
+                "proof": f"{report.coverage_summary['semantic_version_valid_count']}/{report.coverage_summary['skill_count']} valid SemVer strings.",
+            },
+            {
+                "item": "Deprecated skills have migration guidance.",
+                "status": "pass" if not report.deprecated_skill_warnings else "needs_review",
+                "proof": f"{len(report.deprecated_skill_warnings)} deprecated skill warning(s).",
+            },
+            {
+                "item": "Breaking or hash-changing versions have recommendations.",
+                "status": "pass" if report.coverage_summary["migration_recommendation_count"] else "baseline",
+                "proof": f"{report.coverage_summary['migration_recommendation_count']} migration recommendation row(s).",
+            },
+            {
+                "item": "Run local acceptance checks before compatibility approval.",
+                "status": "manual",
+                "proof": "pytest, ruff, eval, conformance, dashboard smoke, demo, and MCP inspector commands.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "skills/compatibility|compatibility-pack|Skill Compatibility|compatibility_packs|deprecated skill|migration recommendations" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\compatibility_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Compatibility analysis is deterministic and local; it does not query package registries or hosted model providers.",
+            "Historical manifest bodies are not persisted, so schema compatibility uses current schema fields plus local manifest hashes.",
+            "Deprecated status is inferred from lifecycle state and manifest text/tags; organizations can replace this with a formal deprecation field later.",
+            "Generated compatibility artifacts are written under ignored data/compatibility_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["compatibility_report"]
+        lines = [
+            "# Skill Version Compatibility Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Coverage Summary",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in report["coverage_summary"].items()],
+            "",
+            "## Compatibility Matrix",
+            "",
+            *[
+                f"- `{item['skill_id']}` {item['previous_version'] or 'baseline'} -> `{item['current_version']}` "
+                f"`{item['version_delta']}` `{item['status']}`"
+                for item in report["compatibility_matrix"]
+            ],
+            "",
+            "## Deprecated Skill Warnings",
+            "",
+            *(
+                [
+                    f"- `{item['skill_id']}` v`{item['version']}`: {' | '.join(item['warnings'])}"
+                    for item in report["deprecated_skill_warnings"]
+                ]
+                or ["- none"]
+            ),
+            "",
+            "## Migration Recommendations",
+            "",
+        ]
+        for item in report["migration_recommendations"]:
+            lines.append(f"- `{item['skill_id']}` {item['from_version'] or 'baseline'} -> `{item['to_version']}`")
+            lines.extend(f"  - {recommendation}" for recommendation in item["recommendations"])
+        if not report["migration_recommendations"]:
+            lines.append("- none")
+        lines.extend(
+            [
+                "",
+                "## Semantic Version Policy",
+                "",
+                *[
+                    f"- `{item['delta']}`: {item['compatibility']} - {item['rule']}"
+                    for item in bundle["semantic_version_policy"]
+                ],
+                "",
+                "## Reviewer Checklist",
+                "",
+                *[
+                    f"- `{item['status']}` {item['item']} - {item['proof']}"
+                    for item in bundle["reviewer_checklist"]
+                ],
+                "",
+                "## Local Proof Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {note}" for note in bundle["limitations"]],
                 "",
             ]
         )
@@ -13360,6 +13807,7 @@ class DashboardSmokeService:
             {"id": "reviewer_quickstart", "label": "Reviewer Quickstart", "purpose": "Copy-ready reviewer path."},
             {"id": "artifact_inventory", "label": "Artifact Inventory", "purpose": "Generated proof index."},
             {"id": "skill_marketplace", "label": "Skill Marketplace", "purpose": "Tenant rollout approval pack."},
+            {"id": "skill_compatibility", "label": "Skill Compatibility", "purpose": "Semantic version and migration readiness."},
             {"id": "skill_usage_analytics", "label": "Skill Usage Analytics", "purpose": "Cost Chargeback controls."},
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
@@ -13395,6 +13843,8 @@ class DashboardSmokeService:
             self._endpoint_ref("runtime_pack", "POST", "/runtime/demo-pack", "Writes Runtime Demo Server Pack artifacts."),
             self._endpoint_ref("marketplace_catalog", "GET", "/marketplace/catalog", "Skill Marketplace catalog."),
             self._endpoint_ref("marketplace_rollout_pack", "POST", "/marketplace/rollout-pack", "Writes Tenant Rollout approval pack."),
+            self._endpoint_ref("skill_compatibility", "GET", "/skills/compatibility", "Semantic version compatibility report."),
+            self._endpoint_ref("skill_compatibility_pack", "POST", "/skills/compatibility-pack", "Writes Skill Version Compatibility artifacts."),
             self._endpoint_ref("usage_analytics", "GET", "/usage/analytics", "Skill Usage Analytics and chargeback signals."),
             self._endpoint_ref("usage_chargeback_pack", "POST", "/usage/chargeback-pack", "Writes Cost Chargeback artifacts."),
             self._endpoint_ref("skill_reliability", "GET", "/reliability/skills", "Skill reliability and breaker signals."),
@@ -13434,6 +13884,7 @@ class DashboardSmokeService:
             self._artifact_tab("git_push_plan", "Git Readiness", "Push Plan", "data/git_packs/"),
             self._artifact_tab("runtime_demo", "Runtime Demo", "Runtime Demo Pack", "data/runtime_packs/"),
             self._artifact_tab("marketplace_pack", "Skill Marketplace", "Tenant Rollout", "data/marketplace_packs/"),
+            self._artifact_tab("skill_compatibility", "Skill Compatibility", "Compatibility Pack", "data/compatibility_packs/"),
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
@@ -13500,6 +13951,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/skills/compatibility -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/skills/compatibility-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/analytics -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
@@ -13516,6 +13969,7 @@ class DashboardSmokeService:
             'rg "runtime/demo-readiness|runtime/demo-pack|Runtime Demo|runtime_packs|runtime_check|start_demo" app dashboard docs README.md tests scripts sample_data',
             'rg "api/contract-audit|api/reviewer-collection|API Contract|api_contracts|Reviewer Collection|OpenAPI" app dashboard docs README.md tests scripts sample_data',
             'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            'rg "skills/compatibility|compatibility-pack|Skill Compatibility|compatibility_packs|deprecated skill|migration recommendations" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
@@ -13524,6 +13978,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\runtime_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\compatibility_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -14001,6 +14456,15 @@ class ArtifactInventoryService:
                 "Marketplace governance proof with tenant rollout recommendations, disabled-skill blocks, version notes, and reviewer checklist.",
             ),
             self._catalog_row(
+                "compatibility_packs",
+                "Skill Version Compatibility Pack",
+                Path("data") / "compatibility_packs",
+                "POST /skills/compatibility-pack",
+                "Invoke-RestMethod http://localhost:8000/skills/compatibility-pack -Method POST -Headers $headers",
+                ["compatibility_pack_latest.json", "compatibility_pack_latest.md"],
+                "Semantic version compatibility checks, deprecated skill warnings, migration recommendations, MCP exposure state, and reviewer checklist.",
+            ),
+            self._catalog_row(
                 "usage_packs",
                 "Skill Usage Analytics + Cost Chargeback Pack",
                 Path("data") / "usage_packs",
@@ -14235,6 +14699,8 @@ class ArtifactInventoryService:
             "Invoke-RestMethod http://localhost:8000/git/push-plan -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runtime/demo-readiness -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runtime/demo-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/skills/compatibility -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/skills/compatibility-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
             'rg "artifacts/inventory|artifacts/readme-checklist|Artifact Inventory|README Checklist|artifact_indexes|reviewer proof checklist" app dashboard docs README.md tests sample_data',
@@ -15376,6 +15842,7 @@ class AppState:
     dependencies: DependencyMapService = field(init=False)
     incidents: SkillIncidentDrillService = field(init=False)
     tenant_sandbox: TenantPolicySandboxService = field(init=False)
+    compatibility: SkillVersionCompatibilityService = field(init=False)
     marketplace: SkillMarketplaceGovernanceService = field(init=False)
     usage: SkillUsageAnalyticsService = field(init=False)
     reliability: SkillReliabilityService = field(init=False)
@@ -15430,6 +15897,7 @@ class AppState:
         self.dependencies = DependencyMapService(self)
         self.incidents = SkillIncidentDrillService(self)
         self.tenant_sandbox = TenantPolicySandboxService(self)
+        self.compatibility = SkillVersionCompatibilityService(self)
         self.marketplace = SkillMarketplaceGovernanceService(self)
         self.usage = SkillUsageAnalyticsService(self)
         self.reliability = SkillReliabilityService(self)

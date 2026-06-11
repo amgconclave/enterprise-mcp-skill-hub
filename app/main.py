@@ -97,6 +97,10 @@ from app.models import (
     RuntimeDemoPackResult,
     RuntimeDemoReadinessResult,
     SecurityReviewSummary,
+    SkillCompatibilityPackRequest,
+    SkillCompatibilityPackResult,
+    SkillCompatibilityRecord,
+    SkillCompatibilityReport,
     SkillIncidentDrillRequest,
     SkillIncidentDrillResult,
     SkillIncidentRunbookRequest,
@@ -250,6 +254,30 @@ async def marketplace_rollout_pack(
     _: str = Depends(require_api_key),
 ) -> MarketplaceRolloutPackResult:
     return await state.marketplace.rollout_pack(request or MarketplaceRolloutPackRequest())
+
+
+@app.get("/skills/compatibility", response_model=SkillCompatibilityReport)
+def skills_compatibility(_: str = Depends(require_api_key)) -> SkillCompatibilityReport:
+    return state.compatibility.report()
+
+
+@app.get("/skills/{skill_id}/compatibility", response_model=SkillCompatibilityRecord)
+def skill_compatibility(skill_id: str, _: str = Depends(require_api_key)) -> SkillCompatibilityRecord:
+    try:
+        return state.compatibility.skill_record(skill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/skills/compatibility-pack", response_model=SkillCompatibilityPackResult)
+def skills_compatibility_pack(
+    request: SkillCompatibilityPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillCompatibilityPackResult:
+    try:
+        return state.compatibility.pack(request or SkillCompatibilityPackRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/usage/analytics", response_model=UsageAnalyticsResult)

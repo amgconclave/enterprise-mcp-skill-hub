@@ -18,6 +18,8 @@ TenantEntitlementDecisionValue = Literal["allow", "deny"]
 MarketplaceListingStatus = Literal["approved", "promoted", "draft", "disabled"]
 MarketplaceRiskLevel = Literal["low", "medium", "high"]
 MarketplaceReviewState = Literal["none", "approval_required", "review_required", "blocked", "disabled_block"]
+SkillCompatibilityStatus = Literal["compatible", "needs_review", "incompatible", "deprecated"]
+SkillVersionDelta = Literal["initial", "patch", "minor", "major", "same", "non_semver"]
 WorkflowReviewStatus = Literal["draft", "in_review", "approved", "rejected"]
 WorkflowValidationStatus = Literal["valid", "warnings", "invalid"]
 ReleaseChangeType = Literal["added", "changed", "removed"]
@@ -490,6 +492,47 @@ class MarketplaceRolloutPackRequest(BaseModel):
 
 
 class MarketplaceRolloutPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class SkillCompatibilityRecord(BaseModel):
+    skill_id: str
+    name: str
+    current_version: str
+    previous_version: str | None = None
+    semantic_version_valid: bool
+    version_delta: SkillVersionDelta
+    compatibility_status: SkillCompatibilityStatus
+    deprecated: bool = False
+    deprecation_warnings: list[str] = Field(default_factory=list)
+    schema_compatibility: JsonDict = Field(default_factory=dict)
+    migration_recommendations: list[str] = Field(default_factory=list)
+    mcp_exposure_state: JsonDict = Field(default_factory=dict)
+    evidence: list[JsonDict] = Field(default_factory=list)
+
+
+class SkillCompatibilityReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    records: list[SkillCompatibilityRecord]
+    compatibility_matrix: list[JsonDict] = Field(default_factory=list)
+    deprecated_skill_warnings: list[JsonDict] = Field(default_factory=list)
+    migration_recommendations: list[JsonDict] = Field(default_factory=list)
+    coverage_summary: JsonDict = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillCompatibilityPackRequest(BaseModel):
+    actor: str = "compatibility-reviewer"
+    skill_ids: list[str] = Field(default_factory=list)
+
+
+class SkillCompatibilityPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus
