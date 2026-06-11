@@ -53,6 +53,9 @@ from app.models import (
     RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
+    SandboxExceptionDecisionRequest,
+    SandboxExceptionPackRequest,
+    SandboxExceptionSubmitRequest,
     SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
@@ -100,6 +103,7 @@ view = st.sidebar.radio(
         "Invoke Skill",
         "Policy Simulator",
         "Invocation Sandbox",
+        "Sandbox Exceptions",
         "Tenant Policy Sandbox",
         "Tenant RBAC / Entitlements",
         "Skill Marketplace",
@@ -375,6 +379,121 @@ elif view == "Invocation Sandbox":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Sandbox Exceptions":
+    st.subheader("Sandbox Exceptions")
+    st.caption("Review denied or high-risk sandbox requests without bypassing runtime enforcement.")
+    queue = state.sandbox_exceptions.queue()
+    col_status, col_pending, col_approved, col_denied = st.columns(4)
+    col_status.metric("Readiness", queue.readiness_status.upper())
+    col_pending.metric("Pending", queue.summary["pending_count"])
+    col_approved.metric("Approved", queue.summary["approved_count"])
+    col_denied.metric("Denied", queue.summary["denied_count"])
+    tab_submit, tab_queue, tab_decide, tab_export, tab_json = st.tabs(
+        ["Submit", "Queue", "Decide", "Export", "JSON"]
+    )
+    with tab_submit:
+        selected_skill = st.selectbox(
+            "Exception skill",
+            [skill.id for skill in state.registry.mcp_exposed()],
+            key="sandbox_exception_skill",
+        )
+        action_class = st.selectbox(
+            "Exception action class",
+            [
+                "filesystem_write",
+                "external_network",
+                "process_spawn",
+                "secret_access",
+                "repo_mutation",
+                "skill_invocation",
+            ],
+            key="sandbox_exception_action",
+        )
+        requester = st.text_input("Requester", value="streamlit-platform-engineer")
+        justification = st.text_area(
+            "Business justification",
+            value="Need reviewer evidence for a blocked sandbox action before changing policy.",
+            height=120,
+        )
+        payload_text = st.text_area(
+            "Exception input JSON",
+            value=json.dumps({"text": "Attempt to write a local file from a mock tool."}, indent=2),
+            height=180,
+            key="sandbox_exception_payload",
+        )
+        if st.button("Submit Exception", use_container_width=True):
+            submitted = state.sandbox_exceptions.submit(
+                SandboxExceptionSubmitRequest(
+                    skill_id=selected_skill,
+                    input=json.loads(payload_text),
+                    requested_by=requester,
+                    business_justification=justification,
+                    action_class=action_class,
+                    endpoint=f"fastapi:/skills/{selected_skill}/invoke",
+                )
+            )
+            st.json(submitted.model_dump(mode="json"))
+    with tab_queue:
+        st.dataframe(
+            [
+                {
+                    "id": record.exception_id,
+                    "status": record.status,
+                    "skill": record.skill_id,
+                    "action_class": record.action_class,
+                    "sandbox": record.sandbox_decision.decision,
+                    "risk": record.sandbox_decision.risk_label,
+                    "requester": record.requested_by,
+                    "reviewer": record.reviewer or "pending",
+                }
+                for record in queue.records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(queue.governance_policy, use_container_width=True, hide_index=True)
+    with tab_decide:
+        pending_records = [record for record in queue.records if record.status == "pending"]
+        if pending_records:
+            selected_exception = st.selectbox(
+                "Pending exception",
+                [record.exception_id for record in pending_records],
+                key="sandbox_exception_decide_id",
+            )
+            reviewer = st.text_input("Reviewer", value="streamlit-security-reviewer")
+            decision = st.selectbox("Decision", ["deny", "approve"], key="sandbox_exception_decision")
+            notes = st.text_area(
+                "Reviewer notes",
+                value="Deny by default until the sandbox policy owner narrows this request.",
+                height=120,
+            )
+            if st.button("Record Decision", use_container_width=True):
+                decided = state.sandbox_exceptions.decide(
+                    selected_exception,
+                    SandboxExceptionDecisionRequest(
+                        reviewer=reviewer,
+                        decision=decision,
+                        notes=notes,
+                    ),
+                )
+                st.json(decided.model_dump(mode="json"))
+        else:
+            st.info("No pending sandbox exceptions.")
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/sandbox_exceptions/.")
+        include_closed = st.checkbox("Include closed exceptions", value=True)
+        if st.button("Export Exception Pack", use_container_width=True):
+            export = state.sandbox_exceptions.pack(
+                SandboxExceptionPackRequest(
+                    actor="streamlit-security-reviewer",
+                    include_closed=include_closed,
+                )
+            )
+            st.success("Sandbox exception pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(queue.model_dump(mode="json"))
 
 elif view == "Tenant Policy Sandbox":
     st.subheader("Tenant Policy Sandbox")

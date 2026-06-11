@@ -37,6 +37,9 @@ from app.models import (
     RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
+    SandboxExceptionDecisionRequest,
+    SandboxExceptionPackRequest,
+    SandboxExceptionSubmitRequest,
     SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
@@ -257,6 +260,26 @@ async def main() -> None:
     invocation_sandbox_report = state.invocation_sandbox.report()
     invocation_sandbox_pack = state.invocation_sandbox.pack(
         InvocationSandboxPackRequest(actor="demo-sandbox-reviewer")
+    )
+    sandbox_exception = state.sandbox_exceptions.submit(
+        SandboxExceptionSubmitRequest(
+            skill_id="extract_entities",
+            input={"text": "Attempt to write a local file from a mock tool."},
+            requested_by="demo-platform-engineer",
+            business_justification="Show HITL review for a sandbox-denied mock tool action.",
+            action_class="filesystem_write",
+        )
+    )
+    sandbox_exception_decision = state.sandbox_exceptions.decide(
+        sandbox_exception.exception_id,
+        SandboxExceptionDecisionRequest(
+            reviewer="demo-security-reviewer",
+            decision="deny",
+            notes="Deny by default until the sandbox policy owner narrows the requested action.",
+        ),
+    )
+    sandbox_exception_pack = state.sandbox_exceptions.pack(
+        SandboxExceptionPackRequest(actor="demo-security-reviewer")
     )
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
@@ -510,6 +533,10 @@ async def main() -> None:
                 ],
                 "invocation sandbox pack path": invocation_sandbox_pack.markdown_path,
                 "invocation_sandbox_pack_path": invocation_sandbox_pack.markdown_path,
+                "sandbox exception status": sandbox_exception_decision.status,
+                "sandbox_exception_status": sandbox_exception_decision.status,
+                "sandbox exception pack path": sandbox_exception_pack.markdown_path,
+                "sandbox_exception_pack_path": sandbox_exception_pack.markdown_path,
                 "prompt governance readiness": prompt_governance_report.readiness_status,
                 "prompt_governance_readiness": prompt_governance_report.readiness_status,
                 "prompt governance findings": prompt_governance_report.summary["finding_count"],

@@ -132,6 +132,12 @@ from app.models import (
     RuntimeDemoPackRequest,
     RuntimeDemoPackResult,
     RuntimeDemoReadinessResult,
+    SandboxExceptionDecisionRequest,
+    SandboxExceptionPackRequest,
+    SandboxExceptionPackResult,
+    SandboxExceptionQueueResult,
+    SandboxExceptionRecord,
+    SandboxExceptionSubmitRequest,
     SecurityReviewSummary,
     SkillCompatibilityPackRequest,
     SkillCompatibilityPackResult,
@@ -278,6 +284,44 @@ def invocation_sandbox_policy_pack(
     _: str = Depends(require_api_key),
 ) -> InvocationSandboxPackResult:
     return state.invocation_sandbox.pack(request or InvocationSandboxPackRequest())
+
+
+@app.get("/sandbox/exceptions", response_model=SandboxExceptionQueueResult)
+def sandbox_exception_queue(_: str = Depends(require_api_key)) -> SandboxExceptionQueueResult:
+    return state.sandbox_exceptions.queue()
+
+
+@app.post("/sandbox/exceptions", response_model=SandboxExceptionRecord)
+def sandbox_exception_submit(
+    request: SandboxExceptionSubmitRequest,
+    _: str = Depends(require_api_key),
+) -> SandboxExceptionRecord:
+    try:
+        return state.sandbox_exceptions.submit(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/sandbox/exceptions/{exception_id}/decision", response_model=SandboxExceptionRecord)
+def sandbox_exception_decision(
+    exception_id: str,
+    request: SandboxExceptionDecisionRequest,
+    _: str = Depends(require_api_key),
+) -> SandboxExceptionRecord:
+    try:
+        return state.sandbox_exceptions.decide(exception_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sandbox/exceptions/pack", response_model=SandboxExceptionPackResult)
+def sandbox_exception_pack(
+    request: SandboxExceptionPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SandboxExceptionPackResult:
+    return state.sandbox_exceptions.pack(request or SandboxExceptionPackRequest())
 
 
 @app.post("/tenants/policy-simulate", response_model=TenantPolicySimulationResult)

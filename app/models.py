@@ -14,6 +14,8 @@ PolicyDecisionValue = Literal["allow", "deny"]
 SecurityReadinessStatus = Literal["ready", "needs_review", "blocked"]
 InvocationSandboxDecisionValue = Literal["allow", "deny"]
 InvocationSandboxRiskLabel = Literal["low", "medium", "high", "critical"]
+SandboxExceptionStatus = Literal["pending", "approved", "denied"]
+SandboxExceptionDecision = Literal["approve", "deny"]
 InvocationSandboxActionClass = Literal[
     "skill_invocation",
     "resource_access",
@@ -1952,6 +1954,66 @@ class InvocationSandboxPackRequest(BaseModel):
 
 
 class InvocationSandboxPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class SandboxExceptionSubmitRequest(BaseModel):
+    skill_id: str = "search_knowledge_base"
+    input: JsonDict = Field(default_factory=dict)
+    requested_by: str = "sandbox-exception-requester"
+    business_justification: str = "Need reviewer approval for a blocked local sandbox action."
+    action_class: InvocationSandboxActionClass = "filesystem_write"
+    endpoint: str = "fastapi:/skills/{skill_id}/invoke"
+    policy_context: PolicyInvocationContext | None = None
+
+
+class SandboxExceptionDecisionRequest(BaseModel):
+    reviewer: str = "sandbox-reviewer"
+    decision: SandboxExceptionDecision = "deny"
+    notes: str = "Deny by default until the policy owner narrows the request."
+
+
+class SandboxExceptionRecord(BaseModel):
+    exception_id: str
+    status: SandboxExceptionStatus
+    requested_by: str
+    reviewer: str | None = None
+    skill_id: str
+    action_class: InvocationSandboxActionClass
+    endpoint: str
+    business_justification: str
+    sandbox_decision: InvocationSandboxDecision
+    reviewer_notes: str | None = None
+    approval_conditions: list[str] = Field(default_factory=list)
+    governance_patterns: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    trace_id: str
+
+
+class SandboxExceptionQueueResult(BaseModel):
+    queue_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[SandboxExceptionRecord] = Field(default_factory=list)
+    governance_policy: list[JsonDict] = Field(default_factory=list)
+    audit_evidence: list[JsonDict] = Field(default_factory=list)
+    local_verification_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SandboxExceptionPackRequest(BaseModel):
+    actor: str = "sandbox-exception-reviewer"
+    include_closed: bool = True
+
+
+class SandboxExceptionPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

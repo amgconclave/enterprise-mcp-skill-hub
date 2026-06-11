@@ -13,6 +13,10 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /sandbox/policy` - returns mock tool sandbox limits, blocked action classes, endpoint policy, per-skill risk labels, sandbox decisions, audit evidence, and verification commands.
 - `POST /sandbox/evaluate` - dry-runs a skill input against sandbox limits and action-class policy without executing the skill.
 - `POST /sandbox/policy-pack` - writes `invocation_sandbox_policy_pack_latest.json` and `.md` under ignored local folder `data/sandbox_policies/`.
+- `GET /sandbox/exceptions` - returns the sandbox exception review queue, governance controls, audit evidence, and verification commands.
+- `POST /sandbox/exceptions` - evaluates and submits a sandbox-denied or high-risk request for independent review.
+- `POST /sandbox/exceptions/{exception_id}/decision` - records an independent approve/deny decision without bypassing runtime enforcement.
+- `POST /sandbox/exceptions/pack` - writes `sandbox_exception_review_pack_latest.json` and `.md` under ignored local folder `data/sandbox_exceptions/`.
 - `GET /workflows/templates` - lists approved reusable workflow templates from `sample_data/workflow_templates.json` plus approved local review submissions.
 - `POST /workflows/templates/submit` - submits a new `WorkflowTemplate` for local review and stores it under `data/workflow_reviews/` with `in_review` status.
 - `GET /workflows/reviews` - lists submitted templates with review status, validation status, required role, sensitivity, missing skills, invalid skills, and policy warnings.
@@ -200,6 +204,27 @@ Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Headers $headers -M
 ```
 
 The policy report includes typed limits, blocked action classes such as `external_network`, `filesystem_write`, `process_spawn`, `secret_access`, and `repo_mutation`, per-skill risk labels, endpoint policy for FastAPI and MCP calls, recent decisions, audit evidence, reviewer checklist items, local verification commands, and limitations. The policy pack writes Markdown/JSON under ignored `data/sandbox_policies/`.
+
+## Sandbox Exceptions
+
+Sandbox exceptions provide a local HITL review queue for denied or high-risk requests. They do not bypass the sandbox at runtime.
+
+```powershell
+$exception = Invoke-RestMethod http://localhost:8000/sandbox/exceptions `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"extract_entities","input":{"text":"try to write a file"},"requested_by":"platform-engineer","business_justification":"Need review before changing sandbox policy.","action_class":"filesystem_write"}'
+Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers
+Invoke-RestMethod "http://localhost:8000/sandbox/exceptions/$($exception.exception_id)/decision" `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"reviewer":"security-reviewer","decision":"deny","notes":"Deny by default until the policy owner narrows the requested action class."}'
+Invoke-RestMethod http://localhost:8000/sandbox/exceptions/pack -Headers $headers -Method POST
+```
+
+The queue returns exception records, sandbox decisions, governance controls, audit evidence, and verification commands. The pack writes Markdown/JSON under ignored `data/sandbox_exceptions/`.
 
 ## Workflow Composition
 

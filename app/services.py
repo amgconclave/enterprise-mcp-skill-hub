@@ -153,6 +153,12 @@ from app.models import (
     RuntimeDemoPackRequest,
     RuntimeDemoPackResult,
     RuntimeDemoReadinessResult,
+    SandboxExceptionDecisionRequest,
+    SandboxExceptionPackRequest,
+    SandboxExceptionPackResult,
+    SandboxExceptionQueueResult,
+    SandboxExceptionRecord,
+    SandboxExceptionSubmitRequest,
     SecurityReadinessStatus,
     SecurityReviewSummary,
     SkillCompatibilityPackRequest,
@@ -1830,6 +1836,308 @@ class InvocationSandboxPolicyService:
                     f"- `{item['status']}` {item['item']} Proof: `{item['proof']}`"
                     for item in bundle["reviewer_checklist"]
                 ],
+                "",
+                "## Local Verification Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {item}" for item in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class SandboxExceptionReviewService:
+    QUEUE_ID = "sandbox_exception_queue_latest"
+    PACK_ID = "sandbox_exception_review_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "sandbox_exceptions"
+        self.records: list[SandboxExceptionRecord] = []
+
+    def submit(self, request: SandboxExceptionSubmitRequest) -> SandboxExceptionRecord:
+        trace_id = new_trace_id()
+        sandbox_decision = self.app_state.invocation_sandbox.evaluate(
+            InvocationSandboxEvaluateRequest(
+                skill_id=request.skill_id,
+                input=request.input,
+                actor=request.requested_by,
+                policy_context=request.policy_context,
+                action_class=request.action_class,
+                endpoint=request.endpoint,
+                enforce=True,
+            ),
+            trace_id=trace_id,
+        )
+        now = utc_now()
+        record = SandboxExceptionRecord(
+            exception_id=new_id("sbe"),
+            status="pending",
+            requested_by=request.requested_by,
+            skill_id=request.skill_id,
+            action_class=request.action_class,
+            endpoint=sandbox_decision.endpoint,
+            business_justification=request.business_justification,
+            sandbox_decision=sandbox_decision,
+            approval_conditions=self._approval_conditions(sandbox_decision),
+            governance_patterns=self._governance_patterns(),
+            created_at=now,
+            updated_at=now,
+            trace_id=trace_id,
+        )
+        self.records.append(record)
+        self.app_state.audit.record(
+            "sandbox_exception.submitted",
+            "sandbox_exception",
+            record.exception_id,
+            trace_id,
+            request.requested_by,
+            {
+                "status": record.status,
+                "skill_id": record.skill_id,
+                "action_class": record.action_class,
+                "sandbox_decision": sandbox_decision.decision,
+                "risk_label": sandbox_decision.risk_label,
+            },
+        )
+        return record
+
+    def decide(
+        self,
+        exception_id: str,
+        request: SandboxExceptionDecisionRequest,
+    ) -> SandboxExceptionRecord:
+        record = self._get(exception_id)
+        if record.status != "pending":
+            raise ValueError(f"Sandbox exception {exception_id} is already {record.status}.")
+        if request.decision == "approve" and request.reviewer == record.requested_by:
+            raise ValueError("Sandbox exception approval requires an independent reviewer.")
+        if request.decision == "approve" and len(request.notes.strip()) < 20:
+            raise ValueError("Sandbox exception approval requires reviewer notes of at least 20 characters.")
+
+        updated = record.model_copy(
+            update={
+                "status": "approved" if request.decision == "approve" else "denied",
+                "reviewer": request.reviewer,
+                "reviewer_notes": request.notes,
+                "updated_at": utc_now(),
+            }
+        )
+        self.records[self.records.index(record)] = updated
+        self.app_state.audit.record(
+            f"sandbox_exception.{updated.status}",
+            "sandbox_exception",
+            updated.exception_id,
+            updated.trace_id,
+            request.reviewer,
+            {
+                "skill_id": updated.skill_id,
+                "action_class": updated.action_class,
+                "sandbox_decision": updated.sandbox_decision.decision,
+                "risk_label": updated.sandbox_decision.risk_label,
+                "approval_is_runtime_bypass": False,
+            },
+        )
+        return updated
+
+    def queue(self) -> SandboxExceptionQueueResult:
+        records = sorted(self.records, key=lambda record: record.created_at)
+        pending_count = sum(1 for record in records if record.status == "pending")
+        approved_count = sum(1 for record in records if record.status == "approved")
+        denied_count = sum(1 for record in records if record.status == "denied")
+        high_risk_count = sum(
+            1
+            for record in records
+            if record.sandbox_decision.risk_label in {"high", "critical"}
+        )
+        readiness_status: SecurityReadinessStatus = "ready"
+        if pending_count or high_risk_count:
+            readiness_status = "needs_review"
+        if not self._gitignore_ok():
+            readiness_status = "blocked"
+        return SandboxExceptionQueueResult(
+            queue_id=self.QUEUE_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "exception_count": len(records),
+                "pending_count": pending_count,
+                "approved_count": approved_count,
+                "denied_count": denied_count,
+                "high_risk_count": high_risk_count,
+                "approval_is_runtime_bypass": False,
+                "artifact_root": str(self.output_dir),
+                "patterns_used": self._governance_patterns(),
+            },
+            records=records,
+            governance_policy=self._governance_policy(),
+            audit_evidence=self._audit_evidence(),
+            local_verification_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(
+        self,
+        request: SandboxExceptionPackRequest | None = None,
+    ) -> SandboxExceptionPackResult:
+        request = request or SandboxExceptionPackRequest()
+        queue = self.queue()
+        records = queue.records if request.include_closed else [
+            record for record in queue.records if record.status == "pending"
+        ]
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": queue.readiness_status,
+            "summary": {
+                **queue.summary,
+                "included_exception_count": len(records),
+                "include_closed": request.include_closed,
+            },
+            "exception_records": [record.model_dump(mode="json") for record in records],
+            "governance_policy": queue.governance_policy,
+            "audit_evidence": queue.audit_evidence,
+            "local_verification_commands": queue.local_verification_commands,
+            "limitations": queue.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "sandbox_exception.pack_exported",
+            "sandbox_exception_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": queue.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "included_exception_count": len(records),
+            },
+        )
+        return SandboxExceptionPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=queue.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _get(self, exception_id: str) -> SandboxExceptionRecord:
+        for record in self.records:
+            if record.exception_id == exception_id:
+                return record
+        raise KeyError(f"Sandbox exception not found: {exception_id}")
+
+    def _approval_conditions(self, decision: InvocationSandboxDecision) -> list[str]:
+        conditions = [
+            "Approval is reviewer evidence only; it does not bypass runtime sandbox enforcement.",
+            "Policy owners must change the sandbox policy source before any blocked action can execute.",
+            "Regenerate the sandbox policy pack after policy changes and rerun local verification commands.",
+        ]
+        if decision.decision == "deny":
+            conditions.append("Denied sandbox rule must be removed or narrowed before invocation is retried.")
+        if decision.risk_label in {"high", "critical"}:
+            conditions.append("High or critical risk requests require independent reviewer notes.")
+        return conditions
+
+    def _governance_policy(self) -> list[JsonDict]:
+        return [
+            {
+                "control": "independent_reviewer",
+                "decision": "required_for_approval",
+                "reason": "Requester cannot approve their own sandbox exception.",
+            },
+            {
+                "control": "deny_by_default",
+                "decision": "runtime_sandbox_still_enforced",
+                "reason": "Exception approval creates evidence but does not execute blocked tools.",
+            },
+            {
+                "control": "artifact_backed_review",
+                "decision": "required",
+                "reason": "Queue and pack endpoints write local JSON/Markdown proof under ignored data.",
+            },
+        ]
+
+    def _governance_patterns(self) -> list[str]:
+        return [
+            "human-in-the-loop",
+            "governance",
+            "tool governance",
+            "shared state",
+        ]
+
+    def _audit_evidence(self) -> list[JsonDict]:
+        return [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.action.startswith("sandbox_exception.")
+        ][-25:]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_sandbox_exceptions.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python scripts\\dashboard_smoke.py",
+            'rg "sandbox/exceptions|Sandbox Exceptions|sandbox_exceptions" app dashboard docs README.md tests',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Approved exceptions are reviewer evidence and do not bypass sandbox-denied runtime invocations.",
+            "The queue is in-memory local state; generated packs are the durable handoff artifact.",
+            "This workflow does not replace OS, container, network, or cloud policy enforcement.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/sandbox_exceptions/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Sandbox Exception Review Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Exceptions: `{bundle['summary']['included_exception_count']}`",
+            "",
+            "## Governance Policy",
+            "",
+            *[
+                f"- `{item['control']}` -> `{item['decision']}`: {item['reason']}"
+                for item in bundle["governance_policy"]
+            ],
+            "",
+            "## Exception Records",
+        ]
+        for record in bundle["exception_records"]:
+            lines.extend(
+                [
+                    "",
+                    f"### {record['exception_id']}",
+                    f"- Status: `{record['status']}`",
+                    f"- Skill/action: `{record['skill_id']}` / `{record['action_class']}`",
+                    f"- Sandbox decision: `{record['sandbox_decision']['decision']}`",
+                    f"- Risk label: `{record['sandbox_decision']['risk_label']}`",
+                    f"- Reviewer: `{record.get('reviewer') or 'pending'}`",
+                    f"- Conditions: `{'; '.join(record['approval_conditions'])}`",
+                ]
+            )
+        lines.extend(
+            [
                 "",
                 "## Local Verification Commands",
                 "",
@@ -14931,6 +15239,7 @@ class CiDoctorService:
         "data/usage_packs/",
         "data/provider_packs/",
         "data/sandbox_policies/",
+        "data/sandbox_exceptions/",
         "data/portfolio_demo/",
         "data/portfolio_packs/",
         "data/launch_checklists/",
@@ -17177,6 +17486,7 @@ class DashboardSmokeService:
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
+            {"id": "sandbox_exceptions", "label": "Sandbox Exceptions", "purpose": "Human review queue for sandbox-denied tool requests."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
@@ -17243,6 +17553,9 @@ class DashboardSmokeService:
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
             self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
+            self._endpoint_ref("sandbox_exception_queue", "GET", "/sandbox/exceptions", "Sandbox exception review queue."),
+            self._endpoint_ref("sandbox_exception_submit", "POST", "/sandbox/exceptions", "Submits a denied sandbox request for HITL review."),
+            self._endpoint_ref("sandbox_exception_pack", "POST", "/sandbox/exceptions/pack", "Writes Sandbox Exception Review artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
             self._endpoint_ref(
@@ -17301,6 +17614,7 @@ class DashboardSmokeService:
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
+            self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
@@ -17381,6 +17695,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/sandbox/exceptions/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
@@ -17405,6 +17721,7 @@ class DashboardSmokeService:
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "workers/scale-plan|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
+            'rg "sandbox/exceptions|Sandbox Exceptions|sandbox_exceptions|sandbox exception" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -17420,6 +17737,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\sandbox_exceptions -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -18990,6 +19308,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
                 ["invocation_sandbox_policy_pack_latest.json", "invocation_sandbox_policy_pack_latest.md"],
                 "Mock tool sandbox limits, blocked action classes, risk labels, endpoint policy, and audit-backed reviewer proof.",
+            ),
+            self._catalog_row(
+                "sandbox_exceptions",
+                "Sandbox Exception Review Pack",
+                Path("data") / "sandbox_exceptions",
+                "POST /sandbox/exceptions/pack",
+                "Invoke-RestMethod http://localhost:8000/sandbox/exceptions/pack -Method POST -Headers $headers",
+                ["sandbox_exception_review_pack_latest.json", "sandbox_exception_review_pack_latest.md"],
+                "Human-in-the-loop review queue for sandbox-denied requests with independent reviewer decisions and local audit evidence.",
             ),
             self._catalog_row(
                 "prompt_governance",
@@ -20802,6 +21129,7 @@ class AppState:
     reliability: SkillReliabilityService = field(init=False)
     slo: SkillSloService = field(init=False)
     invocation_sandbox: InvocationSandboxPolicyService = field(init=False)
+    sandbox_exceptions: SandboxExceptionReviewService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
     config_hygiene: ConfigHygieneService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
@@ -20867,6 +21195,7 @@ class AppState:
         self.slo = SkillSloService(self)
         self.invocation_sandbox = InvocationSandboxPolicyService(self)
         self.invocation_service.sandbox = self.invocation_sandbox
+        self.sandbox_exceptions = SandboxExceptionReviewService(self)
         self.provider_readiness = ProviderReadinessService(self)
         self.config_hygiene = ConfigHygieneService(self)
         self.prompt_governance = PromptGovernanceService(self)

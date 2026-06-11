@@ -641,6 +641,21 @@ Get-ChildItem -Recurse -File data\sandbox_policies -ErrorAction SilentlyContinue
 
 Normal invocation can enforce the sandbox by setting `policy_context.enforce_sandbox=true` or sending `X-Sandbox-Enforce: true`, `X-Action-Class`, and `X-Sandbox-Endpoint`. Denied calls return `403`, create failed invocation history rows, and record `sandbox.denied` audit events. The Streamlit dashboard has an `Invocation Sandbox` view, `python -m app.demo` prints sandbox readiness plus the policy pack path, and the MCP inspector supports `python -m app.mcp_server call ... --enforce-sandbox`.
 
+## Sandbox Exception Review
+
+Route sandbox-denied requests through a local human-in-the-loop queue without weakening runtime enforcement:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+$exception = Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Method POST -Headers $headers -ContentType "application/json" -Body '{"skill_id":"extract_entities","input":{"text":"try to write a file"},"requested_by":"platform-engineer","business_justification":"Need policy-owner evidence before changing sandbox rules.","action_class":"filesystem_write"}'
+Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers
+Invoke-RestMethod "http://localhost:8000/sandbox/exceptions/$($exception.exception_id)/decision" -Method POST -Headers $headers -ContentType "application/json" -Body '{"reviewer":"security-reviewer","decision":"deny","notes":"Deny by default until the policy owner narrows the requested action class."}'
+Invoke-RestMethod http://localhost:8000/sandbox/exceptions/pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\sandbox_exceptions -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /sandbox/exceptions` returns the review queue, governance policy, audit evidence, and verification commands. `POST /sandbox/exceptions` evaluates the request through the existing sandbox and stores the exact decision for review. `POST /sandbox/exceptions/{exception_id}/decision` records independent approval or denial, and `POST /sandbox/exceptions/pack` writes Markdown/JSON under ignored `data/sandbox_exceptions/`. Approved exceptions are evidence only; blocked action classes still cannot execute until the sandbox policy source is changed and verified.
+
 ## Prompt Governance And Injection Risk
 
 Scan MCP prompts, resources, and ad hoc content for unsafe instructions before agent rollout:
