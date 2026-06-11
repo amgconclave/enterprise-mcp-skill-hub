@@ -55,6 +55,8 @@ from app.models import (
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
+    WorkerRunbookPackRequest,
+    WorkerSkillRunRequest,
     WorkflowSimulationRequest,
     WorkflowTemplate,
 )
@@ -95,6 +97,7 @@ view = st.sidebar.radio(
         "Skill SLO",
         "Provider Readiness",
         "Platform Pack",
+        "Worker Scale-Out",
         "Prompt Governance",
         "Privacy Retention",
         "Enterprise Readiness",
@@ -869,6 +872,91 @@ elif view == "Platform Pack":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Worker Scale-Out":
+    st.subheader("Worker Scale-Out")
+    st.caption("Local worker-pool run transparency, sandbox preflight, and scale planning for governed MCP skills.")
+    plan = run_async(state.worker_scaleout.scale_plan())
+    col_ready, col_workers, col_runs, col_recommendations = st.columns(4)
+    col_ready.metric("Readiness", plan.readiness_status.upper())
+    col_workers.metric("Workers", plan.summary["total_worker_count"])
+    col_runs.metric("Runs", plan.summary["run_count"])
+    col_recommendations.metric("Recommendations", plan.summary["recommendation_count"])
+
+    tab_pools, tab_submit, tab_runs, tab_export, tab_json = st.tabs(
+        ["Pools", "Submit Run", "Run Timeline", "Runbook", "JSON"]
+    )
+    with tab_pools:
+        st.dataframe(
+            [pool.model_dump(mode="json") for pool in plan.pools],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(plan.backlog_by_skill, use_container_width=True, hide_index=True)
+        st.dataframe(plan.recommendations, use_container_width=True, hide_index=True)
+    with tab_submit:
+        selected_skill = st.selectbox(
+            "Worker skill",
+            [skill.id for skill in state.registry.mcp_exposed()],
+            key="worker_scaleout_skill",
+        )
+        worker_pool = st.selectbox(
+            "Worker pool",
+            ["local_mock_general", "retrieval_heavy", "governance_review"],
+        )
+        priority = st.slider("Priority", min_value=1, max_value=10, value=5)
+        enforce_sandbox = st.checkbox("Enforce sandbox preflight", value=True)
+        payload_text = st.text_area(
+            "Input JSON",
+            value=json.dumps({"query": "AI governance policy", "limit": 2}, indent=2),
+            height=220,
+            key="worker_scaleout_payload",
+        )
+        if st.button("Submit Local Worker Run", use_container_width=True):
+            run = run_async(
+                state.worker_scaleout.submit_run(
+                    WorkerSkillRunRequest(
+                        skill_id=selected_skill,
+                        input=json.loads(payload_text),
+                        actor="streamlit-worker-operator",
+                        worker_pool=worker_pool,
+                        priority=priority,
+                        enforce_sandbox=enforce_sandbox,
+                    )
+                )
+            )
+            st.json(run.model_dump(mode="json"))
+    with tab_runs:
+        runs = state.worker_scaleout.list_runs()
+        st.dataframe(
+            [
+                {
+                    "run_id": run.run_id,
+                    "status": run.status,
+                    "skill_id": run.skill_id,
+                    "pool": run.worker_pool,
+                    "trace_id": run.trace_id,
+                    "invocation_id": run.invocation_id,
+                    "timeline_stages": len(run.timeline),
+                }
+                for run in runs
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if runs:
+            st.json(runs[0].model_dump(mode="json"))
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/worker_runbooks/.")
+        actor = st.text_input("Worker runbook actor", value="streamlit-platform-sre")
+        if st.button("Export Worker Scale-Out Runbook", use_container_width=True):
+            export = run_async(
+                state.worker_scaleout.runbook_pack(WorkerRunbookPackRequest(actor=actor))
+            )
+            st.success("Worker Scale-Out Runbook exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(plan.model_dump(mode="json"))
 
 elif view == "Prompt Governance":
     st.subheader("Prompt Governance")

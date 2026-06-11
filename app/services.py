@@ -179,6 +179,13 @@ from app.models import (
     UsageChargebackPackResult,
     UsageMetric,
     UsageSummary,
+    WorkerPoolStatus,
+    WorkerRunbookPackRequest,
+    WorkerRunbookPackResult,
+    WorkerRunTimelineEvent,
+    WorkerScalePlanResult,
+    WorkerSkillRunRecord,
+    WorkerSkillRunRequest,
     WorkflowReviewEvidenceResult,
     WorkflowSimulationRequest,
     WorkflowSimulationResult,
@@ -15233,6 +15240,7 @@ class DashboardSmokeService:
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
+            {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
@@ -15279,6 +15287,10 @@ class DashboardSmokeService:
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
+            self._endpoint_ref("worker_runs", "GET", "/workers/runs", "Worker run history and transparent timelines."),
+            self._endpoint_ref("worker_run_submit", "POST", "/workers/runs", "Queues and executes a sandboxed local worker run."),
+            self._endpoint_ref("worker_scale_plan", "GET", "/workers/scale-plan", "Worker pool scale plan and backlog forecast."),
+            self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
             self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
@@ -15325,6 +15337,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
+            self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
@@ -15397,6 +15410,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
@@ -15419,6 +15434,7 @@ class DashboardSmokeService:
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
+            'rg "workers/scale-plan|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
@@ -15431,6 +15447,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -15627,6 +15644,531 @@ class DashboardSmokeService:
 
     def _root(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
+
+
+class WorkerScaleOutService:
+    PACK_ID = "worker_scaleout_runbook_latest"
+    PLAN_ID = "worker_scale_plan_latest"
+
+    POOLS: dict[str, JsonDict] = {
+        "local_mock_general": {
+            "display_name": "Local Mock General Workers",
+            "worker_count": 2,
+            "max_concurrency": 4,
+            "supported_action_classes": ["skill_invocation", "prompt_render"],
+            "isolation_profile": {
+                "execution_mode": "in_process_local",
+                "network": "disabled_by_default",
+                "writes": "generated_artifacts_only",
+                "provider": "mock",
+            },
+        },
+        "retrieval_heavy": {
+            "display_name": "Retrieval Heavy Workers",
+            "worker_count": 1,
+            "max_concurrency": 2,
+            "supported_action_classes": ["skill_invocation", "resource_access"],
+            "isolation_profile": {
+                "execution_mode": "in_process_local",
+                "network": "disabled_by_default",
+                "writes": "none",
+                "provider": "mock",
+            },
+        },
+        "governance_review": {
+            "display_name": "Governance Review Workers",
+            "worker_count": 1,
+            "max_concurrency": 1,
+            "supported_action_classes": ["skill_invocation"],
+            "isolation_profile": {
+                "execution_mode": "in_process_local",
+                "network": "disabled_by_default",
+                "writes": "audit_and_artifacts",
+                "provider": "mock",
+            },
+        },
+    }
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "worker_runbooks"
+        self.runs: list[WorkerSkillRunRecord] = []
+
+    async def submit_run(self, request: WorkerSkillRunRequest | None = None) -> WorkerSkillRunRecord:
+        request = request or WorkerSkillRunRequest()
+        skill = self.app_state.registry.get(request.skill_id)
+        trace_id = new_trace_id()
+        created_at = utc_now()
+        timeline = [
+            self._event(
+                "queued",
+                "queued",
+                f"Run queued for skill `{request.skill_id}` on pool `{request.worker_pool}`.",
+                {"priority": request.priority},
+            )
+        ]
+        run = WorkerSkillRunRecord(
+            run_id=new_id("wrn"),
+            created_at=created_at,
+            updated_at=created_at,
+            status="queued",
+            skill_id=request.skill_id,
+            actor=request.actor,
+            worker_pool=request.worker_pool,
+            priority=request.priority,
+            input=request.input,
+            trace_id=trace_id,
+            timeline=timeline,
+            transparency=self._transparency_base(request),
+        )
+        self.runs.append(run)
+        self.app_state.audit.record(
+            "worker_run.queued",
+            "worker_run",
+            run.run_id,
+            trace_id,
+            request.actor,
+            {
+                "skill_id": request.skill_id,
+                "worker_pool": request.worker_pool,
+                "priority": request.priority,
+            },
+        )
+
+        policy_context = self._policy_context(request, skill.id)
+        sandbox_decision = None
+        if request.enforce_sandbox:
+            timeline.append(
+                self._event(
+                    "running",
+                    "sandbox_preflight",
+                    "Invocation sandbox evaluated before worker dispatch.",
+                    {"endpoint": policy_context.endpoint},
+                )
+            )
+            sandbox_decision = self.app_state.invocation_sandbox.evaluate(
+                InvocationSandboxEvaluateRequest(
+                    skill_id=skill.id,
+                    input=request.input,
+                    actor=request.actor,
+                    policy_context=policy_context,
+                    action_class=policy_context.action_class,
+                    endpoint=policy_context.endpoint or f"worker:{request.worker_pool}/{skill.id}",
+                    enforce=True,
+                )
+            )
+            if sandbox_decision.decision == "deny":
+                timeline.append(
+                    self._event(
+                        "failed",
+                        "sandbox_denied",
+                        "Sandbox denied the queued worker run before tool execution.",
+                        {"matched_rules": sandbox_decision.matched_rules},
+                    )
+                )
+                updated = run.model_copy(
+                    update={
+                        "status": "failed",
+                        "updated_at": utc_now(),
+                        "error": "Sandbox denied worker run",
+                        "sandbox_decision": sandbox_decision,
+                        "timeline": timeline,
+                        "transparency": self._transparency(run, sandbox_decision=sandbox_decision),
+                    }
+                )
+                self._replace_run(updated)
+                self.app_state.audit.record(
+                    "worker_run.failed",
+                    "worker_run",
+                    updated.run_id,
+                    trace_id,
+                    request.actor,
+                    {
+                        "skill_id": skill.id,
+                        "reason": "sandbox_denied",
+                        "matched_rules": sandbox_decision.matched_rules,
+                    },
+                )
+                return updated
+
+        timeline.append(
+            self._event(
+                "running",
+                "dispatched",
+                "Worker dispatched the local/mock skill invocation.",
+                {"provider": skill.provider, "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill)},
+            )
+        )
+        invocation = await self.app_state.invocation_service.invoke(
+            skill.id,
+            request.input,
+            request.actor,
+            policy_context.model_copy(update={"enforce_sandbox": False}),
+        )
+        final_status = "succeeded" if invocation.status == "succeeded" else "failed"
+        timeline.append(
+            self._event(
+                final_status,
+                f"invocation_{final_status}",
+                f"Skill invocation {final_status}.",
+                {"invocation_id": invocation.id, "trace_id": invocation.trace_id},
+            )
+        )
+        updated = run.model_copy(
+            update={
+                "status": final_status,
+                "updated_at": utc_now(),
+                "invocation_id": invocation.id,
+                "output": invocation.output,
+                "error": invocation.error,
+                "sandbox_decision": sandbox_decision,
+                "timeline": timeline,
+                "transparency": self._transparency(
+                    run,
+                    invocation_id=invocation.id,
+                    invocation_trace_id=invocation.trace_id,
+                    sandbox_decision=sandbox_decision,
+                ),
+            }
+        )
+        self._replace_run(updated)
+        self.app_state.audit.record(
+            f"worker_run.{final_status}",
+            "worker_run",
+            updated.run_id,
+            trace_id,
+            request.actor,
+            {
+                "skill_id": skill.id,
+                "worker_pool": request.worker_pool,
+                "invocation_id": invocation.id,
+                "invocation_trace_id": invocation.trace_id,
+            },
+        )
+        return updated
+
+    def list_runs(self) -> list[WorkerSkillRunRecord]:
+        return sorted(self.runs, key=lambda run: run.created_at, reverse=True)
+
+    async def scale_plan(self) -> WorkerScalePlanResult:
+        capacity = await self.app_state.capacity.forecast()
+        pools = self._pool_status(capacity.per_skill)
+        backlog_by_skill = self._backlog_by_skill(capacity.per_skill)
+        recommendations = self._recommendations(pools, backlog_by_skill)
+        fail_count = sum(1 for run in self.runs if run.status == "failed")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if any(item["severity"] == "high" for item in recommendations):
+            readiness_status = "needs_review"
+        if fail_count > 2:
+            readiness_status = "blocked"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "run_count": len(self.runs),
+            "succeeded_run_count": sum(1 for run in self.runs if run.status == "succeeded"),
+            "failed_run_count": fail_count,
+            "queued_run_count": sum(1 for run in self.runs if run.status == "queued"),
+            "total_worker_count": sum(pool.worker_count for pool in pools),
+            "total_max_concurrency": sum(pool.max_concurrency for pool in pools),
+            "recommendation_count": len(recommendations),
+            "mcp_tool_count": len(self.app_state.mcp.list_tools()),
+            "sandbox_enforced_run_count": sum(1 for run in self.runs if run.sandbox_decision is not None),
+            "artifact_directory": str(self.output_dir),
+        }
+        return WorkerScalePlanResult(
+            plan_id=self.PLAN_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            pools=pools,
+            backlog_by_skill=backlog_by_skill,
+            recommendations=recommendations,
+            recent_runs=self.list_runs()[:10],
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def runbook_pack(
+        self,
+        request: WorkerRunbookPackRequest | None = None,
+    ) -> WorkerRunbookPackResult:
+        request = request or WorkerRunbookPackRequest()
+        plan = await self.scale_plan()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": plan.readiness_status,
+            "worker_scale_plan": plan.model_dump(mode="json"),
+            "architecture_patterns": [
+                "worker scale-out",
+                "run transparency",
+                "task sandbox",
+                "typed contracts",
+                "structured outputs",
+            ],
+            "local_proof_commands": plan.local_proof_commands,
+            "limitations": plan.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "worker_scaleout.runbook_exported",
+            "worker_runbook_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": plan.readiness_status,
+                "run_count": plan.summary["run_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return WorkerRunbookPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=plan.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **plan.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _policy_context(self, request: WorkerSkillRunRequest, skill_id: str) -> PolicyInvocationContext:
+        base = request.policy_context or PolicyInvocationContext()
+        return base.model_copy(
+            update={
+                "enforce_sandbox": request.enforce_sandbox,
+                "action_class": base.action_class,
+                "endpoint": base.endpoint or f"worker:{request.worker_pool}/{skill_id}",
+            }
+        )
+
+    def _event(
+        self,
+        status: str,
+        stage: str,
+        message: str,
+        metadata: JsonDict | None = None,
+    ) -> WorkerRunTimelineEvent:
+        return WorkerRunTimelineEvent(
+            timestamp=utc_now(),
+            status=status,
+            stage=stage,
+            message=message,
+            metadata=metadata or {},
+        )
+
+    def _replace_run(self, run: WorkerSkillRunRecord) -> None:
+        self.runs = [run if existing.run_id == run.run_id else existing for existing in self.runs]
+
+    def _pool_for_skill(self, skill_id: str) -> str:
+        if skill_id == "search_knowledge_base":
+            return "retrieval_heavy"
+        if skill_id in {"extract_entities", "classify_request"}:
+            return "governance_review"
+        return "local_mock_general"
+
+    def _pool_status(self, forecasts: list[CapacitySkillForecast]) -> list[WorkerPoolStatus]:
+        forecast_by_pool: dict[str, int] = defaultdict(int)
+        for forecast in forecasts:
+            forecast_by_pool[self._pool_for_skill(forecast.skill_id)] += forecast.forecasted_invocations
+        rows = []
+        for pool_id, config in self.POOLS.items():
+            worker_count = int(config["worker_count"])
+            projected = forecast_by_pool[pool_id]
+            target = max(worker_count, min(8, (projected + 1199) // 1200 or worker_count))
+            rows.append(
+                WorkerPoolStatus(
+                    pool_id=pool_id,
+                    display_name=str(config["display_name"]),
+                    worker_count=worker_count,
+                    max_concurrency=int(config["max_concurrency"]),
+                    active_runs=sum(1 for run in self.runs if run.worker_pool == pool_id and run.status == "running"),
+                    queued_runs=sum(1 for run in self.runs if run.worker_pool == pool_id and run.status == "queued"),
+                    supported_action_classes=list(config["supported_action_classes"]),
+                    isolation_profile=config["isolation_profile"],
+                    scale_recommendation={
+                        "projected_invocations": projected,
+                        "recommended_worker_count": target,
+                        "action": "scale_out" if target > worker_count else "hold",
+                    },
+                )
+            )
+        return rows
+
+    def _backlog_by_skill(self, forecasts: list[CapacitySkillForecast]) -> list[JsonDict]:
+        recent_counts: dict[str, int] = defaultdict(int)
+        failures: dict[str, int] = defaultdict(int)
+        for run in self.runs:
+            recent_counts[run.skill_id] += 1
+            if run.status == "failed":
+                failures[run.skill_id] += 1
+        rows = []
+        for forecast in forecasts:
+            rows.append(
+                {
+                    "skill_id": forecast.skill_id,
+                    "pool": self._pool_for_skill(forecast.skill_id),
+                    "recent_run_count": recent_counts[forecast.skill_id],
+                    "recent_failure_count": failures[forecast.skill_id],
+                    "forecasted_invocations": forecast.forecasted_invocations,
+                    "recommended_rate_limit_per_minute": forecast.recommended_rate_limit_per_minute,
+                    "risk_flags": forecast.risk_flags,
+                }
+            )
+        return sorted(rows, key=lambda row: (-row["forecasted_invocations"], row["skill_id"]))
+
+    def _recommendations(
+        self,
+        pools: list[WorkerPoolStatus],
+        backlog_by_skill: list[JsonDict],
+    ) -> list[JsonDict]:
+        recommendations = []
+        for pool in pools:
+            scale = pool.scale_recommendation
+            if scale["action"] == "scale_out":
+                recommendations.append(
+                    {
+                        "severity": "medium",
+                        "target": pool.pool_id,
+                        "action": f"Increase local worker count to {scale['recommended_worker_count']} before broad agent rollout.",
+                        "reason": f"Projected invocations: {scale['projected_invocations']}.",
+                    }
+                )
+        for row in backlog_by_skill:
+            if row["recent_failure_count"]:
+                recommendations.append(
+                    {
+                        "severity": "high",
+                        "target": row["skill_id"],
+                        "action": "Review failed worker runs and circuit-breaker posture before scaling.",
+                        "reason": f"{row['recent_failure_count']} failed worker run(s) in local history.",
+                    }
+                )
+        if not recommendations:
+            recommendations.append(
+                {
+                    "severity": "low",
+                    "target": "worker_pools",
+                    "action": "Hold current local worker counts and keep sandbox enforcement on.",
+                    "reason": "No local run failures or forecast-driven scale-out pressure detected.",
+                }
+            )
+        return recommendations
+
+    def _transparency_base(self, request: WorkerSkillRunRequest) -> JsonDict:
+        return {
+            "patterns_used": ["worker scale-out", "run transparency", "task sandbox", "typed contracts"],
+            "queue_policy": {
+                "priority": request.priority,
+                "pool": request.worker_pool,
+                "dispatch_mode": "synchronous_local_simulation",
+            },
+            "external_services": "none",
+        }
+
+    def _transparency(
+        self,
+        run: WorkerSkillRunRecord,
+        invocation_id: str | None = None,
+        invocation_trace_id: str | None = None,
+        sandbox_decision: InvocationSandboxDecision | None = None,
+    ) -> JsonDict:
+        data = dict(run.transparency)
+        data.update(
+            {
+                "timeline_stage_count": len(run.timeline),
+                "audit_actions": ["worker_run.queued", f"worker_run.{run.status}"],
+                "invocation_id": invocation_id,
+                "invocation_trace_id": invocation_trace_id,
+                "sandbox_decision": sandbox_decision.decision if sandbox_decision else "not_enforced",
+                "sandbox_rules": sandbox_decision.matched_rules if sandbox_decision else [],
+            }
+        )
+        return data
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_worker_scaleout.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/runs -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
+            'rg "workers/scale-plan|Worker Scale-Out|worker_runbooks|worker scale-out" app dashboard docs README.md tests',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Worker execution is a deterministic local simulation; it does not start background processes or remote workers.",
+            "Scale recommendations combine local capacity forecasts and in-memory run history rather than live queue telemetry.",
+            "Sandbox preflight enforces payload and action-class policy before local/mock invocation, but production isolation should use OS/container-level sandboxes.",
+            "Generated worker runbook artifacts are written under ignored data/worker_runbooks/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        plan = bundle["worker_scale_plan"]
+        lines = [
+            "# Worker Scale-Out Runbook",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Runs: `{plan['summary']['run_count']}`",
+            f"- Workers: `{plan['summary']['total_worker_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Worker Pools",
+            "",
+            *[
+                f"- `{pool['pool_id']}` workers=`{pool['worker_count']}` concurrency=`{pool['max_concurrency']}` action=`{pool['scale_recommendation']['action']}`"
+                for pool in plan["pools"]
+            ],
+            "",
+            "## Backlog By Skill",
+            "",
+            *[
+                f"- `{row['skill_id']}` pool=`{row['pool']}` forecast=`{row['forecasted_invocations']}` recent_runs=`{row['recent_run_count']}` failures=`{row['recent_failure_count']}`"
+                for row in plan["backlog_by_skill"]
+            ],
+            "",
+            "## Recommendations",
+            "",
+            *[
+                f"- `{item['severity']}` {item['target']}: {item['action']} {item['reason']}"
+                for item in plan["recommendations"]
+            ],
+            "",
+            "## Recent Run Transparency",
+            "",
+            *[
+                f"- `{run['run_id']}` `{run['status']}` skill=`{run['skill_id']}` pool=`{run['worker_pool']}` trace=`{run['trace_id']}`"
+                for run in plan["recent_runs"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
 
 
 class GovernedSkillPlatformPackService:
@@ -16406,6 +16948,15 @@ class ArtifactInventoryService:
                     "governed_skill_platform_pack_latest.md",
                 ],
                 "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
+            ),
+            self._catalog_row(
+                "worker_runbooks",
+                "Worker Scale-Out Runbook",
+                Path("data") / "worker_runbooks",
+                "POST /workers/runbook-pack",
+                "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
+                ["worker_scaleout_runbook_latest.json", "worker_scaleout_runbook_latest.md"],
+                "Worker-pool scale plan, sandbox preflight evidence, transparent run timelines, and local/mock worker limitations.",
             ),
             self._catalog_row(
                 "sandbox_policies",
@@ -17789,6 +18340,7 @@ class AppState:
     runtime_demo: RuntimeDemoService = field(init=False)
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
+    worker_scaleout: WorkerScaleOutService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
     api_contracts: ApiContractService = field(init=False)
     git_readiness: GitReadinessService = field(init=False)
@@ -17849,6 +18401,7 @@ class AppState:
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
+        self.worker_scaleout = WorkerScaleOutService(self)
         self.artifacts = ArtifactInventoryService(self)
         self.final_handoff = FinalHandoffService(self)
         self.api_contracts = ApiContractService(self)

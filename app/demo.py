@@ -38,6 +38,8 @@ from app.models import (
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
+    WorkerRunbookPackRequest,
+    WorkerSkillRunRequest,
     WorkflowSimulationRequest,
     WorkflowTemplate,
 )
@@ -190,6 +192,19 @@ async def main() -> None:
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
         GovernedSkillPlatformPackRequest(actor="demo-platform-owner")
+    )
+    worker_run = await state.worker_scaleout.submit_run(
+        WorkerSkillRunRequest(
+            skill_id="search_knowledge_base",
+            input={"query": "AI governance policy", "limit": 2},
+            actor="demo-platform-sre",
+            worker_pool="retrieval_heavy",
+            enforce_sandbox=True,
+        )
+    )
+    worker_scale_plan = await state.worker_scaleout.scale_plan()
+    worker_runbook = await state.worker_scaleout.runbook_pack(
+        WorkerRunbookPackRequest(actor="demo-platform-sre")
     )
     invocation_sandbox_report = state.invocation_sandbox.report()
     invocation_sandbox_pack = state.invocation_sandbox.pack(
@@ -388,6 +403,14 @@ async def main() -> None:
                 "platform_pack_controls": len(platform_pack_report.capability_controls),
                 "platform pack path": platform_pack_export.markdown_path,
                 "platform_pack_path": platform_pack_export.markdown_path,
+                "worker scaleout readiness": worker_scale_plan.readiness_status,
+                "worker_scaleout_readiness": worker_scale_plan.readiness_status,
+                "worker run status": worker_run.status,
+                "worker_run_status": worker_run.status,
+                "worker run timeline stages": len(worker_run.timeline),
+                "worker_run_timeline_stages": len(worker_run.timeline),
+                "worker runbook path": worker_runbook.markdown_path,
+                "worker_runbook_path": worker_runbook.markdown_path,
                 "invocation sandbox readiness": invocation_sandbox_report.readiness_status,
                 "invocation_sandbox_readiness": invocation_sandbox_report.readiness_status,
                 "invocation sandbox denied decisions": invocation_sandbox_report.summary[

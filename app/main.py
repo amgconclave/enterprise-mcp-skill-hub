@@ -147,6 +147,11 @@ from app.models import (
     UsageSummary,
     ValidateSkillRequest,
     ValidationResult,
+    WorkerRunbookPackRequest,
+    WorkerRunbookPackResult,
+    WorkerScalePlanResult,
+    WorkerSkillRunRecord,
+    WorkerSkillRunRequest,
     WorkflowReviewDecisionRequest,
     WorkflowReviewEvidenceResult,
     WorkflowSimulationRequest,
@@ -463,6 +468,35 @@ async def export_governed_skill_platform_pack(
     _: str = Depends(require_api_key),
 ) -> GovernedSkillPlatformPackExportResult:
     return await state.platform_pack.export(request or GovernedSkillPlatformPackRequest())
+
+
+@app.get("/workers/runs", response_model=list[WorkerSkillRunRecord])
+def worker_runs(_: str = Depends(require_api_key)) -> list[WorkerSkillRunRecord]:
+    return state.worker_scaleout.list_runs()
+
+
+@app.post("/workers/runs", response_model=WorkerSkillRunRecord)
+async def submit_worker_run(
+    request: WorkerSkillRunRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> WorkerSkillRunRecord:
+    try:
+        return await state.worker_scaleout.submit_run(request or WorkerSkillRunRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/workers/scale-plan", response_model=WorkerScalePlanResult)
+async def worker_scale_plan(_: str = Depends(require_api_key)) -> WorkerScalePlanResult:
+    return await state.worker_scaleout.scale_plan()
+
+
+@app.post("/workers/runbook-pack", response_model=WorkerRunbookPackResult)
+async def worker_runbook_pack(
+    request: WorkerRunbookPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> WorkerRunbookPackResult:
+    return await state.worker_scaleout.runbook_pack(request or WorkerRunbookPackRequest())
 
 
 @app.get("/reviewer/quickstart", response_model=ReviewerQuickstartResult)

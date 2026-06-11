@@ -71,6 +71,8 @@ PrivacyRetentionSourceType = Literal[
     "sample",
     "text",
 ]
+WorkerRunStatus = Literal["queued", "running", "succeeded", "failed"]
+WorkerPoolKey = Literal["local_mock_general", "retrieval_heavy", "governance_review"]
 
 
 class TokenUsage(BaseModel):
@@ -1004,6 +1006,81 @@ class GovernedSkillPlatformPackRequest(BaseModel):
 
 
 class GovernedSkillPlatformPackExportResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class WorkerRunTimelineEvent(BaseModel):
+    timestamp: datetime
+    status: WorkerRunStatus
+    stage: str
+    message: str
+    metadata: JsonDict = Field(default_factory=dict)
+
+
+class WorkerSkillRunRequest(BaseModel):
+    skill_id: str = "search_knowledge_base"
+    input: JsonDict = Field(default_factory=lambda: {"query": "AI governance policy", "limit": 2})
+    actor: str = "platform-worker"
+    worker_pool: WorkerPoolKey = "local_mock_general"
+    priority: int = Field(default=5, ge=1, le=10)
+    policy_context: PolicyInvocationContext | None = None
+    enforce_sandbox: bool = True
+
+
+class WorkerSkillRunRecord(BaseModel):
+    run_id: str
+    created_at: datetime
+    updated_at: datetime
+    status: WorkerRunStatus
+    skill_id: str
+    actor: str
+    worker_pool: WorkerPoolKey
+    priority: int
+    input: JsonDict
+    trace_id: str
+    invocation_id: str | None = None
+    output: JsonDict | None = None
+    error: str | None = None
+    sandbox_decision: InvocationSandboxDecision | None = None
+    timeline: list[WorkerRunTimelineEvent] = Field(default_factory=list)
+    transparency: JsonDict = Field(default_factory=dict)
+
+
+class WorkerPoolStatus(BaseModel):
+    pool_id: WorkerPoolKey
+    display_name: str
+    worker_count: int
+    max_concurrency: int
+    active_runs: int
+    queued_runs: int
+    supported_action_classes: list[InvocationSandboxActionClass] = Field(default_factory=list)
+    isolation_profile: JsonDict = Field(default_factory=dict)
+    scale_recommendation: JsonDict = Field(default_factory=dict)
+
+
+class WorkerScalePlanResult(BaseModel):
+    plan_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    pools: list[WorkerPoolStatus] = Field(default_factory=list)
+    backlog_by_skill: list[JsonDict] = Field(default_factory=list)
+    recommendations: list[JsonDict] = Field(default_factory=list)
+    recent_runs: list[WorkerSkillRunRecord] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class WorkerRunbookPackRequest(BaseModel):
+    actor: str = "platform-sre"
+
+
+class WorkerRunbookPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

@@ -75,6 +75,10 @@ class ApiContractService:
         ("POST", "/runtime/demo-pack"),
         ("GET", "/platform/pack"),
         ("POST", "/platform/pack/export"),
+        ("GET", "/workers/runs"),
+        ("POST", "/workers/runs"),
+        ("GET", "/workers/scale-plan"),
+        ("POST", "/workers/runbook-pack"),
     ]
 
     DEMO_FLOW_ENDPOINTS = [
@@ -113,6 +117,9 @@ class ApiContractService:
         ("POST", "/api/contract-drift-pack"),
         ("GET", "/platform/pack"),
         ("POST", "/platform/pack/export"),
+        ("POST", "/workers/runs"),
+        ("GET", "/workers/scale-plan"),
+        ("POST", "/workers/runbook-pack"),
     ]
 
     def __init__(
@@ -886,6 +893,9 @@ class ApiContractService:
                 "with_api_key": True,
                 "expected_status": 200,
             },
+            {"method": "GET", "path": "/workers/scale-plan", "with_api_key": True, "expected_status": 200},
+            {"method": "POST", "path": "/workers/runs", "with_api_key": True, "expected_status": 200},
+            {"method": "POST", "path": "/workers/runbook-pack", "with_api_key": True, "expected_status": 200},
             {
                 "method": "POST",
                 "path": "/marketplace/rollout-pack",
@@ -924,6 +934,8 @@ class ApiContractService:
                 "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/privacy/retention-pack -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/mcp/tools -Headers $headers",
             ],
@@ -945,6 +957,8 @@ class ApiContractService:
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/prompt-governance/pack",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/privacy/retention-report",
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/privacy/retention-pack",
+                "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/workers/scale-plan",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/workers/runbook-pack",
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/reviewer-collection",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/mcp/tools",
             ],
@@ -1163,6 +1177,9 @@ class ApiContractService:
             "/api/contract-audit": "state.api_contracts.contract_audit",
             "/api/reviewer-collection": "state.api_contracts.reviewer_collection",
             "/api/contract-drift-pack": "state.api_contracts.contract_drift_pack",
+            "/workers/runs": "state.worker_scaleout.submit_run",
+            "/workers/scale-plan": "state.worker_scaleout.scale_plan",
+            "/workers/runbook-pack": "state.worker_scaleout.runbook_pack",
         }
         return hints.get(path, path)
 

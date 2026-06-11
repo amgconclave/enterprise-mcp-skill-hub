@@ -57,6 +57,10 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
 - `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
+- `GET /workers/runs` - returns local worker run history with transparent timelines, sandbox decisions, invocation ids, trace ids, and structured outputs.
+- `POST /workers/runs` - queues and executes one deterministic local/mock skill run through a worker pool with optional sandbox preflight.
+- `GET /workers/scale-plan` - returns worker pool status, forecast-backed backlog by skill, scale recommendations, recent run history, and local proof commands.
+- `POST /workers/runbook-pack` - writes the Worker Scale-Out Runbook Markdown/JSON under ignored local folder `data/worker_runbooks/`.
 - `GET /supply-chain/report` - returns a local direct-dependency SBOM with manifest hashes, license policy decisions, pinning signals, optional provider dependency gates, approval requirements, and limitations.
 - `POST /supply-chain/pack` - writes the Supply Chain SBOM + License Governance Pack Markdown/JSON under ignored local folder `data/supply_chain/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
@@ -587,6 +591,27 @@ The API Contract audit response includes `audit_id`, readiness, score, OpenAPI r
 The Reviewer Collection export writes `reviewer_collection_latest.json` and `reviewer_collection_latest.md` under ignored `data/api_contracts/`. It includes grouped endpoint inventory, MCP tool/resource/prompt inventory, sample PowerShell and curl commands with `X-API-Key`, the demo-token flow, MCP CLI commands, expected status codes, auth notes, generated artifact endpoints, one-command verification order, and recruiter/engineer explanations.
 
 The Tool Contract Drift Pack export writes `contract_drift_pack_latest.json` and `contract_drift_pack_latest.md` under ignored `data/api_contracts/`. It fingerprints promoted manifest input/output schemas, MCP tool input/output schemas, MCP version annotations, registry manifest hashes, and the generic FastAPI `InvokeSkillRequest`/`SkillInvocation` governance fields. It uses tool registry and tool governance patterns to keep manifests as the source of truth, then emits a remediation plan for stale MCP schemas, missing promoted tools, intentionally hidden skills, or FastAPI trace/governance field gaps.
+
+## Worker Scale-Out And Run Transparency
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers
+Invoke-RestMethod http://localhost:8000/workers/runs `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"worker_pool":"retrieval_heavy","actor":"platform-sre","enforce_sandbox":true}'
+Invoke-RestMethod http://localhost:8000/workers/runbook-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-sre"}'
+```
+
+Worker execution is local and deterministic. A worker run records queued, sandbox preflight, dispatch, and invocation completion timeline events, attaches sandbox decision evidence when enforced, and links to the normal invocation/audit trace. The scale plan combines local capacity forecasts with in-memory worker run history to recommend hold or scale-out actions per pool.
+
+The Worker Scale-Out Runbook writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. It demonstrates worker scale-out, run transparency, task sandbox, typed contracts, and structured outputs without requiring remote workers or external providers.
 
 ## API Smoke Matrix And Launch Checklist
 

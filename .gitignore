@@ -22,6 +22,7 @@ data/reliability_packs/
 data/slo_packs/
 data/provider_packs/
 data/platform_packs/
+data/worker_runbooks/
 data/sandbox_policies/
 data/prompt_governance/
 data/privacy_packs/
