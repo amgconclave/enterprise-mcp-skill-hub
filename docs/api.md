@@ -61,6 +61,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /slo/pack` - writes the Skill SLO + Error Budget Pack Markdown/JSON under ignored local folder `data/slo_packs/`.
 - `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
+- `GET /config/hygiene` - returns local configuration hygiene, optional provider credential gates, redacted secret findings, `.gitignore` checks, and rotation guidance without exporting secret values.
+- `POST /config/hygiene-pack` - writes the Config Hygiene + Secret Rotation Pack Markdown/JSON under ignored local folder `data/config_hygiene/`.
 - `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
 - `POST /agents/collaborate` - runs a governed multi-agent conversation using intake, retrieval, synthesis, action, and governance reviewer roles over MCP tools.
@@ -479,6 +481,22 @@ Invoke-RestMethod http://localhost:8000/slo/pack `
 The SLO report derives per-skill availability SLOs, error budget burn, latency budget remaining, burn-rate alerts, and release-gate decisions from the local reliability report. Promoted MCP skills with exhausted error budget or latency SLO breach are listed as release blockers; disabled or unexposed skills remain evidence rows without becoming release blockers.
 
 The SLO Pack writes `slo_pack_latest.json` and `.md` under ignored `data/slo_packs/`. It includes blocking skill IDs, burn-rate alerts, reviewer checklist, local proof commands, and limitations. It is deterministic and local/mock by default.
+
+## Config Hygiene And Secret Rotation
+
+```powershell
+Invoke-RestMethod http://localhost:8000/config/hygiene -Headers $headers
+
+Invoke-RestMethod http://localhost:8000/config/hygiene-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"config-security-reviewer"}'
+```
+
+The report checks `.env.example`, `.gitignore`, local provider selection, optional OpenAI/Azure credential presence, and suspicious literal secret patterns without exporting secret values. It keeps `LLM_PROVIDER=mock` as the default ready path and treats hosted providers as approval-gated.
+
+The Config Hygiene Pack writes `config_hygiene_pack_latest.json` and `.md` under ignored `data/config_hygiene/`. It includes provider gates, redacted findings, rotation steps, reviewer checklist, local proof commands, governance/provider-flexibility/tool-governance notes, and limitations.
 
 ## Prompt Governance And Injection Risk
 

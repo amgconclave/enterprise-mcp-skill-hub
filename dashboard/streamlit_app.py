@@ -25,6 +25,7 @@ from app.models import (
     CapacityPlanExportRequest,
     CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
+    ConfigHygienePackRequest,
     DependencyReportRequest,
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
@@ -101,6 +102,7 @@ view = st.sidebar.radio(
         "Skill Reliability",
         "Skill SLO",
         "Provider Readiness",
+        "Config Hygiene",
         "Platform Pack",
         "Agent Collaboration",
         "Agent Society Evaluation",
@@ -873,6 +875,46 @@ elif view == "Provider Readiness":
                 ProviderFallbackPackRequest(actor=actor)
             )
             st.success("Provider Fallback Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
+
+elif view == "Config Hygiene":
+    st.subheader("Config Hygiene")
+    st.caption("Local config, optional provider credential gates, redacted secret scan, and rotation evidence.")
+    report = state.config_hygiene.report()
+    col_ready, col_score, col_provider, col_findings = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_score.metric("Score", report.score)
+    col_provider.metric("Provider gate", report.provider_gate["status"])
+    col_findings.metric("Secret findings", report.summary["secret_finding_count"])
+
+    tab_vars, tab_gate, tab_findings, tab_export, tab_json = st.tabs(
+        ["Variables", "Provider Gate", "Findings", "Config Pack", "JSON"]
+    )
+    with tab_vars:
+        st.dataframe(
+            [variable.model_dump(mode="json") for variable in report.variables],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(report.gitignore_checks, use_container_width=True, hide_index=True)
+    with tab_gate:
+        st.json(report.provider_gate)
+        st.dataframe(report.rotation_plan, use_container_width=True, hide_index=True)
+    with tab_findings:
+        st.dataframe(report.secret_findings, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"command": command} for command in report.local_proof_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/config_hygiene/.")
+        actor = st.text_input("Config pack actor", value="streamlit-config-reviewer")
+        if st.button("Export Config Hygiene Pack", use_container_width=True):
+            export = state.config_hygiene.pack(ConfigHygienePackRequest(actor=actor))
+            st.success("Config Hygiene Pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))

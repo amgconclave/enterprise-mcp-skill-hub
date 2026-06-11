@@ -15,6 +15,7 @@ from app.models import (
     BlastRadiusRequest,
     CapacityPlanExportRequest,
     ComplianceAttestationRequest,
+    ConfigHygienePackRequest,
     DependencyReportRequest,
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
@@ -197,6 +198,10 @@ async def main() -> None:
     provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
     provider_fallback_pack = state.provider_readiness.fallback_pack(
         ProviderFallbackPackRequest(actor="demo-provider-reviewer")
+    )
+    config_hygiene_report = state.config_hygiene.report()
+    config_hygiene_pack = state.config_hygiene.pack(
+        ConfigHygienePackRequest(actor="demo-config-reviewer")
     )
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
@@ -438,6 +443,12 @@ async def main() -> None:
                 "provider_current": provider_readiness.current_provider["name"],
                 "provider fallback pack path": provider_fallback_pack.markdown_path,
                 "provider_fallback_pack_path": provider_fallback_pack.markdown_path,
+                "config hygiene readiness": config_hygiene_report.readiness_status,
+                "config_hygiene_readiness": config_hygiene_report.readiness_status,
+                "config hygiene secret findings": config_hygiene_report.summary["secret_finding_count"],
+                "config_hygiene_secret_findings": config_hygiene_report.summary["secret_finding_count"],
+                "config hygiene pack path": config_hygiene_pack.markdown_path,
+                "config_hygiene_pack_path": config_hygiene_pack.markdown_path,
                 "platform pack readiness": platform_pack_report.readiness_status,
                 "platform_pack_readiness": platform_pack_report.readiness_status,
                 "platform pack controls": len(platform_pack_report.capability_controls),

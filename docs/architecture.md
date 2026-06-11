@@ -30,6 +30,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `TenantEntitlementService` applies deterministic local tenant/user RBAC and scope policies to promoted skills, returns MCP-safe allowed tool subsets, blocks enforced denied invocations, records `entitlement.denied` audit events, and writes reviewer packs under `data/entitlement_packs/`.
 - `SkillMarketplaceGovernanceService` turns the registry into a governed Skill Marketplace with lifecycle listings, deterministic Tenant Rollout eligibility scenarios, risk/review states, usage/version/MCP exposure signals, disabled-skill blocks, and rollout approval artifacts under `data/marketplace_packs/`.
 - `SkillUsageAnalyticsService` builds deterministic local Skill Usage Analytics from invocation history, audit events, metrics, the skill registry, marketplace tenant scenarios, and mock token/cost fixtures; it returns budgets/anomalies and writes Cost Chargeback artifacts under `data/usage_packs/`.
+- `ConfigHygieneService` checks `.env.example`, `.gitignore`, current provider mode, optional hosted-provider credential presence, and redacted suspicious secret findings; it writes Config Hygiene + Secret Rotation artifacts under ignored `data/config_hygiene/`.
 - `GovernedSkillPlatformPackService` aggregates durable workflows, human-in-the-loop review, governance/conformance, provider fallback, tool governance, cost/trace signals, and handoff readiness into a platform-owner report and writes artifacts under `data/platform_packs/`.
 - `WorkerScaleOutService` simulates local worker pools for governed skill execution, performs sandbox preflight before dispatch, records transparent run timelines, derives scale recommendations from capacity forecasts and run history, and writes Worker Scale-Out Runbook artifacts under `data/worker_runbooks/`.
 - `PrivacyRetentionService` scans invocation inputs, invocation outputs, audit metadata, and ad hoc JSON payloads for local PII-like patterns, returns redacted previews and retention actions, and writes Privacy Retention artifacts under `data/privacy_packs/`.
@@ -331,6 +332,15 @@ The project keeps governance close to the skill runtime:
 5. The service writes `audit_pack_latest.json` and `audit_pack_latest.md` under ignored `data/audit_packs/`.
 6. The Audit Pack includes CI Doctor results, dependency inventory, secret scan summary, local verification commands, publish-safety checklist, remediation notes, recruiter/interviewer explanation, and limitations.
 7. The workflow stays deterministic and local/mock; it does not call external CI, package registry, source-control, or secret-scanning services.
+
+## Config Hygiene Flow
+
+1. A platform reviewer calls `GET /config/hygiene` before enabling OpenAI, Azure OpenAI, or shared deployment.
+2. `ConfigHygieneService` parses `.env.example`, checks process environment variable presence without exporting secret values, validates `.gitignore` coverage for local config/artifacts, and scans text-like repo files for suspicious literal credentials.
+3. The response returns redacted variable records, provider approval gate, gitignore checks, redacted findings, rotation steps, local proof commands, and limitations.
+4. A reviewer calls `POST /config/hygiene-pack`.
+5. The service writes `config_hygiene_pack_latest.json` and `.md` under ignored `data/config_hygiene/`.
+6. The pack uses governance, provider-flexibility, and tool-governance patterns: mock remains the default acceptance path, hosted-provider enablement is approval-gated, and generated artifacts never contain raw secret values.
 
 ## Supply Chain SBOM Flow
 

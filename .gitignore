@@ -21,6 +21,7 @@ data/usage_packs/
 data/reliability_packs/
 data/slo_packs/
 data/provider_packs/
+data/config_hygiene/
 data/platform_packs/
 data/agent_collaboration/
 data/agent_society_evals/

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import sys
@@ -52,6 +53,10 @@ from app.models import (
     CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
     ComplianceAttestationResult,
+    ConfigHygienePackRequest,
+    ConfigHygienePackResult,
+    ConfigHygieneReport,
+    ConfigVariableRecord,
     ConformanceReport,
     ConformanceSkillRecord,
     DashboardSmokeCheck,
@@ -16273,6 +16278,7 @@ class DashboardSmokeService:
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
+            {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
@@ -16324,6 +16330,8 @@ class DashboardSmokeService:
             self._endpoint_ref("slo_pack", "POST", "/slo/pack", "Writes SLO Error Budget artifacts."),
             self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
+            self._endpoint_ref("config_hygiene", "GET", "/config/hygiene", "Config hygiene and secret rotation posture."),
+            self._endpoint_ref("config_hygiene_pack", "POST", "/config/hygiene-pack", "Writes Config Hygiene artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
             self._endpoint_ref("agent_collaborate", "POST", "/agents/collaborate", "Runs governed multi-agent collaboration over MCP skills."),
@@ -16380,6 +16388,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
+            self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
@@ -16456,6 +16465,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/config/hygiene -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/config/hygiene-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
@@ -16482,6 +16493,7 @@ class DashboardSmokeService:
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
+            'rg "config/hygiene|Config Hygiene|config_hygiene|secret rotation" app dashboard docs README.md tests scripts sample_data',
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "workers/scale-plan|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
@@ -16496,6 +16508,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\config_hygiene -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -17997,6 +18010,15 @@ class ArtifactInventoryService:
                 "Mock-default provider posture, optional OpenAI/Azure checks, fallback matrix, re-enable gates, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
+                "config_hygiene",
+                "Config Hygiene + Secret Rotation Pack",
+                Path("data") / "config_hygiene",
+                "POST /config/hygiene-pack",
+                "Invoke-RestMethod http://localhost:8000/config/hygiene-pack -Method POST -Headers $headers",
+                ["config_hygiene_pack_latest.json", "config_hygiene_pack_latest.md"],
+                "Local config posture, optional provider credential gates, redacted secret findings, and rotation proof.",
+            ),
+            self._catalog_row(
                 "platform_packs",
                 "Governed Skill Platform Pack",
                 Path("data") / "platform_packs",
@@ -19332,6 +19354,451 @@ class ProviderReadinessService:
         return "\n".join(lines)
 
 
+class ConfigHygieneService:
+    PACK_ID = "config_hygiene_pack_latest"
+
+    VARIABLE_CATALOG = [
+        ("APP_ENV", "runtime", False),
+        ("API_KEY", "local_admin_api", True),
+        ("LLM_PROVIDER", "provider_selection", False),
+        ("OPENAI_API_KEY", "optional_openai_provider", True),
+        ("AZURE_OPENAI_API_KEY", "optional_azure_openai_provider", True),
+        ("AZURE_OPENAI_ENDPOINT", "optional_azure_openai_provider", False),
+        ("AZURE_OPENAI_DEPLOYMENT", "optional_azure_openai_provider", False),
+        ("DATABASE_URL", "local_persistence", False),
+        ("MCP_SERVER_NAME", "mcp_server", False),
+        ("LOG_LEVEL", "observability", False),
+    ]
+
+    SECRET_PATTERNS = [
+        (
+            "openai_key_literal",
+            re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+            "high",
+        ),
+        (
+            "azure_or_generic_key_literal",
+            re.compile(r"\b(api[_-]?key|token|secret|password)\s*=\s*[A-Za-z0-9_./+=-]{16,}", re.IGNORECASE),
+            "medium",
+        ),
+    ]
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "config_hygiene"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def report(self) -> ConfigHygieneReport:
+        env_example = self._parse_env_example()
+        variables = [self._variable_record(name, required_for, secret, env_example) for name, required_for, secret in self.VARIABLE_CATALOG]
+        provider_gate = self._provider_gate(variables)
+        gitignore_checks = self._gitignore_checks()
+        secret_findings = self._secret_findings()
+        blockers = [
+            finding for finding in secret_findings if finding["severity"] == "high"
+        ] + [
+            check for check in gitignore_checks if check["status"] == "fail"
+        ]
+        warnings = [
+            finding for finding in secret_findings if finding["severity"] == "medium"
+        ] + [
+            check for check in gitignore_checks if check["status"] == "warn"
+        ]
+        if provider_gate["status"] == "blocked":
+            blockers.append(provider_gate)
+        elif provider_gate["status"] == "needs_review":
+            warnings.append(provider_gate)
+
+        readiness_status: SecurityReadinessStatus = "ready"
+        if blockers:
+            readiness_status = "blocked"
+        elif warnings:
+            readiness_status = "needs_review"
+
+        score = max(0, 100 - len(blockers) * 25 - len(warnings) * 8)
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "current_provider": self.app_state.provider.name,
+            "env_example_variable_count": len(env_example),
+            "tracked_variable_count": len(variables),
+            "secret_value_exported": False,
+            "secret_finding_count": len(secret_findings),
+            "high_confidence_secret_count": sum(1 for finding in secret_findings if finding["severity"] == "high"),
+            "gitignore_fail_count": sum(1 for check in gitignore_checks if check["status"] == "fail"),
+            "provider_gate_status": provider_gate["status"],
+            "artifact_root": str(self.output_dir),
+        }
+        return ConfigHygieneReport(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=score,
+            summary=summary,
+            variables=variables,
+            provider_gate=provider_gate,
+            gitignore_checks=gitignore_checks,
+            secret_findings=secret_findings,
+            rotation_plan=self._rotation_plan(provider_gate, secret_findings),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: ConfigHygienePackRequest | None = None) -> ConfigHygienePackResult:
+        request = request or ConfigHygienePackRequest()
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "score": report.score,
+            "config_hygiene_report": report.model_dump(mode="json"),
+            "governance_patterns": [
+                "governance: environment and credential posture is reviewed before provider changes.",
+                "provider flexibility: mock remains the default while OpenAI/Azure checks are presence-only.",
+                "tool governance: MCP/admin tools avoid exporting secret values into artifacts.",
+            ],
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "config_hygiene.pack_exported",
+            "config_hygiene_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "score": report.score,
+                "secret_finding_count": report.summary["secret_finding_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ConfigHygienePackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            score=report.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": report.readiness_status,
+                "score": report.score,
+                "secret_finding_count": report.summary["secret_finding_count"],
+                "provider_gate_status": report.provider_gate["status"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _parse_env_example(self) -> dict[str, str]:
+        path = self.repo_root / ".env.example"
+        if not path.exists():
+            return {}
+        values = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            values[key.strip()] = value.strip()
+        return values
+
+    def _variable_record(
+        self,
+        name: str,
+        required_for: str,
+        secret: bool,
+        env_example: dict[str, str],
+    ) -> ConfigVariableRecord:
+        settings = get_settings()
+        process_value = os.environ.get(name)
+        example_value = env_example.get(name, "")
+        present_in_process = process_value is not None
+        value = process_value if process_value is not None else example_value
+        placeholder_safe = self._is_placeholder_safe(name, value, secret)
+        return ConfigVariableRecord(
+            name=name,
+            required_for=required_for,
+            present_in_env_example=name in env_example,
+            present_in_process=present_in_process,
+            secret=secret,
+            placeholder_safe=placeholder_safe,
+            exported_value=self._exported_value(name, value, secret, settings),
+            recommendation=self._variable_recommendation(name, required_for, secret, placeholder_safe),
+        )
+
+    def _exported_value(self, name: str, value: str, secret: bool, settings) -> str:
+        if secret:
+            if name == "API_KEY" and value == settings.api_key == "dev-local-token":
+                return "default-local-demo-token"
+            if value:
+                return "[PRESENT_REDACTED]"
+            return "[ABSENT]"
+        if not value:
+            return "[EMPTY]"
+        return value
+
+    def _is_placeholder_safe(self, name: str, value: str, secret: bool) -> bool:
+        normalized = value.strip().lower()
+        if not secret:
+            return True
+        if not normalized:
+            return True
+        if name == "API_KEY" and normalized == "dev-local-token":
+            return True
+        placeholder_markers = ("changeme", "example", "placeholder", "redacted", "dummy")
+        return any(marker in normalized for marker in placeholder_markers)
+
+    def _variable_recommendation(
+        self,
+        name: str,
+        required_for: str,
+        secret: bool,
+        placeholder_safe: bool,
+    ) -> str:
+        if secret and not placeholder_safe:
+            return "Do not commit literal values; rotate if this value was real and keep it in local `.env` or a production secret manager."
+        if required_for.startswith("optional_"):
+            return "Leave empty for local/mock mode; require reviewer approval before enabling this provider."
+        if name == "API_KEY":
+            return "Use the default only for local demos; override and rotate for shared or deployed environments."
+        return "Keep documented in `.env.example` so fresh clones remain reproducible."
+
+    def _provider_gate(self, variables: list[ConfigVariableRecord]) -> JsonDict:
+        settings = get_settings()
+        by_name = {item.name: item for item in variables}
+        provider = settings.llm_provider
+        if provider == "mock":
+            status = "ready"
+            missing: list[str] = []
+            approval = "none_for_local_mock"
+            recommendation = "Keep mock as the default acceptance provider."
+        elif provider == "openai":
+            missing = [] if by_name["OPENAI_API_KEY"].present_in_process else ["OPENAI_API_KEY"]
+            status = "ready" if not missing else "blocked"
+            approval = "platform_reviewer_approval_before_external_provider"
+            recommendation = "Install optional provider dependencies, keep key out of artifacts, and rerun eval/conformance."
+        elif provider == "azure_openai":
+            required = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT"]
+            missing = [name for name in required if not by_name[name].present_in_process]
+            status = "ready" if not missing else "blocked"
+            approval = "cloud_owner_and_security_reviewer_approval"
+            recommendation = "Validate endpoint, deployment, identity, logging, budget, and fallback before use."
+        else:
+            missing = ["LLM_PROVIDER"]
+            status = "blocked"
+            approval = "provider_registry_review"
+            recommendation = "Use `mock`, `openai`, or `azure_openai`."
+        return {
+            "provider": provider,
+            "status": status,
+            "missing_process_variables": missing,
+            "secret_values_exported": False,
+            "approval_gate": approval,
+            "fallback": "set LLM_PROVIDER=mock and rerun verification commands",
+            "recommendation": recommendation,
+        }
+
+    def _gitignore_checks(self) -> list[JsonDict]:
+        gitignore = self._read_text(Path(".gitignore"))
+        checks = [
+            (".env", ".env"),
+            ("local_snapshot", ".local/"),
+            ("config_hygiene_artifacts", "data/config_hygiene/"),
+        ]
+        return [
+            {
+                "id": check_id,
+                "status": "pass" if marker in gitignore else "fail",
+                "marker": marker,
+                "proof": f"`{marker}` is ignored." if marker in gitignore else f"`{marker}` is missing from .gitignore.",
+            }
+            for check_id, marker in checks
+        ]
+
+    def _secret_findings(self) -> list[JsonDict]:
+        findings: list[JsonDict] = []
+        for path in self._scannable_files():
+            try:
+                lines = (self.repo_root / path).read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+            for line_number, line in enumerate(lines, start=1):
+                if self._is_allowed_placeholder_line(line):
+                    continue
+                for pattern_id, pattern, severity in self.SECRET_PATTERNS:
+                    if pattern.search(line):
+                        findings.append(
+                            {
+                                "finding_id": f"{pattern_id}:{path.as_posix()}:{line_number}",
+                                "file": path.as_posix(),
+                                "line": line_number,
+                                "pattern": pattern_id,
+                                "severity": severity,
+                                "redacted_excerpt": self._redacted_excerpt(line),
+                                "recommended_action": "Move any real credential to `.env` or a secret manager and rotate it before publishing.",
+                            }
+                        )
+        return findings
+
+    def _scannable_files(self) -> list[Path]:
+        allowed_suffixes = {".py", ".md", ".toml", ".txt", ".yaml", ".yml", ".json", ".ps1", ".mjs"}
+        ignored_parts = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache", "data", "dist", "build"}
+        paths = []
+        for path in self.repo_root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(self.repo_root)
+            if any(part in ignored_parts for part in relative.parts):
+                continue
+            if path.name in {"Makefile", ".env.example", ".gitignore"} or path.suffix in allowed_suffixes:
+                paths.append(relative)
+        return sorted(paths, key=lambda item: item.as_posix())
+
+    def _is_allowed_placeholder_line(self, line: str) -> bool:
+        lowered = line.lower()
+        placeholders = ["dev-local-token", "your_", "example", "placeholder", "redacted", "[present_redacted]"]
+        sample_command_markers = ["invoke-restmethod http://localhost", "curl.exe -s http://localhost"]
+        return any(marker in lowered for marker in placeholders) or any(
+            marker in lowered for marker in sample_command_markers
+        )
+
+    def _redacted_excerpt(self, line: str) -> str:
+        redacted = re.sub(r"(=|:)\s*['\"]?[A-Za-z0-9_./+=-]{8,}", r"\1 [REDACTED]", line)
+        redacted = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]", redacted)
+        return redacted.strip()[:160]
+
+    def _rotation_plan(self, provider_gate: JsonDict, secret_findings: list[JsonDict]) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "owner": "platform-sre",
+                "action": "Keep local acceptance on `LLM_PROVIDER=mock` until provider gate is ready.",
+                "trigger": provider_gate["status"],
+            },
+            {
+                "step": 2,
+                "owner": "security-reviewer",
+                "action": "Rotate any credential represented by high or medium confidence findings.",
+                "trigger": f"{len(secret_findings)} suspicious finding(s)",
+            },
+            {
+                "step": 3,
+                "owner": "release-manager",
+                "action": "Rerun pytest, ruff, eval, conformance, demo, and MCP commands after config changes.",
+                "trigger": "before promotion or external provider enablement",
+            },
+        ]
+
+    def _reviewer_checklist(self, report: ConfigHygieneReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Mock provider remains the default local acceptance path.",
+                "status": "pass" if report.summary["mock_provider"] else "warn",
+                "proof": f"Current provider: {report.summary['current_provider']}",
+            },
+            {
+                "item": "Secret values are redacted from generated artifacts.",
+                "status": "pass",
+                "proof": "Report exports presence/redacted markers only.",
+            },
+            {
+                "item": "Generated config hygiene artifacts stay ignored.",
+                "status": "pass" if any(check["marker"] == "data/config_hygiene/" and check["status"] == "pass" for check in report.gitignore_checks) else "fail",
+                "proof": "data/config_hygiene/",
+            },
+            {
+                "item": "External provider enablement has an approval gate.",
+                "status": "pass" if report.provider_gate["approval_gate"] else "fail",
+                "proof": report.provider_gate["approval_gate"],
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_conformance",
+            "Invoke-RestMethod http://localhost:8000/config/hygiene -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/config/hygiene-pack -Method POST -Headers $headers",
+            'rg "config/hygiene|Config Hygiene|config_hygiene" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\config_hygiene -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The scanner is local and regex-based; dedicated production secret scanning should still run in CI.",
+            "Process environment variables are checked for presence only and secret values are never exported.",
+            "Provider readiness remains static; no network call is made to OpenAI, Azure, or secret managers.",
+            "The default `dev-local-token` is acceptable only for local demos and must be overridden before shared deployment.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["config_hygiene_report"]
+        lines = [
+            "# Config Hygiene + Secret Rotation Pack",
+            "",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            f"- Current provider: `{report['summary']['current_provider']}`",
+            f"- Secret findings: `{report['summary']['secret_finding_count']}`",
+            f"- Secret values exported: `{report['summary']['secret_value_exported']}`",
+            "",
+            "## Provider Gate",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in report["provider_gate"].items()],
+            "",
+            "## Variables",
+            "",
+            "| Name | Required For | Secret | Exported Value | Recommendation |",
+            "| --- | --- | --- | --- | --- |",
+            *[
+                f"| `{row['name']}` | `{row['required_for']}` | `{row['secret']}` | `{row['exported_value']}` | {row['recommendation']} |"
+                for row in report["variables"]
+            ],
+            "",
+            "## Rotation Plan",
+            "",
+            *[f"- Step {step['step']} `{step['owner']}`: {step['action']}" for step in report["rotation_plan"]],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in report["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in report["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _read_text(self, path: Path) -> str:
+        target = self.repo_root / path
+        if not target.exists():
+            return ""
+        return target.read_text(encoding="utf-8")
+
+
 class PersistenceService:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path(".local") / "skill_hub_snapshot.json"
@@ -19406,6 +19873,7 @@ class AppState:
     slo: SkillSloService = field(init=False)
     invocation_sandbox: InvocationSandboxPolicyService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
+    config_hygiene: ConfigHygieneService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
     enterprise: EnterpriseReadinessService = field(init=False)
@@ -19470,6 +19938,7 @@ class AppState:
         self.invocation_sandbox = InvocationSandboxPolicyService(self)
         self.invocation_service.sandbox = self.invocation_sandbox
         self.provider_readiness = ProviderReadinessService(self)
+        self.config_hygiene = ConfigHygieneService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)
         self.enterprise = EnterpriseReadinessService(self)

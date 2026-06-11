@@ -862,6 +862,45 @@ class ProviderFallbackPackResult(BaseModel):
     summary: JsonDict
 
 
+class ConfigVariableRecord(BaseModel):
+    name: str
+    required_for: str
+    present_in_env_example: bool
+    present_in_process: bool
+    secret: bool
+    placeholder_safe: bool
+    exported_value: str
+    recommendation: str
+
+
+class ConfigHygieneReport(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    summary: JsonDict
+    variables: list[ConfigVariableRecord]
+    provider_gate: JsonDict
+    gitignore_checks: list[JsonDict] = Field(default_factory=list)
+    secret_findings: list[JsonDict] = Field(default_factory=list)
+    rotation_plan: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ConfigHygienePackRequest(BaseModel):
+    actor: str = "config-security-reviewer"
+
+
+class ConfigHygienePackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class PromptGovernanceValidationRequest(BaseModel):
     content: str
     target_id: str = "ad_hoc"

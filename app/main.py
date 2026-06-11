@@ -43,6 +43,9 @@ from app.models import (
     CircuitBreakerActionRequest,
     ComplianceAttestationRequest,
     ComplianceAttestationResult,
+    ConfigHygienePackRequest,
+    ConfigHygienePackResult,
+    ConfigHygieneReport,
     ConformanceReport,
     DashboardSmokeResult,
     DependencyMapResult,
@@ -413,6 +416,19 @@ def provider_fallback_pack(
     _: str = Depends(require_api_key),
 ) -> ProviderFallbackPackResult:
     return state.provider_readiness.fallback_pack(request or ProviderFallbackPackRequest())
+
+
+@app.get("/config/hygiene", response_model=ConfigHygieneReport)
+def config_hygiene(_: str = Depends(require_api_key)) -> ConfigHygieneReport:
+    return state.config_hygiene.report()
+
+
+@app.post("/config/hygiene-pack", response_model=ConfigHygienePackResult)
+def config_hygiene_pack(
+    request: ConfigHygienePackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ConfigHygienePackResult:
+    return state.config_hygiene.pack(request or ConfigHygienePackRequest())
 
 
 @app.get("/prompt-governance/report", response_model=PromptGovernanceReport)
