@@ -5,6 +5,7 @@ import json
 
 from app.bootstrap import create_state
 from app.models import (
+    ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
     AuditPackRequest,
@@ -244,6 +245,9 @@ async def main() -> None:
     api_reviewer_collection = state.api_contracts.reviewer_collection(
         ApiReviewerCollectionRequest(actor="demo-api-contract-reviewer")
     )
+    api_contract_drift_pack = state.api_contracts.contract_drift_pack(
+        ApiContractDriftPackRequest(actor="demo-contract-drift-reviewer")
+    )
     print(
         json.dumps(
             {
@@ -455,8 +459,12 @@ async def main() -> None:
                 "api_contract_audit_status": api_contract_audit.readiness_status,
                 "api contract route count": api_contract_audit.openapi_route_count,
                 "api_contract_route_count": api_contract_audit.openapi_route_count,
+                "api contract drift status": api_contract_audit.contract_drift["status"],
+                "api_contract_drift_status": api_contract_audit.contract_drift["status"],
                 "reviewer collection path": api_reviewer_collection.markdown_path,
                 "reviewer_collection_path": api_reviewer_collection.markdown_path,
+                "contract drift pack path": api_contract_drift_pack.markdown_path,
+                "contract_drift_pack_path": api_contract_drift_pack.markdown_path,
             },
             indent=2,
         )

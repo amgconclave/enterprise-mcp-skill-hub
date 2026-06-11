@@ -66,8 +66,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /portfolio/interview-pack` - writes a Markdown and JSON Interview Pack under ignored local folder `data/portfolio_packs/`.
 - `GET /reviewer/quickstart` - returns exact local setup commands, one-command demo, verification commands, endpoint walkthrough order, MCP command walkthrough, artifact proof map, expected outputs, troubleshooting, and role-specific reviewer notes.
 - `POST /reviewer/walkthrough-pack` - writes the Reviewer Walkthrough Pack Markdown and JSON under ignored local folder `data/reviewer_packs/`.
-- `GET /api/contract-audit` - returns the API Contract audit with OpenAPI route count, auth-protected endpoint count, docs/api coverage, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP tools/resources/prompts coverage, missing-docs warnings, deprecated/duplicate route warnings, and local-only limitations.
+- `GET /api/contract-audit` - returns the API Contract audit with OpenAPI route count, auth-protected endpoint count, docs/api coverage, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP tools/resources/prompts coverage, contract drift summary, missing-docs warnings, deprecated/duplicate route warnings, and local-only limitations.
 - `POST /api/reviewer-collection` - writes the API Contract Reviewer Collection Pack Markdown and JSON under ignored local folder `data/api_contracts/`.
+- `POST /api/contract-drift-pack` - writes the Tool Contract Drift Pack Markdown and JSON under ignored local folder `data/api_contracts/`; it compares promoted manifests, MCP tool schemas, manifest versions, and the generic FastAPI invocation contract with remediation notes.
 - `GET /artifacts/inventory` - returns generated artifact directories, latest local files, producer endpoints/commands, ignored status, reviewer purpose, and freshness notes across MCP proof artifacts.
 - `POST /artifacts/readme-checklist` - writes the Artifact Inventory and README Checklist Markdown/JSON under ignored local folder `data/artifact_indexes/`.
 - `GET /ui/dashboard-smoke` - returns deterministic Dashboard Smoke source checks for expected Streamlit views, endpoint references, generated artifact tabs, local run commands, MCP proof surfaces, and limitations.
@@ -551,11 +552,18 @@ Invoke-RestMethod http://localhost:8000/api/reviewer-collection `
   -Headers $headers `
   -ContentType "application/json" `
   -Body '{"actor":"api-contract-reviewer"}'
+Invoke-RestMethod http://localhost:8000/api/contract-drift-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"contract-drift-reviewer"}'
 ```
 
-The API Contract audit response includes `audit_id`, readiness, score, OpenAPI route count, protected endpoint count, endpoint inventory grouped by domain, docs/api coverage, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP inventory and coverage, missing docs warnings, deprecated/duplicate route warnings, local-only limitations, and verification commands.
+The API Contract audit response includes `audit_id`, readiness, score, OpenAPI route count, protected endpoint count, endpoint inventory grouped by domain, docs/api coverage, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP inventory and coverage, contract drift summary, missing docs warnings, deprecated/duplicate route warnings, local-only limitations, and verification commands.
 
 The Reviewer Collection export writes `reviewer_collection_latest.json` and `reviewer_collection_latest.md` under ignored `data/api_contracts/`. It includes grouped endpoint inventory, MCP tool/resource/prompt inventory, sample PowerShell and curl commands with `X-API-Key`, the demo-token flow, MCP CLI commands, expected status codes, auth notes, generated artifact endpoints, one-command verification order, and recruiter/engineer explanations.
+
+The Tool Contract Drift Pack export writes `contract_drift_pack_latest.json` and `contract_drift_pack_latest.md` under ignored `data/api_contracts/`. It fingerprints promoted manifest input/output schemas, MCP tool input/output schemas, MCP version annotations, registry manifest hashes, and the generic FastAPI `InvokeSkillRequest`/`SkillInvocation` governance fields. It uses tool registry and tool governance patterns to keep manifests as the source of truth, then emits a remediation plan for stale MCP schemas, missing promoted tools, intentionally hidden skills, or FastAPI trace/governance field gaps.
 
 ## API Smoke Matrix And Launch Checklist
 

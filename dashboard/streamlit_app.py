@@ -10,6 +10,7 @@ import yaml
 from app.bootstrap import create_state
 from app.evals.golden import GoldenEvalRunner, load_cases
 from app.models import (
+    ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
     AuditPackRequest,
@@ -1114,7 +1115,7 @@ elif view == "Artifact Inventory":
 
 elif view == "API Contract":
     st.subheader("API Contract")
-    st.caption("Audit OpenAPI route coverage, protected endpoints, docs alignment, generated artifacts, demo flow, and MCP inventory.")
+    st.caption("Audit OpenAPI route coverage, protected endpoints, docs alignment, generated artifacts, demo flow, MCP inventory, and tool contract drift.")
     audit = state.api_contracts.contract_audit()
     col_ready, col_score, col_routes, col_auth = st.columns(4)
     col_ready.metric("Readiness", audit.readiness_status.upper())
@@ -1122,8 +1123,8 @@ elif view == "API Contract":
     col_routes.metric("OpenAPI routes", audit.openapi_route_count)
     col_auth.metric("Protected", audit.auth_protected_endpoint_count)
 
-    tab_checks, tab_endpoints, tab_mcp, tab_collection, tab_json = st.tabs(
-        ["Checks", "Endpoints", "MCP", "Reviewer Collection", "Audit JSON"]
+    tab_checks, tab_endpoints, tab_mcp, tab_drift, tab_collection, tab_json = st.tabs(
+        ["Checks", "Endpoints", "MCP", "Contract Drift", "Reviewer Collection", "Audit JSON"]
     )
     with tab_checks:
         st.dataframe(
@@ -1170,6 +1171,26 @@ elif view == "API Contract":
     with tab_mcp:
         st.json(audit.mcp_inventory)
         st.json(audit.mcp_coverage)
+    with tab_drift:
+        drift = audit.contract_drift
+        col_status, col_drift, col_warn = st.columns(3)
+        col_status.metric("Drift status", drift["status"])
+        col_drift.metric("Blocking drift", drift["drift_count"])
+        col_warn.metric("Warnings", drift["warning_count"])
+        st.dataframe(drift["mcp_manifest_matrix"], use_container_width=True, hide_index=True)
+        st.json(
+            {
+                "fastapi_contract": drift["fastapi_contract"],
+                "remediation_plan": drift["remediation_plan"],
+                "governance_patterns": drift["governance_patterns"],
+            }
+        )
+        drift_actor = st.text_input("Drift pack actor", value="streamlit-contract-drift-reviewer")
+        if st.button("Export Contract Drift Pack", use_container_width=True):
+            export = state.api_contracts.contract_drift_pack(ApiContractDriftPackRequest(actor=drift_actor))
+            st.success("Contract Drift Pack exported.")
+            st.write(f"Artifact path: `{export.markdown_path}`")
+            st.json(export.model_dump(mode="json"))
     with tab_collection:
         st.caption("Writes Markdown and JSON under data/api_contracts/.")
         actor = st.text_input("Collection actor", value="streamlit-api-contract-reviewer")

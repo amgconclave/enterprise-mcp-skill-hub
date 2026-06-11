@@ -351,10 +351,11 @@ The API Contract audit gives reviewers a generated contract snapshot:
 $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers
 Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers
 Get-ChildItem -Recurse -File data\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
 ```
 
-The audit checks OpenAPI route count, auth-protected endpoint count, docs/api coverage for important endpoints, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP tools/resources/prompts coverage, missing docs warnings, duplicate/deprecated route warnings, and local-only limitations. The Reviewer Collection writes `reviewer_collection_latest.json` and `.md` under ignored `data/api_contracts/` with endpoint inventory, MCP inventory, sample `X-API-Key` commands, demo-token flow, MCP CLI commands, expected status codes, auth notes, generated artifact endpoints, one-command verification order, and recruiter/engineer explanation.
+The audit checks OpenAPI route count, auth-protected endpoint count, docs/api coverage for important endpoints, dashboard smoke alignment, generated artifact endpoint coverage, demo flow endpoint coverage, MCP tools/resources/prompts coverage, tool contract drift, missing docs warnings, duplicate/deprecated route warnings, and local-only limitations. The Reviewer Collection writes `reviewer_collection_latest.json` and `.md` under ignored `data/api_contracts/` with endpoint inventory, MCP inventory, sample `X-API-Key` commands, demo-token flow, MCP CLI commands, expected status codes, auth notes, generated artifact endpoints, one-command verification order, and recruiter/engineer explanation. The Contract Drift Pack writes `contract_drift_pack_latest.json` and `.md` in the same folder with FastAPI invoke schema hashes, MCP-vs-manifest schema fingerprints, manifest version evidence, tool governance notes, and remediation actions.
 
 ## Final Handoff Evidence
 

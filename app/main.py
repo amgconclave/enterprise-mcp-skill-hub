@@ -12,6 +12,8 @@ from app.models import (
     AgentRun,
     AgentRunRequest,
     ApiContractAuditResult,
+    ApiContractDriftPackRequest,
+    ApiContractDriftPackResult,
     ApiReviewerCollectionRequest,
     ApiReviewerCollectionResult,
     ArtifactInventoryResult,
@@ -442,6 +444,14 @@ def api_reviewer_collection(
     _: str = Depends(require_api_key),
 ) -> ApiReviewerCollectionResult:
     return state.api_contracts.reviewer_collection(request or ApiReviewerCollectionRequest())
+
+
+@app.post("/api/contract-drift-pack", response_model=ApiContractDriftPackResult)
+def api_contract_drift_pack(
+    request: ApiContractDriftPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ApiContractDriftPackResult:
+    return state.api_contracts.contract_drift_pack(request or ApiContractDriftPackRequest())
 
 
 @app.get("/artifacts/inventory", response_model=ArtifactInventoryResult)

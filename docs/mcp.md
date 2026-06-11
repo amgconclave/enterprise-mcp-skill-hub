@@ -164,3 +164,5 @@ python -m app.mcp_server prompts
 `GET /api/contract-audit` includes MCP tools/resources/prompts inventory and verifies the local proof commands stay aligned with FastAPI endpoints, dashboard smoke, docs/api, generated artifacts, and demo flow expectations.
 
 `POST /api/reviewer-collection` writes the MCP Reviewer Collection into ignored `data/api_contracts/reviewer_collection_latest.json` and `.md`. The pack includes MCP CLI commands, sample `X-API-Key` API calls, generated artifact endpoints, expected status codes, auth notes, and recruiter/engineer explanations for fresh-clone review.
+
+`POST /api/contract-drift-pack` writes `contract_drift_pack_latest.json` and `.md` in the same folder. It fingerprints promoted manifest schemas, MCP tool schemas, MCP version annotations, registry manifest hashes, and the generic FastAPI invocation contract so reviewers can spot stale tool contracts before agents discover them. The remediation section follows tool registry and tool governance patterns: manifests are the source of truth, MCP exposure is derived from promoted manifests, and every drift row has a specific action.

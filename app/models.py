@@ -994,6 +994,7 @@ class ApiContractAuditResult(BaseModel):
     demo_flow_endpoint_coverage: list[JsonDict] = Field(default_factory=list)
     mcp_inventory: JsonDict
     mcp_coverage: JsonDict
+    contract_drift: JsonDict = Field(default_factory=dict)
     missing_docs_warnings: list[str] = Field(default_factory=list)
     deprecated_duplicate_route_warnings: list[str] = Field(default_factory=list)
     local_only_limitations: list[str] = Field(default_factory=list)
@@ -1008,6 +1009,20 @@ class ApiReviewerCollectionResult(BaseModel):
     collection_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class ApiContractDriftPackRequest(BaseModel):
+    actor: str = "contract-drift-reviewer"
+
+
+class ApiContractDriftPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
     json_path: str
     markdown_path: str
     summary: JsonDict

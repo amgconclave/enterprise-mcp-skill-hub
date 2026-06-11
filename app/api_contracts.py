@@ -4,17 +4,22 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from app.models import (
     ApiContractAuditResult,
     ApiContractCheck,
+    ApiContractDriftPackRequest,
+    ApiContractDriftPackResult,
     ApiReviewerCollectionRequest,
     ApiReviewerCollectionResult,
     CiDoctorCheckStatus,
+    InvokeSkillRequest,
     JsonDict,
     SecurityReadinessStatus,
+    SkillInvocation,
 )
 from app.utils import new_trace_id, utc_now
 
@@ -22,6 +27,7 @@ from app.utils import new_trace_id, utc_now
 class ApiContractService:
     AUDIT_ID = "api_contract_audit_latest"
     COLLECTION_ID = "reviewer_collection_latest"
+    DRIFT_PACK_ID = "contract_drift_pack_latest"
 
     IMPORTANT_ENDPOINTS = [
         ("POST", "/auth/demo-token"),
@@ -59,6 +65,7 @@ class ApiContractService:
         ("GET", "/artifacts/inventory"),
         ("GET", "/api/contract-audit"),
         ("POST", "/api/reviewer-collection"),
+        ("POST", "/api/contract-drift-pack"),
         ("GET", "/handoff/final-audit"),
         ("POST", "/handoff/final-pack"),
         ("GET", "/runtime/demo-readiness"),
@@ -96,6 +103,7 @@ class ApiContractService:
         ("POST", "/ui/verification-pack"),
         ("GET", "/api/contract-audit"),
         ("POST", "/api/reviewer-collection"),
+        ("POST", "/api/contract-drift-pack"),
     ]
 
     def __init__(
@@ -117,6 +125,7 @@ class ApiContractService:
         demo_coverage = self._demo_flow_endpoint_coverage(route_keys)
         mcp_inventory = self._mcp_inventory()
         mcp_coverage = self._mcp_coverage(mcp_inventory)
+        contract_drift = self._contract_drift(route_keys, mcp_inventory)
         missing_docs = [
             f"{item['method']} {item['path']} is missing from docs/api.md."
             for item in docs_coverage
@@ -131,6 +140,7 @@ class ApiContractService:
             demo_coverage,
             mcp_inventory,
             mcp_coverage,
+            contract_drift,
             missing_docs,
             duplicate_deprecated_warnings,
         )
@@ -156,6 +166,9 @@ class ApiContractService:
             "mcp_tool_count": mcp_inventory["tool_count"],
             "mcp_resource_count": mcp_inventory["resource_count"],
             "mcp_prompt_count": mcp_inventory["prompt_count"],
+            "contract_drift_status": contract_drift["status"],
+            "contract_drift_count": contract_drift["drift_count"],
+            "contract_warning_count": contract_drift["warning_count"],
             "warning_count": warn_count,
             "fail_count": fail_count,
             "artifact_root": str(self.output_dir),
@@ -176,6 +189,7 @@ class ApiContractService:
             demo_flow_endpoint_coverage=demo_coverage,
             mcp_inventory=mcp_inventory,
             mcp_coverage=mcp_coverage,
+            contract_drift=contract_drift,
             missing_docs_warnings=missing_docs,
             deprecated_duplicate_route_warnings=duplicate_deprecated_warnings,
             local_only_limitations=self._limitations(),
@@ -196,6 +210,7 @@ class ApiContractService:
             "contract_audit": audit.model_dump(mode="json"),
             "endpoint_inventory_grouped_by_domain": audit.endpoint_inventory_by_domain,
             "mcp_inventory": audit.mcp_inventory,
+            "contract_drift": audit.contract_drift,
             "sample_commands": self._sample_commands(),
             "demo_token_flow": self._demo_token_flow(),
             "mcp_cli_commands": self._mcp_cli_commands(),
@@ -236,6 +251,64 @@ class ApiContractService:
                 "route_count": audit.openapi_route_count,
                 "protected_endpoint_count": audit.auth_protected_endpoint_count,
                 "mcp_tool_count": audit.mcp_inventory["tool_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def contract_drift_pack(
+        self,
+        request: ApiContractDriftPackRequest | None = None,
+    ) -> ApiContractDriftPackResult:
+        request = request or ApiContractDriftPackRequest()
+        audit = self.contract_audit()
+        drift = audit.contract_drift
+        bundle = {
+            "pack_id": self.DRIFT_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": audit.readiness_status,
+            "score": audit.score,
+            "contract_drift": drift,
+            "fastapi_contract": drift["fastapi_contract"],
+            "mcp_manifest_matrix": drift["mcp_manifest_matrix"],
+            "remediation_plan": drift["remediation_plan"],
+            "governance_patterns": drift["governance_patterns"],
+            "local_verification_commands": self._verification_commands(),
+            "limitations": audit.local_only_limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.DRIFT_PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.DRIFT_PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._drift_markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "api.contract_drift_pack_exported",
+            "api_contract_drift_pack",
+            self.DRIFT_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "drift_count": drift["drift_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ApiContractDriftPackResult(
+            pack_id=self.DRIFT_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=audit.readiness_status,
+            score=audit.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": audit.readiness_status,
+                "score": audit.score,
+                "contract_drift_status": drift["status"],
+                "drift_count": drift["drift_count"],
+                "warning_count": drift["warning_count"],
                 "json_path": str(json_path),
                 "markdown_path": str(markdown_path),
             },
@@ -368,8 +441,12 @@ class ApiContractService:
                 {
                     "name": tool.name,
                     "description": tool.description,
+                    "version": tool.annotations.get("version"),
                     "input_schema_keys": sorted(tool.input_schema.get("properties", {}).keys()),
                     "output_schema_keys": sorted(tool.output_schema.get("properties", {}).keys()),
+                    "input_schema_hash": self._schema_hash(tool.input_schema),
+                    "output_schema_hash": self._schema_hash(tool.output_schema),
+                    "annotations": tool.annotations,
                 }
                 for tool in tools
             ],
@@ -416,6 +493,7 @@ class ApiContractService:
         demo_coverage: list[JsonDict],
         mcp_inventory: JsonDict,
         mcp_coverage: JsonDict,
+        contract_drift: JsonDict,
         missing_docs: list[str],
         duplicate_deprecated_warnings: list[str],
     ) -> list[ApiContractCheck]:
@@ -427,6 +505,9 @@ class ApiContractService:
             item["producer_endpoint"] for item in artifact_coverage if not item["implemented"]
         ]
         demo_missing = [f"{item['method']} {item['path']}" for item in demo_coverage if not item["implemented"]]
+        drift_status = "fail" if contract_drift["drift_count"] else "pass"
+        if contract_drift["warning_count"] and drift_status == "pass":
+            drift_status = "warn"
         return [
             self._check(
                 "openapi_route_count",
@@ -492,6 +573,19 @@ class ApiContractService:
                 "Promote at least one skill and keep MCP resources/prompts registered.",
             ),
             self._check(
+                "tool_contract_drift",
+                "contract drift",
+                "Tool contract drift",
+                drift_status,
+                f"{contract_drift['drift_count']} blocking drift item(s), {contract_drift['warning_count']} warning(s), and {contract_drift['aligned_count']} aligned promoted tool(s).",
+                [
+                    f"{item['skill_id']}: {item['status']}"
+                    for item in contract_drift["mcp_manifest_matrix"]
+                    if item["status"] != "aligned"
+                ][:10],
+                "Regenerate MCP tool schemas from promoted manifests, update docs for version changes, and export the Contract Drift Pack.",
+            ),
+            self._check(
                 "missing_docs_warnings",
                 "docs",
                 "Missing docs warnings",
@@ -540,6 +634,184 @@ class ApiContractService:
             remediation=None if status == "pass" else remediation,
         )
 
+    def _contract_drift(self, route_keys: set[tuple[str, str]], mcp_inventory: JsonDict) -> JsonDict:
+        matrix = self._mcp_manifest_matrix()
+        fastapi_contract = self._fastapi_contract_summary(route_keys)
+        drift_count = sum(1 for item in matrix if item["status"] == "drift")
+        warning_count = sum(1 for item in matrix if item["status"] == "warning")
+        aligned_count = sum(1 for item in matrix if item["status"] == "aligned")
+        remediation_plan = self._drift_remediation(matrix, fastapi_contract)
+        status = "drift_detected" if drift_count else "aligned"
+        if warning_count and not drift_count:
+            status = "needs_review"
+        return {
+            "status": status,
+            "drift_count": drift_count,
+            "warning_count": warning_count,
+            "aligned_count": aligned_count,
+            "promoted_manifest_count": len(self.app_state.registry.mcp_exposed()),
+            "mcp_tool_count": mcp_inventory["tool_count"],
+            "fastapi_contract": fastapi_contract,
+            "mcp_manifest_matrix": matrix,
+            "remediation_plan": remediation_plan,
+            "governance_patterns": [
+                "tool registry: promoted manifests remain the source of truth for MCP tool schemas.",
+                "tool governance: each exposed tool carries schema hashes, version evidence, and remediation notes.",
+                "handoffs: the drift pack writes local JSON/Markdown artifacts for reviewer sign-off.",
+            ],
+        }
+
+    def _mcp_manifest_matrix(self) -> list[JsonDict]:
+        tools = {tool.name: tool for tool in self.app_state.mcp.list_tools()}
+        rows = []
+        for manifest in self.app_state.registry.list():
+            tool = tools.get(manifest.id)
+            manifest_input_hash = self._schema_hash(manifest.input_schema)
+            manifest_output_hash = self._schema_hash(manifest.output_schema)
+            latest_version = self.app_state.registry.versions(manifest.id)[-1]
+            if not self.app_state.registry.is_mcp_exposed(manifest):
+                rows.append(
+                    {
+                        "skill_id": manifest.id,
+                        "status": "warning",
+                        "mcp_exposed": False,
+                        "manifest_version": manifest.version,
+                        "latest_registry_version": latest_version.version,
+                        "manifest_hash": latest_version.manifest_hash,
+                        "manifest_input_schema_hash": manifest_input_hash,
+                        "manifest_output_schema_hash": manifest_output_hash,
+                        "mcp_input_schema_hash": None,
+                        "mcp_output_schema_hash": None,
+                        "drift_reasons": ["Skill is not promoted/enabled for MCP exposure."],
+                        "remediation": "Promote the skill if agents should discover it, or leave it hidden intentionally.",
+                    }
+                )
+                continue
+            if tool is None:
+                rows.append(
+                    {
+                        "skill_id": manifest.id,
+                        "status": "drift",
+                        "mcp_exposed": False,
+                        "manifest_version": manifest.version,
+                        "latest_registry_version": latest_version.version,
+                        "manifest_hash": latest_version.manifest_hash,
+                        "manifest_input_schema_hash": manifest_input_hash,
+                        "manifest_output_schema_hash": manifest_output_hash,
+                        "mcp_input_schema_hash": None,
+                        "mcp_output_schema_hash": None,
+                        "drift_reasons": ["Promoted manifest is missing from MCP tool registry."],
+                        "remediation": "Ensure McpToolAdapter.list_tools reads promoted manifests and validates their schemas.",
+                    }
+                )
+                continue
+            tool_input_hash = self._schema_hash(tool.input_schema)
+            tool_output_hash = self._schema_hash(tool.output_schema)
+            reasons = []
+            if tool.annotations.get("version") != manifest.version:
+                reasons.append("MCP annotation version does not match manifest version.")
+            if tool_input_hash != manifest_input_hash:
+                reasons.append("MCP input schema hash differs from manifest input schema hash.")
+            if tool_output_hash != manifest_output_hash:
+                reasons.append("MCP output schema hash differs from manifest output schema hash.")
+            rows.append(
+                {
+                    "skill_id": manifest.id,
+                    "status": "drift" if reasons else "aligned",
+                    "mcp_exposed": True,
+                    "manifest_version": manifest.version,
+                    "mcp_version": tool.annotations.get("version"),
+                    "latest_registry_version": latest_version.version,
+                    "manifest_hash": latest_version.manifest_hash,
+                    "manifest_input_schema_hash": manifest_input_hash,
+                    "manifest_output_schema_hash": manifest_output_hash,
+                    "mcp_input_schema_hash": tool_input_hash,
+                    "mcp_output_schema_hash": tool_output_hash,
+                    "input_schema_keys": sorted(manifest.input_schema.get("properties", {}).keys()),
+                    "output_schema_keys": sorted(manifest.output_schema.get("properties", {}).keys()),
+                    "drift_reasons": reasons,
+                    "remediation": (
+                        "Regenerate the MCP tool definition from the promoted manifest."
+                        if reasons
+                        else "No remediation required."
+                    ),
+                }
+            )
+        return rows
+
+    def _fastapi_contract_summary(self, route_keys: set[tuple[str, str]]) -> JsonDict:
+        request_schema = InvokeSkillRequest.model_json_schema()
+        response_schema = SkillInvocation.model_json_schema()
+        request_fields = sorted(request_schema.get("properties", {}).keys())
+        response_fields = sorted(response_schema.get("properties", {}).keys())
+        required_routes = {
+            "invoke_skill": ("POST", "/skills/{skill_id}/invoke"),
+            "mcp_tools": ("GET", "/mcp/tools"),
+            "contract_audit": ("GET", "/api/contract-audit"),
+            "contract_drift_pack": ("POST", "/api/contract-drift-pack"),
+        }
+        route_alignment = {
+            name: {"method": method, "path": path, "implemented": (method, path) in route_keys}
+            for name, (method, path) in required_routes.items()
+        }
+        governance_fields = ["input", "actor", "policy_context"]
+        trace_fields = ["skill_id", "version", "trace_id", "token_usage", "latency_ms"]
+        missing_request_fields = [field for field in governance_fields if field not in request_fields]
+        missing_response_fields = [field for field in trace_fields if field not in response_fields]
+        return {
+            "invoke_endpoint": route_alignment["invoke_skill"],
+            "route_alignment": route_alignment,
+            "request_model": "InvokeSkillRequest",
+            "response_model": "SkillInvocation",
+            "request_schema_hash": self._schema_hash(request_schema),
+            "response_schema_hash": self._schema_hash(response_schema),
+            "request_fields": request_fields,
+            "response_fields": response_fields,
+            "missing_governance_request_fields": missing_request_fields,
+            "missing_trace_response_fields": missing_response_fields,
+            "status": "aligned" if not missing_request_fields and not missing_response_fields else "warning",
+            "note": "FastAPI exposes a governed generic skill invocation contract; per-skill JSON schemas remain in manifests and MCP tools.",
+        }
+
+    def _drift_remediation(self, matrix: list[JsonDict], fastapi_contract: JsonDict) -> list[JsonDict]:
+        plan = []
+        for item in matrix:
+            if item["status"] == "aligned":
+                continue
+            plan.append(
+                {
+                    "target": item["skill_id"],
+                    "severity": "blocker" if item["status"] == "drift" else "review",
+                    "reason": "; ".join(item["drift_reasons"]),
+                    "action": item["remediation"],
+                }
+            )
+        if fastapi_contract["status"] != "aligned":
+            plan.append(
+                {
+                    "target": "FastAPI invocation contract",
+                    "severity": "review",
+                    "reason": "Generic invoke request/response model is missing governance or trace fields.",
+                    "action": "Restore input, actor, policy_context, skill_id, version, trace_id, token_usage, and latency fields.",
+                }
+            )
+        if not plan:
+            plan.append(
+                {
+                    "target": "contract surfaces",
+                    "severity": "none",
+                    "reason": "Promoted manifest schemas, MCP tool schemas, and FastAPI governance fields are aligned.",
+                    "action": "Regenerate this pack before release or after manifest/schema changes.",
+                }
+            )
+        return plan
+
+    def _schema_hash(self, schema: JsonDict) -> str:
+        return sha256(self._canonical_json(schema).encode("utf-8")).hexdigest()[:16]
+
+    def _canonical_json(self, payload: JsonDict) -> str:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
     def _deprecated_duplicate_route_warnings(self, routes: list[JsonDict]) -> list[str]:
         counts = Counter((route["method"], route["path"]) for route in routes)
         warnings = [
@@ -561,6 +833,7 @@ class ApiContractService:
             {"method": "GET", "path": "/skills", "with_api_key": False, "expected_status": 401},
             {"method": "GET", "path": "/skills", "with_api_key": True, "expected_status": 200},
             {"method": "GET", "path": "/api/contract-audit", "with_api_key": True, "expected_status": 200},
+            {"method": "POST", "path": "/api/contract-drift-pack", "with_api_key": True, "expected_status": 200},
             {"method": "GET", "path": "/marketplace/catalog", "with_api_key": True, "expected_status": 200},
             {"method": "GET", "path": "/skills/compatibility", "with_api_key": True, "expected_status": 200},
             {
@@ -627,6 +900,7 @@ class ApiContractService:
                 "$token = Invoke-RestMethod http://localhost:8000/auth/demo-token -Method POST",
                 "$headers = @{ $token.header = $token.token }",
                 "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
                 "Invoke-RestMethod http://localhost:8000/skills/compatibility -Headers $headers",
@@ -647,6 +921,7 @@ class ApiContractService:
             "curl": [
                 "curl.exe -s -X POST http://localhost:8000/auth/demo-token",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-audit",
+                "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/api/contract-drift-pack",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/catalog",
                 "curl.exe -s -X POST -H \"X-API-Key: dev-local-token\" http://localhost:8000/marketplace/rollout-pack",
                 "curl.exe -s -H \"X-API-Key: dev-local-token\" http://localhost:8000/skills/compatibility",
@@ -715,6 +990,7 @@ class ApiContractService:
             "python -m app.mcp_server tools",
             "python -m app.mcp_server resources",
             "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers",
             'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             'rg "skills/compatibility|compatibility-pack|Skill Compatibility|compatibility_packs|deprecated skill|migration recommendations" app dashboard docs README.md tests scripts sample_data',
             'rg "usage/analytics|usage/chargeback-pack|Skill Usage|Cost Chargeback|usage_packs|chargeback" app dashboard docs README.md tests scripts sample_data',
@@ -877,6 +1153,7 @@ class ApiContractService:
             "/privacy/retention-pack": "state.privacy_retention.pack",
             "/api/contract-audit": "state.api_contracts.contract_audit",
             "/api/reviewer-collection": "state.api_contracts.reviewer_collection",
+            "/api/contract-drift-pack": "state.api_contracts.contract_drift_pack",
         }
         return hints.get(path, path)
 
@@ -892,12 +1169,64 @@ class ApiContractService:
         if "dashboard_smoke" in command:
             return "Dashboard API Contract tab and endpoint references are wired."
         if "app.demo" in command:
-            return "Demo prints contract audit status and Reviewer Collection path."
+            return "Demo prints contract audit status, drift status, and Reviewer Collection path."
         if "mcp_server" in command:
             return "MCP CLI prints non-empty tools/resources/prompts JSON."
         if command.startswith("rg "):
             return "Source, docs, dashboard, tests, and scripts mention the contract surface."
         return "Generated data/api_contracts artifacts are present after POST /api/reviewer-collection."
+
+    def _drift_markdown(self, bundle: JsonDict) -> str:
+        drift = bundle["contract_drift"]
+        lines = [
+            "# Tool Contract Drift Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            f"- Drift status: `{drift['status']}`",
+            f"- Drift count: `{drift['drift_count']}`",
+            f"- Warning count: `{drift['warning_count']}`",
+            "",
+            "## FastAPI Contract",
+            "",
+            f"- Request model: `{bundle['fastapi_contract']['request_model']}` hash `{bundle['fastapi_contract']['request_schema_hash']}`",
+            f"- Response model: `{bundle['fastapi_contract']['response_model']}` hash `{bundle['fastapi_contract']['response_schema_hash']}`",
+            f"- Status: `{bundle['fastapi_contract']['status']}`",
+            f"- Note: {bundle['fastapi_contract']['note']}",
+            "",
+            "## MCP Manifest Matrix",
+            "",
+            "| Skill | Status | Manifest Version | MCP Version | Input Hash | Output Hash |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| `{item['skill_id']}` | `{item['status']}` | `{item['manifest_version']}` | `{item.get('mcp_version') or 'n/a'}` | `{item['manifest_input_schema_hash']}` | `{item['manifest_output_schema_hash']}` |"
+                for item in bundle["mcp_manifest_matrix"]
+            ],
+            "",
+            "## Remediation Plan",
+            "",
+            *[
+                f"- `{item['severity']}` {item['target']}: {item['reason']} Action: {item['action']}"
+                for item in bundle["remediation_plan"]
+            ],
+            "",
+            "## Governance Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["governance_patterns"]],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
 
     def _score(self, checks: list[ApiContractCheck]) -> int:
         total = len(checks) or 1

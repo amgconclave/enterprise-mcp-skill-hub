@@ -14714,6 +14714,7 @@ class DashboardSmokeService:
             self._endpoint_ref("supply_chain_pack", "POST", "/supply-chain/pack", "Writes Supply Chain governance artifacts."),
             self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
             self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
+            self._endpoint_ref("api_contract_drift_pack", "POST", "/api/contract-drift-pack", "Writes Tool Contract Drift Pack artifacts."),
         ]
 
     def _endpoint_ref(self, ref_id: str, method: str, path: str, purpose: str) -> JsonDict:
@@ -15243,8 +15244,23 @@ class ArtifactInventoryService:
                 Path("data") / "api_contracts",
                 "POST /api/reviewer-collection",
                 "Invoke-RestMethod http://localhost:8000/api/reviewer-collection -Method POST -Headers $headers",
-                ["reviewer_collection_latest.json", "reviewer_collection_latest.md"],
+                [
+                    "reviewer_collection_latest.json",
+                    "reviewer_collection_latest.md",
+                ],
                 "OpenAPI route inventory, auth status, docs coverage, dashboard alignment, MCP inventory, sample commands, and reviewer explanations.",
+            ),
+            self._catalog_row(
+                "api_contract_drift",
+                "Tool Contract Drift Pack",
+                Path("data") / "api_contracts",
+                "POST /api/contract-drift-pack",
+                "Invoke-RestMethod http://localhost:8000/api/contract-drift-pack -Method POST -Headers $headers",
+                [
+                    "contract_drift_pack_latest.json",
+                    "contract_drift_pack_latest.md",
+                ],
+                "FastAPI invoke schema hashes, MCP-vs-manifest schema fingerprints, manifest version checks, tool governance notes, and remediation actions.",
             ),
             self._catalog_row(
                 "launch_checklists",
