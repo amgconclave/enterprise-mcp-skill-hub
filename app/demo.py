@@ -16,6 +16,7 @@ from app.models import (
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
+    GovernedSkillPlatformPackRequest,
     InvocationSandboxPackRequest,
     LaunchChecklistRequest,
     MarketplaceRolloutPackRequest,
@@ -185,6 +186,10 @@ async def main() -> None:
     provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
     provider_fallback_pack = state.provider_readiness.fallback_pack(
         ProviderFallbackPackRequest(actor="demo-provider-reviewer")
+    )
+    platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
+    platform_pack_export = await state.platform_pack.export(
+        GovernedSkillPlatformPackRequest(actor="demo-platform-owner")
     )
     invocation_sandbox_report = state.invocation_sandbox.report()
     invocation_sandbox_pack = state.invocation_sandbox.pack(
@@ -377,6 +382,12 @@ async def main() -> None:
                 "provider_current": provider_readiness.current_provider["name"],
                 "provider fallback pack path": provider_fallback_pack.markdown_path,
                 "provider_fallback_pack_path": provider_fallback_pack.markdown_path,
+                "platform pack readiness": platform_pack_report.readiness_status,
+                "platform_pack_readiness": platform_pack_report.readiness_status,
+                "platform pack controls": len(platform_pack_report.capability_controls),
+                "platform_pack_controls": len(platform_pack_report.capability_controls),
+                "platform pack path": platform_pack_export.markdown_path,
+                "platform_pack_path": platform_pack_export.markdown_path,
                 "invocation sandbox readiness": invocation_sandbox_report.readiness_status,
                 "invocation_sandbox_readiness": invocation_sandbox_report.readiness_status,
                 "invocation sandbox denied decisions": invocation_sandbox_report.summary[

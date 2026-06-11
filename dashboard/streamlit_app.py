@@ -26,6 +26,7 @@ from app.models import (
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
+    GovernedSkillPlatformPackRequest,
     InvocationSandboxEvaluateRequest,
     InvocationSandboxPackRequest,
     LaunchChecklistRequest,
@@ -93,6 +94,7 @@ view = st.sidebar.radio(
         "Skill Reliability",
         "Skill SLO",
         "Provider Readiness",
+        "Platform Pack",
         "Prompt Governance",
         "Privacy Retention",
         "Enterprise Readiness",
@@ -827,6 +829,43 @@ elif view == "Provider Readiness":
                 ProviderFallbackPackRequest(actor=actor)
             )
             st.success("Provider Fallback Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
+
+elif view == "Platform Pack":
+    st.subheader("Platform Pack")
+    st.caption("Governed skill platform evidence for workflows, HITL review, provider fallback, tool governance, and cost traces.")
+    report = run_async(state.platform_pack.report(actor="streamlit-platform-owner"))
+    col_ready, col_tools, col_workflows, col_cost = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_tools.metric("MCP tools", report.summary["mcp_tool_count"])
+    col_workflows.metric("Workflows", report.summary["workflow_template_count"])
+    col_cost.metric("Estimated cost", f"${report.summary['usage_estimated_cost']:.4f}")
+
+    tab_controls, tab_workflows, tab_provider, tab_tools, tab_export, tab_json = st.tabs(
+        ["Controls", "Workflow / HITL", "Provider", "Tool Governance", "Platform Pack", "JSON"]
+    )
+    with tab_controls:
+        st.dataframe(report.capability_controls, use_container_width=True, hide_index=True)
+        st.json({"patterns": report.architecture_patterns})
+    with tab_workflows:
+        st.json(report.workflow_durability)
+        st.json(report.human_review_queue)
+        st.json(report.handoff_readiness)
+    with tab_provider:
+        st.json(report.provider_flexibility)
+    with tab_tools:
+        st.json(report.tool_governance)
+        st.json(report.cost_and_trace_governance)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/platform_packs/.")
+        actor = st.text_input("Platform pack actor", value="streamlit-platform-owner")
+        if st.button("Export Governed Skill Platform Pack", use_container_width=True):
+            export = run_async(
+                state.platform_pack.export(GovernedSkillPlatformPackRequest(actor=actor))
+            )
+            st.success("Governed Skill Platform Pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))

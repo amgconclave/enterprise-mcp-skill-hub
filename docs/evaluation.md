@@ -38,6 +38,7 @@ It checks:
 - Skill Marketplace tests cover `GET /marketplace/catalog`, `POST /marketplace/rollout-pack`, deterministic Tenant Rollout scenarios, blocked and review-required rollouts, disabled-skill rollout/invocation blocks, usage/version/MCP exposure signals, artifact contents under `data/marketplace_packs/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
 - Skill Usage Analytics tests cover `GET /usage/analytics`, `POST /usage/chargeback-pack`, deterministic usage fixtures across four tenant/environments and all built-in skills, chargeback calculations, token/cost estimates, high-latency anomaly, budget warning, disabled-skill blocked event, generated artifacts under `data/usage_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Provider Readiness tests cover `GET /providers/readiness`, `POST /providers/fallback-pack`, mock-default posture, optional OpenAI/Azure static checks without network calls, generated artifacts under `data/provider_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
+- Governed Skill Platform Pack tests cover `GET /platform/pack`, `POST /platform/pack/export`, durable workflow evidence, human-in-the-loop review state, governance/conformance controls, provider flexibility, tool governance, cost/trace signals, handoff readiness, generated artifacts under `data/platform_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Privacy Retention tests cover `GET /privacy/retention-report`, `POST /privacy/redact`, `POST /privacy/retention-pack`, deterministic PII-like fixture findings, redacted previews, retention policy actions, generated artifacts under `data/privacy_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Enterprise readiness tests cover `GET /enterprise/readiness-scorecard`, `POST /enterprise/portfolio-demo-pack`, category aggregation, MCP capability counts, verification commands, generated artifacts under `data/portfolio_demo/`, endpoint behavior, and portfolio/interviewer talking points.
 - Portfolio Pack tests cover `GET /portfolio/evidence-index`, `POST /portfolio/interview-pack`, JD coverage, proof matrix rows, evidence score, generated artifacts under `data/portfolio_packs/`, technical talking points, local verification commands, and resume/GitHub README bullets.
@@ -59,6 +60,7 @@ It checks:
 - The demo prints API Contract audit status/route count and the exported Reviewer Collection path.
 - The demo prints Skill Marketplace readiness, catalog listing count, and the exported Tenant Rollout approval pack path.
 - The demo prints Skill Usage Analytics readiness, Cost Chargeback estimated cost, and the exported chargeback pack path.
+- The demo prints Governed Skill Platform Pack readiness, control count, and the exported platform pack path.
 - The demo prints Privacy Retention readiness, finding count, and the exported Privacy Retention Pack path.
 - The demo prints final audit status/score and the exported Final Handoff Pack path.
 

@@ -28,6 +28,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `TenantEntitlementService` applies deterministic local tenant/user RBAC and scope policies to promoted skills, returns MCP-safe allowed tool subsets, blocks enforced denied invocations, records `entitlement.denied` audit events, and writes reviewer packs under `data/entitlement_packs/`.
 - `SkillMarketplaceGovernanceService` turns the registry into a governed Skill Marketplace with lifecycle listings, deterministic Tenant Rollout eligibility scenarios, risk/review states, usage/version/MCP exposure signals, disabled-skill blocks, and rollout approval artifacts under `data/marketplace_packs/`.
 - `SkillUsageAnalyticsService` builds deterministic local Skill Usage Analytics from invocation history, audit events, metrics, the skill registry, marketplace tenant scenarios, and mock token/cost fixtures; it returns budgets/anomalies and writes Cost Chargeback artifacts under `data/usage_packs/`.
+- `GovernedSkillPlatformPackService` aggregates durable workflows, human-in-the-loop review, governance/conformance, provider fallback, tool governance, cost/trace signals, and handoff readiness into a platform-owner report and writes artifacts under `data/platform_packs/`.
 - `PrivacyRetentionService` scans invocation inputs, invocation outputs, audit metadata, and ad hoc JSON payloads for local PII-like patterns, returns redacted previews and retention actions, and writes Privacy Retention artifacts under `data/privacy_packs/`.
 - `EnterpriseReadinessService` aggregates governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into an executive scorecard and portfolio demo pack under `data/portfolio_demo/`.
 - `PortfolioEvidenceService` maps recruiter JD skills to concrete implementation proof across MCP tools/resources/prompts, FastAPI APIs, manifests, governance, audit, evals, release, capacity, tenant, incident, readiness, smoke, and launch checklist surfaces, then writes an Interview Pack under `data/portfolio_packs/`.
@@ -128,6 +129,8 @@ The project keeps governance close to the skill runtime:
 - Tenant Rollout approval packs are saved with `POST /marketplace/rollout-pack` under ignored local folder `data/marketplace_packs/`.
 - Skill Usage Analytics are available at `GET /usage/analytics`.
 - Cost Chargeback Packs are saved with `POST /usage/chargeback-pack` under ignored local folder `data/usage_packs/`.
+- Governed Skill Platform Pack reports are available at `GET /platform/pack`.
+- Governed Skill Platform Pack artifacts are saved with `POST /platform/pack/export` under ignored local folder `data/platform_packs/`.
 - Enterprise readiness is available at `GET /enterprise/readiness-scorecard`.
 - Portfolio demo packs are saved with `POST /enterprise/portfolio-demo-pack` under ignored local folder `data/portfolio_demo/`.
 - Portfolio Evidence indexes are returned by `GET /portfolio/evidence-index`.

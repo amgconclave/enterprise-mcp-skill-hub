@@ -55,6 +55,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /slo/pack` - writes the Skill SLO + Error Budget Pack Markdown/JSON under ignored local folder `data/slo_packs/`.
 - `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
+- `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
+- `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
 - `GET /supply-chain/report` - returns a local direct-dependency SBOM with manifest hashes, license policy decisions, pinning signals, optional provider dependency gates, approval requirements, and limitations.
 - `POST /supply-chain/pack` - writes the Supply Chain SBOM + License Governance Pack Markdown/JSON under ignored local folder `data/supply_chain/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.

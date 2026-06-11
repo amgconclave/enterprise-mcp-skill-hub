@@ -73,6 +73,8 @@ class ApiContractService:
         ("POST", "/handoff/final-pack"),
         ("GET", "/runtime/demo-readiness"),
         ("POST", "/runtime/demo-pack"),
+        ("GET", "/platform/pack"),
+        ("POST", "/platform/pack/export"),
     ]
 
     DEMO_FLOW_ENDPOINTS = [
@@ -109,6 +111,8 @@ class ApiContractService:
         ("GET", "/api/contract-audit"),
         ("POST", "/api/reviewer-collection"),
         ("POST", "/api/contract-drift-pack"),
+        ("GET", "/platform/pack"),
+        ("POST", "/platform/pack/export"),
     ]
 
     def __init__(

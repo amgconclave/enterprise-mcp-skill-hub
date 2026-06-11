@@ -63,6 +63,9 @@ from app.models import (
     FinalHandoffPackResult,
     GovernanceCheck,
     GovernanceReport,
+    GovernedSkillPlatformPackExportResult,
+    GovernedSkillPlatformPackRequest,
+    GovernedSkillPlatformPackResult,
     InvocationReplayResult,
     InvocationSandboxDecision,
     InvocationSandboxEvaluateRequest,
@@ -11393,6 +11396,7 @@ class SmokeMatrixService:
         supply_chain = self.app_state.supply_chain.report(actor="smoke-matrix")
         prompt_governance = self.app_state.prompt_governance.report()
         enterprise = await self.app_state.enterprise.scorecard()
+        platform_pack = await self.app_state.platform_pack.report(actor="smoke-matrix")
         tools = self.app_state.mcp.list_tools()
         resources = self.app_state.mcp.list_resources()
         prompts = self.app_state.mcp.list_prompts()
@@ -11440,6 +11444,7 @@ class SmokeMatrixService:
                 "git readiness",
                 "runtime demo",
                 "api contract",
+                "platform pack",
             ],
             "endpoint_count": len(endpoint_matrix),
             "protected_endpoint_count": sum(1 for endpoint in endpoint_matrix if endpoint.auth_required),
@@ -11473,6 +11478,8 @@ class SmokeMatrixService:
             "incident_readiness": incident.readiness_status,
             "enterprise_readiness": enterprise.readiness_status,
             "enterprise_score": enterprise.overall_score,
+            "platform_pack_readiness": platform_pack.readiness_status,
+            "platform_pack_control_count": len(platform_pack.capability_controls),
             "local_only": True,
         }
         return SmokeMatrixResult(
@@ -11801,6 +11808,29 @@ class SmokeMatrixService:
                     "data/provider_packs/provider_fallback_pack_latest.md",
                 ],
                 "Writes Provider Readiness and Fallback reviewer artifacts.",
+            ),
+            self._endpoint(
+                "platform pack",
+                "GET",
+                "/platform/pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
+                [],
+                "Returns governed platform evidence across workflows, HITL, providers, tools, cost, and handoffs.",
+            ),
+            self._endpoint(
+                "platform pack",
+                "POST",
+                "/platform/pack/export",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
+                [
+                    "data/platform_packs/governed_skill_platform_pack_latest.json",
+                    "data/platform_packs/governed_skill_platform_pack_latest.md",
+                ],
+                "Writes the Governed Skill Platform Pack for platform-team review.",
             ),
             self._endpoint(
                 "supply chain",
@@ -15202,6 +15232,7 @@ class DashboardSmokeService:
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
+            {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
@@ -15246,6 +15277,8 @@ class DashboardSmokeService:
             self._endpoint_ref("slo_pack", "POST", "/slo/pack", "Writes SLO Error Budget artifacts."),
             self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
+            self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
+            self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
             self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
@@ -15291,6 +15324,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
+            self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
@@ -15361,6 +15395,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
@@ -15382,6 +15418,7 @@ class DashboardSmokeService:
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
+            'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
@@ -15393,6 +15430,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -15589,6 +15627,426 @@ class DashboardSmokeService:
 
     def _root(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
+
+
+class GovernedSkillPlatformPackService:
+    PACK_ID = "governed_skill_platform_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "platform_packs"
+
+    async def report(self, actor: str = "platform-owner") -> GovernedSkillPlatformPackResult:
+        governance = self.app_state.governance.generate()
+        conformance = await self.app_state.conformance.generate()
+        provider = self.app_state.provider_readiness.readiness(actor=actor)
+        usage = self.app_state.usage.analytics()
+        reliability = self.app_state.reliability.report()
+        slo = self.app_state.slo.report()
+        workflows = self.app_state.workflows.list()
+        reviews = self.app_state.workflows.reviews()
+        tools = self.app_state.mcp.list_tools()
+        resources = self.app_state.mcp.list_resources()
+        prompts = self.app_state.mcp.list_prompts()
+        capability_controls = self._capability_controls(
+            governance,
+            conformance,
+            provider,
+            usage,
+            reliability,
+            slo,
+            len(workflows),
+            len(reviews),
+            len(tools),
+        )
+        readiness_status = self._readiness_status(capability_controls)
+        workflow_durability = self._workflow_durability(workflows, reviews)
+        human_review_queue = self._human_review_queue(reviews)
+        provider_flexibility = self._provider_flexibility(provider)
+        tool_governance = self._tool_governance(governance, tools, resources, prompts)
+        cost_and_trace_governance = self._cost_and_trace_governance(usage)
+        handoff_readiness = self._handoff_readiness(workflows, reviews)
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "skill_count": governance.skills_registered,
+            "mcp_tool_count": len(tools),
+            "mcp_resource_count": len(resources),
+            "mcp_prompt_count": len(prompts),
+            "workflow_template_count": len(workflows),
+            "workflow_review_count": len(reviews),
+            "approved_review_count": human_review_queue["approved_count"],
+            "pending_review_count": human_review_queue["pending_count"],
+            "provider_count": provider.summary["provider_count"],
+            "usage_estimated_cost": usage.summary["estimated_cost"],
+            "traceable_invocation_count": usage.summary["total_invocations"],
+            "control_count": len(capability_controls),
+            "ready_control_count": sum(1 for item in capability_controls if item["status"] == "pass"),
+            "needs_review_control_count": sum(1 for item in capability_controls if item["status"] == "warn"),
+            "blocked_control_count": sum(1 for item in capability_controls if item["status"] == "fail"),
+            "artifact_directory": str(self.output_dir),
+        }
+        return GovernedSkillPlatformPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            architecture_patterns=self._architecture_patterns(),
+            capability_controls=capability_controls,
+            workflow_durability=workflow_durability,
+            human_review_queue=human_review_queue,
+            provider_flexibility=provider_flexibility,
+            tool_governance=tool_governance,
+            cost_and_trace_governance=cost_and_trace_governance,
+            handoff_readiness=handoff_readiness,
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def export(
+        self,
+        request: GovernedSkillPlatformPackRequest | None = None,
+    ) -> GovernedSkillPlatformPackExportResult:
+        request = request or GovernedSkillPlatformPackRequest()
+        report = await self.report(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "platform_pack": report.model_dump(mode="json"),
+            "architecture_patterns": report.architecture_patterns,
+            "capability_controls": report.capability_controls,
+            "workflow_durability": report.workflow_durability,
+            "human_review_queue": report.human_review_queue,
+            "provider_flexibility": report.provider_flexibility,
+            "tool_governance": report.tool_governance,
+            "cost_and_trace_governance": report.cost_and_trace_governance,
+            "handoff_readiness": report.handoff_readiness,
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "platform.pack_exported",
+            "governed_skill_platform_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "control_count": len(report.capability_controls),
+            },
+        )
+        return GovernedSkillPlatformPackExportResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _capability_controls(
+        self,
+        governance: GovernanceReport,
+        conformance: ConformanceReport,
+        provider: ProviderReadinessReport,
+        usage: UsageAnalyticsResult,
+        reliability: SkillReliabilityReport,
+        slo: SkillSloReport,
+        workflow_count: int,
+        review_count: int,
+        tool_count: int,
+    ) -> list[JsonDict]:
+        return [
+            self._control(
+                "tool_registry",
+                "Tool registry",
+                "pass" if tool_count >= 6 else "fail",
+                f"{tool_count} promoted skills are exposed as MCP tools.",
+                ["tool registry", "tool governance"],
+            ),
+            self._control(
+                "durable_workflows",
+                "Durable workflows",
+                "pass" if workflow_count >= 3 else "warn",
+                f"{workflow_count} approved workflow template(s) are available from local JSON/review storage.",
+                ["durable workflows", "shared state"],
+            ),
+            self._control(
+                "human_in_the_loop",
+                "Human-in-the-loop review",
+                "pass" if review_count >= 0 else "warn",
+                f"{review_count} submitted workflow review record(s) are tracked in the local review queue.",
+                ["human-in-the-loop", "handoffs"],
+            ),
+            self._control(
+                "governance",
+                "Governance checks",
+                "pass" if governance.status == "pass" else "warn",
+                f"Governance report status is {governance.status}.",
+                ["governance", "guardrails"],
+            ),
+            self._control(
+                "provider_flexibility",
+                "Provider flexibility",
+                "pass" if provider.current_provider["name"] == "mock" else "warn",
+                f"Current provider is {provider.current_provider['name']} with {provider.summary['fallback_route_count']} fallback route(s).",
+                ["provider flexibility"],
+            ),
+            self._control(
+                "conformance",
+                "Contract conformance",
+                "pass" if conformance.status == "pass" else "fail",
+                f"{conformance.passed_skill_count}/{conformance.promoted_skill_count} promoted skill contract checks pass.",
+                ["tool governance", "guardrails"],
+            ),
+            self._control(
+                "cost_tracking",
+                "Cost and trace tracking",
+                "pass" if usage.summary["total_invocations"] > 0 else "warn",
+                f"{usage.summary['total_invocations']} invocation(s) are represented in usage analytics with estimated cost {usage.summary['estimated_cost']}.",
+                ["agent cost tracking", "observability"],
+            ),
+            self._control(
+                "reliability",
+                "Reliability controls",
+                "pass" if reliability.readiness_status == "ready" else "warn",
+                f"Reliability status is {reliability.readiness_status}; open circuits: {reliability.summary['open_circuit_count']}.",
+                ["durability", "observability"],
+            ),
+            self._control(
+                "slo_release_gate",
+                "SLO release gate",
+                "pass" if slo.release_gate["status"] == "pass" else "warn",
+                f"SLO release gate status is {slo.release_gate['status']}.",
+                ["governance", "observability"],
+            ),
+        ]
+
+    def _control(
+        self,
+        control_id: str,
+        name: str,
+        status: str,
+        evidence: str,
+        patterns: list[str],
+    ) -> JsonDict:
+        return {
+            "id": control_id,
+            "name": name,
+            "status": status,
+            "evidence": evidence,
+            "patterns": patterns,
+        }
+
+    def _readiness_status(self, controls: list[JsonDict]) -> SecurityReadinessStatus:
+        if any(control["status"] == "fail" for control in controls):
+            return "blocked"
+        if any(control["status"] == "warn" for control in controls):
+            return "needs_review"
+        return "ready"
+
+    def _workflow_durability(
+        self,
+        workflows: list[WorkflowTemplate],
+        reviews: list[WorkflowTemplateReview],
+    ) -> JsonDict:
+        return {
+            "template_source": str(self.app_state.workflows.template_path),
+            "review_store": str(self.app_state.workflows.review_store_path),
+            "approved_template_ids": [template.id for template in workflows],
+            "submitted_review_ids": [review.template_id for review in reviews],
+            "storage_mode": "local_json",
+            "durability_scope": "local filesystem; suitable for portfolio/demo review without external services",
+        }
+
+    def _human_review_queue(self, reviews: list[WorkflowTemplateReview]) -> JsonDict:
+        counts: dict[str, int] = defaultdict(int)
+        for review in reviews:
+            counts[review.status] += 1
+        return {
+            "total_review_count": len(reviews),
+            "pending_count": counts["in_review"],
+            "approved_count": counts["approved"],
+            "rejected_count": counts["rejected"],
+            "validation_invalid_count": sum(1 for review in reviews if review.validation.validation_status == "invalid"),
+            "approval_endpoint": "POST /workflows/{template_id}/approve",
+            "rejection_endpoint": "POST /workflows/{template_id}/reject",
+            "evidence_endpoint": "POST /workflows/{template_id}/review-evidence",
+        }
+
+    def _provider_flexibility(self, provider: ProviderReadinessReport) -> JsonDict:
+        return {
+            "current_provider": provider.current_provider,
+            "provider_checks": provider.provider_checks,
+            "fallback_matrix": provider.fallback_matrix,
+            "external_provider_count": provider.summary["configured_external_provider_count"],
+            "network_calls_performed": provider.summary["network_calls_performed"],
+        }
+
+    def _tool_governance(
+        self,
+        governance: GovernanceReport,
+        tools: list[McpToolDefinition],
+        resources: list[ResourceDefinition],
+        prompts: list[PromptDefinition],
+    ) -> JsonDict:
+        return {
+            "mcp_tool_names": [tool.name for tool in tools],
+            "mcp_resource_uris": [resource.uri for resource in resources],
+            "mcp_prompt_ids": [prompt.id for prompt in prompts],
+            "disabled_skills": governance.disabled_skills,
+            "lifecycle_counts": governance.lifecycle_counts,
+            "schema_check_count": sum(1 for skill in governance.skills if skill.schema_valid),
+            "mcp_exposed_skill_count": sum(1 for skill in governance.skills if skill.mcp_exposed),
+        }
+
+    def _cost_and_trace_governance(self, usage: UsageAnalyticsResult) -> JsonDict:
+        return {
+            "estimated_cost": usage.summary["estimated_cost"],
+            "invocation_count": usage.summary["total_invocations"],
+            "usage_by_status": usage.usage_by_status,
+            "usage_by_mcp_exposure": usage.usage_by_mcp_exposure,
+            "anomaly_count": usage.summary["anomaly_count"],
+            "budget_warning_count": usage.summary["budget_warning_count"],
+        }
+
+    def _handoff_readiness(
+        self,
+        workflows: list[WorkflowTemplate],
+        reviews: list[WorkflowTemplateReview],
+    ) -> JsonDict:
+        return {
+            "handoff_workflows": [
+                template.id
+                for template in workflows
+                if any(keyword in " ".join(template.expected_outputs).lower() for keyword in ["action", "handoff"])
+            ],
+            "reviewed_handoff_candidates": [
+                review.template_id
+                for review in reviews
+                if any(keyword in " ".join(review.template.expected_outputs).lower() for keyword in ["action", "handoff"])
+            ],
+            "prompt_ids": [prompt.id for prompt in self.app_state.prompts.list()],
+            "evidence_artifacts": [
+                "data/workflow_reviews/{template_id}_review_evidence.json",
+                "data/platform_packs/governed_skill_platform_pack_latest.json",
+            ],
+        }
+
+    def _architecture_patterns(self) -> list[str]:
+        return [
+            "durable workflows",
+            "human-in-the-loop",
+            "governance",
+            "provider flexibility",
+            "tool governance",
+            "agent cost tracking",
+            "tool registry",
+            "handoffs",
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
+            'rg "platform/pack|Governed Skill Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
+            "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The platform pack aggregates local/mock governance evidence and does not call hosted LLM providers.",
+            "Workflow durability uses local JSON files; production deployments should replace this with durable database-backed orchestration.",
+            "Human approval evidence is local and deterministic; production deployments should add identity, notifications, and immutable audit storage.",
+            "Cost values are estimated chargeback signals, not provider invoices.",
+            "Generated platform artifacts are written under ignored data/platform_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["platform_pack"]
+        lines = [
+            "# Governed Skill Platform Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Skills: `{report['summary']['skill_count']}`",
+            f"- MCP tools: `{report['summary']['mcp_tool_count']}`",
+            f"- Workflows: `{report['summary']['workflow_template_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Capability Controls",
+            "",
+            *[
+                f"- `{control['status']}` {control['name']}: {control['evidence']}"
+                for control in bundle["capability_controls"]
+            ],
+            "",
+            "## Durable Workflows",
+            "",
+            f"- Template source: `{bundle['workflow_durability']['template_source']}`",
+            f"- Review store: `{bundle['workflow_durability']['review_store']}`",
+            f"- Approved templates: `{', '.join(bundle['workflow_durability']['approved_template_ids']) or 'none'}`",
+            "",
+            "## Human Review Queue",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["human_review_queue"].items()],
+            "",
+            "## Provider Flexibility",
+            "",
+            f"- Current provider: `{bundle['provider_flexibility']['current_provider']['name']}`",
+            f"- Network calls performed: `{bundle['provider_flexibility']['network_calls_performed']}`",
+            "",
+            "## Tool Governance",
+            "",
+            f"- MCP tools: `{', '.join(bundle['tool_governance']['mcp_tool_names'])}`",
+            f"- Disabled skills: `{', '.join(bundle['tool_governance']['disabled_skills']) or 'none'}`",
+            "",
+            "## Cost And Trace Governance",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["cost_and_trace_governance"].items()],
+            "",
+            "## Handoff Readiness",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["handoff_readiness"].items()],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
 
 
 class ArtifactInventoryService:
@@ -15938,6 +16396,18 @@ class ArtifactInventoryService:
                 "Mock-default provider posture, optional OpenAI/Azure checks, fallback matrix, re-enable gates, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
+                "platform_packs",
+                "Governed Skill Platform Pack",
+                Path("data") / "platform_packs",
+                "POST /platform/pack/export",
+                "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
+                [
+                    "governed_skill_platform_pack_latest.json",
+                    "governed_skill_platform_pack_latest.md",
+                ],
+                "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
+            ),
+            self._catalog_row(
                 "sandbox_policies",
                 "Invocation Sandbox Policy Pack",
                 Path("data") / "sandbox_policies",
@@ -16101,6 +16571,7 @@ class ArtifactInventoryService:
             "GitHub Push Readiness + Branch Hygiene Pack",
             "Runtime Demo Server Pack",
             "API Contract Reviewer Collection",
+            "Governed Skill Platform Pack",
             "Local Launch Checklist",
             "Security Evidence Bundle",
         ]
@@ -17317,6 +17788,7 @@ class AppState:
     ui_verification: DashboardSmokeService = field(init=False)
     runtime_demo: RuntimeDemoService = field(init=False)
     artifacts: ArtifactInventoryService = field(init=False)
+    platform_pack: GovernedSkillPlatformPackService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
     api_contracts: ApiContractService = field(init=False)
     git_readiness: GitReadinessService = field(init=False)
@@ -17376,6 +17848,7 @@ class AppState:
         self.reviewer = ReviewerQuickstartService(self)
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)
+        self.platform_pack = GovernedSkillPlatformPackService(self)
         self.artifacts = ArtifactInventoryService(self)
         self.final_handoff = FinalHandoffService(self)
         self.api_contracts = ApiContractService(self)

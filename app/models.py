@@ -982,6 +982,36 @@ class ArtifactReadmeChecklistResult(BaseModel):
     summary: JsonDict
 
 
+class GovernedSkillPlatformPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    architecture_patterns: list[str] = Field(default_factory=list)
+    capability_controls: list[JsonDict] = Field(default_factory=list)
+    workflow_durability: JsonDict = Field(default_factory=dict)
+    human_review_queue: JsonDict = Field(default_factory=dict)
+    provider_flexibility: JsonDict = Field(default_factory=dict)
+    tool_governance: JsonDict = Field(default_factory=dict)
+    cost_and_trace_governance: JsonDict = Field(default_factory=dict)
+    handoff_readiness: JsonDict = Field(default_factory=dict)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class GovernedSkillPlatformPackRequest(BaseModel):
+    actor: str = "platform-owner"
+
+
+class GovernedSkillPlatformPackExportResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class ApiContractCheck(BaseModel):
     id: str
     category: str

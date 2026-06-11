@@ -53,6 +53,9 @@ from app.models import (
     GitReadinessResult,
     GoldenEvalSuiteResult,
     GovernanceReport,
+    GovernedSkillPlatformPackExportResult,
+    GovernedSkillPlatformPackRequest,
+    GovernedSkillPlatformPackResult,
     HealthResponse,
     InvocationReplayResult,
     InvocationSandboxDecision,
@@ -447,6 +450,19 @@ async def portfolio_interview_pack(
     _: str = Depends(require_api_key),
 ) -> PortfolioInterviewPackResult:
     return await state.portfolio.interview_pack(request or PortfolioInterviewPackRequest())
+
+
+@app.get("/platform/pack", response_model=GovernedSkillPlatformPackResult)
+async def governed_skill_platform_pack(_: str = Depends(require_api_key)) -> GovernedSkillPlatformPackResult:
+    return await state.platform_pack.report(actor="api-platform-owner")
+
+
+@app.post("/platform/pack/export", response_model=GovernedSkillPlatformPackExportResult)
+async def export_governed_skill_platform_pack(
+    request: GovernedSkillPlatformPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> GovernedSkillPlatformPackExportResult:
+    return await state.platform_pack.export(request or GovernedSkillPlatformPackRequest())
 
 
 @app.get("/reviewer/quickstart", response_model=ReviewerQuickstartResult)
