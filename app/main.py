@@ -15,6 +15,9 @@ from app.models import (
     AgentCollaborationRun,
     AgentRun,
     AgentRunRequest,
+    AgentSocietyEvalPackResult,
+    AgentSocietyEvalRequest,
+    AgentSocietyEvalResult,
     ApiContractAuditResult,
     ApiContractDriftPackRequest,
     ApiContractDriftPackResult,
@@ -766,6 +769,19 @@ async def export_agent_collaboration_pack(
     _: str = Depends(require_api_key),
 ) -> AgentCollaborationPackResult:
     return await state.agent_collaboration.export(request or AgentCollaborationPackRequest())
+
+
+@app.get("/agents/society-eval", response_model=AgentSocietyEvalResult)
+async def agent_society_eval(_: str = Depends(require_api_key)) -> AgentSocietyEvalResult:
+    return await state.agent_society_eval.report(AgentSocietyEvalRequest(actor="api-agent-society-evaluator"))
+
+
+@app.post("/agents/society-eval-pack", response_model=AgentSocietyEvalPackResult)
+async def agent_society_eval_pack(
+    request: AgentSocietyEvalRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> AgentSocietyEvalPackResult:
+    return await state.agent_society_eval.pack(request or AgentSocietyEvalRequest())
 
 
 @app.get("/workflows/templates", response_model=list[WorkflowTemplate])

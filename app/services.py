@@ -23,6 +23,9 @@ from app.models import (
     AgentCollaborationTurn,
     AgentHandoffDecision,
     AgentRun,
+    AgentSocietyEvalPackResult,
+    AgentSocietyEvalRequest,
+    AgentSocietyEvalResult,
     ArtifactInventoryItem,
     ArtifactInventoryResult,
     ArtifactReadmeChecklistRequest,
@@ -2490,6 +2493,410 @@ class AgentCollaborationService:
             "## Limitations",
             "",
             *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class AgentSocietyEvaluationService:
+    EVAL_ID = "agent_society_eval_latest"
+    PACK_ID = "agent_society_eval_pack_latest"
+
+    EXPECTED_ROLES = [
+        "governance_reviewer",
+        "intake_agent",
+        "retrieval_agent",
+        "synthesis_agent",
+        "action_agent",
+    ]
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "agent_society_evals"
+
+    async def report(
+        self,
+        request: AgentSocietyEvalRequest | None = None,
+    ) -> AgentSocietyEvalResult:
+        request = request or AgentSocietyEvalRequest()
+        happy_run = await self.app_state.agent_collaboration.run(
+            AgentCollaborationRequest(
+                prompt=(
+                    "Classify the RFP, search approved AI governance policy, summarize the governed answer, "
+                    "and create action items for Priya Shah."
+                ),
+                actor=request.actor,
+                role="agent",
+                data_sensitivity="internal",
+                enforce_policy=True,
+                enforce_entitlements=True,
+            )
+        )
+        runs = [happy_run]
+        if request.include_policy_denial_case:
+            runs.append(
+                await self.app_state.agent_collaboration.run(
+                    AgentCollaborationRequest(
+                        prompt="Classify confidential RFP material and search approved governance policy.",
+                        actor=request.actor,
+                        role="agent",
+                        data_sensitivity="confidential",
+                        enforce_policy=True,
+                        enforce_entitlements=True,
+                    )
+                )
+            )
+
+        role_scorecard = self._role_scorecard(runs)
+        memory_checks = self._memory_checks(happy_run)
+        tool_use_checks = self._tool_use_checks(runs)
+        handoff_checks = self._handoff_checks(runs)
+        policy_gate_checks = self._policy_gate_checks(runs, request.include_policy_denial_case)
+        all_checks = role_scorecard + memory_checks + tool_use_checks + handoff_checks + policy_gate_checks
+        pass_count = sum(1 for check in all_checks if check["status"] == "pass")
+        fail_count = sum(1 for check in all_checks if check["status"] == "fail")
+        warn_count = sum(1 for check in all_checks if check["status"] == "warn")
+        score = round((pass_count / max(len(all_checks), 1)) * 100, 2)
+        readiness_status: SecurityReadinessStatus = "ready"
+        if fail_count:
+            readiness_status = "blocked"
+        elif warn_count:
+            readiness_status = "needs_review"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "evaluated_run_count": len(runs),
+            "successful_run_count": sum(1 for run in runs if run.readiness_status == "ready"),
+            "expected_role_count": len(self.EXPECTED_ROLES),
+            "observed_role_count": sum(1 for row in role_scorecard if row["status"] == "pass"),
+            "memory_entry_count": len(happy_run.shared_state.get("memory", [])),
+            "shared_artifact_count": len(happy_run.shared_state.get("artifacts", {})),
+            "handoff_count": sum(run.governance_summary["handoff_count"] for run in runs),
+            "policy_denial_count": sum(run.governance_summary["policy_denial_count"] for run in runs),
+            "mcp_tool_count": len(self.app_state.mcp.list_tools()),
+            "check_count": len(all_checks),
+            "pass_count": pass_count,
+            "warn_count": warn_count,
+            "fail_count": fail_count,
+            "score": score,
+            "artifact_directory": str(self.output_dir),
+        }
+        result = AgentSocietyEvalResult(
+            eval_id=self.EVAL_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            evaluated_runs=[self._run_summary(run) for run in runs],
+            role_scorecard=role_scorecard,
+            memory_checks=memory_checks,
+            tool_use_checks=tool_use_checks,
+            handoff_checks=handoff_checks,
+            policy_gate_checks=policy_gate_checks,
+            recommendations=self._recommendations(fail_count, warn_count),
+            architecture_patterns=self._architecture_patterns(),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "agents.society_eval_run",
+            "agent_society_eval",
+            self.EVAL_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness_status,
+                "score": score,
+                "evaluated_run_count": len(runs),
+                "policy_denial_count": summary["policy_denial_count"],
+            },
+        )
+        return result
+
+    async def pack(
+        self,
+        request: AgentSocietyEvalRequest | None = None,
+    ) -> AgentSocietyEvalPackResult:
+        request = request or AgentSocietyEvalRequest()
+        report = await self.report(request)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "agent_society_eval": report.model_dump(mode="json"),
+            "architecture_patterns": report.architecture_patterns,
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "agents.society_eval_pack_exported",
+            "agent_society_eval_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "score": report.summary["score"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return AgentSocietyEvalPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _role_scorecard(self, runs: list[AgentCollaborationRun]) -> list[JsonDict]:
+        observed = set()
+        for run in runs:
+            for participant in run.participants:
+                observed.add(participant["id"])
+            for turn in run.turns:
+                observed.add(turn.agent_id)
+                observed.add(turn.handoff.from_agent)
+                observed.add(turn.handoff.to_agent)
+        return [
+            {
+                "role": role,
+                "status": "pass" if role in observed else "fail",
+                "evidence": "Role appeared in participants, turn execution, or handoff trace."
+                if role in observed
+                else "Role was not observed in the evaluated collaboration traces.",
+            }
+            for role in self.EXPECTED_ROLES
+        ]
+
+    def _memory_checks(self, run: AgentCollaborationRun) -> list[JsonDict]:
+        memory = run.shared_state.get("memory", [])
+        artifacts = run.shared_state.get("artifacts", {})
+        successful_turn_count = run.governance_summary["successful_turn_count"]
+        return [
+            {
+                "id": "memory_per_successful_turn",
+                "status": "pass" if len(memory) == successful_turn_count else "fail",
+                "evidence": f"{len(memory)} memory entries for {successful_turn_count} successful turn(s).",
+            },
+            {
+                "id": "artifact_memory_alignment",
+                "status": "pass" if set(artifacts) == {item["skill_id"] for item in memory} else "warn",
+                "evidence": f"Artifacts={sorted(artifacts)} memory_skills={sorted(item['skill_id'] for item in memory)}.",
+            },
+            {
+                "id": "shared_state_exportable",
+                "status": "pass" if "tool_governance" in run.shared_state and "handoffs" in run.shared_state else "fail",
+                "evidence": "Shared state contains tool governance and handoff history.",
+            },
+        ]
+
+    def _tool_use_checks(self, runs: list[AgentCollaborationRun]) -> list[JsonDict]:
+        rows = []
+        for run in runs:
+            for turn in run.turns:
+                manifest = self.app_state.registry.get(turn.skill_id)
+                exposed = self.app_state.registry.is_mcp_exposed(manifest)
+                rows.append(
+                    {
+                        "run_id": run.id,
+                        "turn": turn.turn_index,
+                        "skill_id": turn.skill_id,
+                        "status": "pass" if exposed else "fail",
+                        "turn_status": turn.status,
+                        "trace_id": turn.trace_id,
+                        "evidence": "Skill is promoted/enabled and exposed through MCP."
+                        if exposed
+                        else "Skill is not exposed through MCP.",
+                    }
+                )
+        return rows
+
+    def _handoff_checks(self, runs: list[AgentCollaborationRun]) -> list[JsonDict]:
+        rows = []
+        for run in runs:
+            for turn in run.turns:
+                expected = turn.status == "succeeded"
+                ok = turn.handoff.approved is expected or (
+                    turn.status == "failed"
+                    and turn.policy_decision is not None
+                    and turn.policy_decision.decision == "deny"
+                    and not turn.handoff.approved
+                )
+                rows.append(
+                    {
+                        "run_id": run.id,
+                        "turn": turn.turn_index,
+                        "from_agent": turn.handoff.from_agent,
+                        "to_agent": turn.handoff.to_agent,
+                        "skill_id": turn.skill_id,
+                        "status": "pass" if ok else "fail",
+                        "approved": turn.handoff.approved,
+                        "governance_checks": turn.handoff.governance_checks,
+                    }
+                )
+        return rows
+
+    def _policy_gate_checks(
+        self,
+        runs: list[AgentCollaborationRun],
+        include_policy_denial_case: bool,
+    ) -> list[JsonDict]:
+        denied_runs = [run for run in runs if run.governance_summary["policy_denial_count"] > 0]
+        if not include_policy_denial_case:
+            return [
+                {
+                    "id": "policy_denial_case",
+                    "status": "warn",
+                    "evidence": "Policy denial case was not requested.",
+                }
+            ]
+        if not denied_runs:
+            return [
+                {
+                    "id": "policy_denial_case",
+                    "status": "fail",
+                    "evidence": "No denied collaboration run was observed.",
+                }
+            ]
+        denied = denied_runs[0]
+        stopped_before_artifacts = not denied.shared_state.get("artifacts")
+        return [
+            {
+                "id": "policy_denial_case",
+                "status": "pass" if denied.readiness_status == "needs_review" else "fail",
+                "evidence": f"Denied run readiness was {denied.readiness_status}.",
+            },
+            {
+                "id": "policy_stop_before_tool_artifacts",
+                "status": "pass" if stopped_before_artifacts else "fail",
+                "evidence": f"Denied run artifact count was {len(denied.shared_state.get('artifacts', {}))}.",
+            },
+        ]
+
+    def _run_summary(self, run: AgentCollaborationRun) -> JsonDict:
+        return {
+            "run_id": run.id,
+            "readiness_status": run.readiness_status,
+            "turn_count": len(run.turns),
+            "successful_turn_count": run.governance_summary["successful_turn_count"],
+            "failed_turn_count": run.governance_summary["failed_turn_count"],
+            "policy_denial_count": run.governance_summary["policy_denial_count"],
+            "memory_entry_count": len(run.shared_state.get("memory", [])),
+            "shared_artifact_count": len(run.shared_state.get("artifacts", {})),
+            "trace_ids": run.governance_summary["trace_ids"],
+        }
+
+    def _recommendations(self, fail_count: int, warn_count: int) -> list[str]:
+        if fail_count:
+            return [
+                "Review failed society-eval checks before using this collaboration route as a portfolio acceptance proof.",
+                "Inspect failed role, memory, handoff, tool-use, or policy-gate rows in the JSON artifact.",
+            ]
+        if warn_count:
+            return [
+                "Review warning rows and decide whether the optional eval scenario should be required for release gates.",
+            ]
+        return [
+            "Keep the society eval in local acceptance checks when changing agent handoffs or MCP tool governance.",
+            "Regenerate the Agent Society Evaluation Pack after editing collaboration roles, policy gates, or skill manifests.",
+        ]
+
+    def _architecture_patterns(self) -> list[str]:
+        return [
+            "role-playing agents",
+            "memory",
+            "tool use",
+            "agent society evaluation",
+            "structured outputs",
+            "typed contracts",
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_agent_society_eval.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/agents/society-eval -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/agents/society-eval-pack -Method POST -Headers $headers",
+            'rg "agents/society-eval|Agent Society Evaluation|agent_society_evals" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\agent_society_evals -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Society evaluation uses deterministic local collaboration runs; it is not a stochastic benchmark suite.",
+            "Shared memory is in-process state from the evaluated run and is exported only to ignored local artifacts.",
+            "The denied scenario validates governance stop behavior without invoking external model providers.",
+            "Generated society-eval artifacts are written under ignored data/agent_society_evals/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["agent_society_eval"]
+        lines = [
+            "# Agent Society Evaluation Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{report['summary']['score']}`",
+            f"- Evaluated runs: `{report['summary']['evaluated_run_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Evaluated Runs",
+            "",
+            *[
+                f"- `{run['run_id']}` readiness=`{run['readiness_status']}` turns=`{run['turn_count']}` policy_denials=`{run['policy_denial_count']}`"
+                for run in report["evaluated_runs"]
+            ],
+            "",
+            "## Role Scorecard",
+            "",
+            *[
+                f"- `{row['role']}` status=`{row['status']}`"
+                for row in report["role_scorecard"]
+            ],
+            "",
+            "## Memory Checks",
+            "",
+            *[
+                f"- `{row['id']}` status=`{row['status']}` evidence={row['evidence']}"
+                for row in report["memory_checks"]
+            ],
+            "",
+            "## Policy Gate Checks",
+            "",
+            *[
+                f"- `{row['id']}` status=`{row['status']}` evidence={row['evidence']}"
+                for row in report["policy_gate_checks"]
+            ],
+            "",
+            "## Recommendations",
+            "",
+            *[f"- {item}" for item in report["recommendations"]],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {item}" for item in bundle["limitations"]],
             "",
         ]
         return "\n".join(lines)
@@ -15868,6 +16275,7 @@ class DashboardSmokeService:
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
+            {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
@@ -15920,6 +16328,8 @@ class DashboardSmokeService:
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
             self._endpoint_ref("agent_collaborate", "POST", "/agents/collaborate", "Runs governed multi-agent collaboration over MCP skills."),
             self._endpoint_ref("agent_collaboration_pack", "POST", "/agents/collaboration-pack", "Writes Agent Collaboration Pack artifacts."),
+            self._endpoint_ref("agent_society_eval", "GET", "/agents/society-eval", "Evaluates role-playing agents, shared memory, handoffs, tool use, and policy stops."),
+            self._endpoint_ref("agent_society_eval_pack", "POST", "/agents/society-eval-pack", "Writes Agent Society Evaluation artifacts."),
             self._endpoint_ref("worker_runs", "GET", "/workers/runs", "Worker run history and transparent timelines."),
             self._endpoint_ref("worker_run_submit", "POST", "/workers/runs", "Queues and executes a sandboxed local worker run."),
             self._endpoint_ref("worker_scale_plan", "GET", "/workers/scale-plan", "Worker pool scale plan and backlog forecast."),
@@ -15972,6 +16382,7 @@ class DashboardSmokeService:
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
+            self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
@@ -17607,6 +18018,15 @@ class ArtifactInventoryService:
                 "Multi-agent conversation proof with shared state, governed handoffs, MCP tool use, trace IDs, and local cost tracking.",
             ),
             self._catalog_row(
+                "agent_society_evals",
+                "Agent Society Evaluation Pack",
+                Path("data") / "agent_society_evals",
+                "POST /agents/society-eval-pack",
+                "Invoke-RestMethod http://localhost:8000/agents/society-eval-pack -Method POST -Headers $headers",
+                ["agent_society_eval_pack_latest.json", "agent_society_eval_pack_latest.md"],
+                "Role-playing agent, shared memory, handoff, MCP tool-use, and policy-stop evaluation proof.",
+            ),
+            self._catalog_row(
                 "worker_runbooks",
                 "Worker Scale-Out Runbook",
                 Path("data") / "worker_runbooks",
@@ -18968,6 +19388,7 @@ class AppState:
     mcp: McpToolAdapter = field(init=False)
     agent: AgentRunner = field(init=False)
     agent_collaboration: AgentCollaborationService = field(init=False)
+    agent_society_eval: AgentSocietyEvaluationService = field(init=False)
     governance: GovernanceReportService = field(init=False)
     conformance: ConformanceReportService = field(init=False)
     evidence: EvidenceBundleService = field(init=False)
@@ -19028,6 +19449,7 @@ class AppState:
         )
         self.agent = AgentRunner(self.mcp)
         self.agent_collaboration = AgentCollaborationService(self)
+        self.agent_society_eval = AgentSocietyEvaluationService(self)
         self.workflows = WorkflowTemplateService(self)
         self.governance = GovernanceReportService(self)
         self.conformance = ConformanceReportService(self)

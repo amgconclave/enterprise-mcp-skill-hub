@@ -7,6 +7,7 @@ from app.bootstrap import create_state
 from app.models import (
     AgentCollaborationPackRequest,
     AgentCollaborationRequest,
+    AgentSocietyEvalRequest,
     ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
@@ -212,6 +213,12 @@ async def main() -> None:
     )
     agent_collaboration_pack = await state.agent_collaboration.export(
         AgentCollaborationPackRequest(actor="demo-agent-platform")
+    )
+    agent_society_eval = await state.agent_society_eval.report(
+        AgentSocietyEvalRequest(actor="demo-agent-society-evaluator")
+    )
+    agent_society_eval_pack = await state.agent_society_eval.pack(
+        AgentSocietyEvalRequest(actor="demo-agent-society-evaluator")
     )
     worker_run = await state.worker_scaleout.submit_run(
         WorkerSkillRunRequest(
@@ -443,6 +450,12 @@ async def main() -> None:
                 "agent_collaboration_handoffs": agent_collaboration_run.governance_summary["handoff_count"],
                 "agent collaboration pack path": agent_collaboration_pack.markdown_path,
                 "agent_collaboration_pack_path": agent_collaboration_pack.markdown_path,
+                "agent society eval readiness": agent_society_eval.readiness_status,
+                "agent_society_eval_readiness": agent_society_eval.readiness_status,
+                "agent society eval score": agent_society_eval.summary["score"],
+                "agent_society_eval_score": agent_society_eval.summary["score"],
+                "agent society eval pack path": agent_society_eval_pack.markdown_path,
+                "agent_society_eval_pack_path": agent_society_eval_pack.markdown_path,
                 "worker scaleout readiness": worker_scale_plan.readiness_status,
                 "worker_scaleout_readiness": worker_scale_plan.readiness_status,
                 "worker run status": worker_run.status,

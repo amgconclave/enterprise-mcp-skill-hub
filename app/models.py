@@ -260,6 +260,37 @@ class AgentCollaborationPackResult(BaseModel):
     summary: JsonDict
 
 
+class AgentSocietyEvalRequest(BaseModel):
+    actor: str = "agent-society-evaluator"
+    include_policy_denial_case: bool = True
+
+
+class AgentSocietyEvalResult(BaseModel):
+    eval_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    evaluated_runs: list[JsonDict]
+    role_scorecard: list[JsonDict]
+    memory_checks: list[JsonDict]
+    tool_use_checks: list[JsonDict]
+    handoff_checks: list[JsonDict]
+    policy_gate_checks: list[JsonDict]
+    recommendations: list[str] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AgentSocietyEvalPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class UsageMetric(BaseModel):
     trace_id: str
     provider: str

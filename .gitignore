@@ -23,6 +23,7 @@ data/slo_packs/
 data/provider_packs/
 data/platform_packs/
 data/agent_collaboration/
+data/agent_society_evals/
 data/worker_runbooks/
 data/sandbox_policies/
 data/prompt_governance/

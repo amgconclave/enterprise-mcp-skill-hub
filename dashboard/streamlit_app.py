@@ -12,6 +12,7 @@ from app.evals.golden import GoldenEvalRunner, load_cases
 from app.models import (
     AgentCollaborationPackRequest,
     AgentCollaborationRequest,
+    AgentSocietyEvalRequest,
     ApiContractDriftPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
@@ -102,6 +103,7 @@ view = st.sidebar.radio(
         "Provider Readiness",
         "Platform Pack",
         "Agent Collaboration",
+        "Agent Society Evaluation",
         "Worker Scale-Out",
         "Prompt Governance",
         "Privacy Retention",
@@ -973,6 +975,42 @@ elif view == "Agent Collaboration":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(run.model_dump(mode="json"))
+
+elif view == "Agent Society Evaluation":
+    st.subheader("Agent Society Evaluation")
+    st.caption("Evaluation-grade checks for role-playing agents, shared memory, governed handoffs, tool use, and policy stops.")
+    include_denial = st.checkbox("Include policy denial case", value=True)
+    actor = st.text_input("Evaluator actor", value="streamlit-agent-society-evaluator")
+    request = AgentSocietyEvalRequest(actor=actor, include_policy_denial_case=include_denial)
+    report = run_async(state.agent_society_eval.report(request))
+    col_ready, col_score, col_roles, col_denials = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_score.metric("Score", f"{report.summary['score']:.2f}")
+    col_roles.metric("Roles observed", report.summary["observed_role_count"])
+    col_denials.metric("Policy denials", report.summary["policy_denial_count"])
+
+    tab_roles, tab_memory, tab_tools, tab_policy, tab_export, tab_json = st.tabs(
+        ["Roles", "Memory", "Tool / Handoff", "Policy Gates", "Eval Pack", "JSON"]
+    )
+    with tab_roles:
+        st.dataframe(report.role_scorecard, use_container_width=True, hide_index=True)
+        st.dataframe(report.evaluated_runs, use_container_width=True, hide_index=True)
+    with tab_memory:
+        st.dataframe(report.memory_checks, use_container_width=True, hide_index=True)
+        st.json({"patterns": report.architecture_patterns, "recommendations": report.recommendations})
+    with tab_tools:
+        st.dataframe(report.tool_use_checks, use_container_width=True, hide_index=True)
+        st.dataframe(report.handoff_checks, use_container_width=True, hide_index=True)
+    with tab_policy:
+        st.dataframe(report.policy_gate_checks, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/agent_society_evals/.")
+        if st.button("Export Agent Society Evaluation Pack", use_container_width=True):
+            export = run_async(state.agent_society_eval.pack(request))
+            st.success("Agent Society Evaluation Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Worker Scale-Out":
     st.subheader("Worker Scale-Out")

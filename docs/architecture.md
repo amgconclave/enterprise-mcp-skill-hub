@@ -13,6 +13,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `ResourceRegistry` exposes file-backed policy/product resources, workflow templates, and a dynamic skill catalog.
 - `AgentRunner` dynamically discovers MCP tools and selects multiple skills for compound tasks.
 - `AgentCollaborationService` runs deterministic local multi-agent conversations with governance reviewer, intake, retrieval, synthesis, and action roles; each turn shares state, records handoff decisions, enforces existing MCP/policy/entitlement gates, tracks trace IDs and token/cost estimates, and writes Agent Collaboration Pack artifacts under `data/agent_collaboration/`.
+- `AgentSocietyEvaluationService` evaluates the collaboration society with structured role, memory, MCP tool-use, handoff, and policy-gate scorecards, then writes reviewer artifacts under `data/agent_society_evals/`.
 - `WorkflowTemplateService` loads approved file-backed templates, stores local review submissions, validates composition readiness, gates approval/rejection, simulates ordered skill composition with per-step policy decisions, and exports review evidence.
 - `AuditService` records governance events.
 - `MetricsService` aggregates invocation count, failures, latency, tokens, cost, and per-skill usage.
@@ -75,6 +76,14 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 6. Allowed turns call the existing MCP adapter with policy and entitlement context, then store the tool output in shared artifacts and a compact memory entry for later turns.
 7. The run returns participants, turns, shared state, final output, trace IDs, latency, token usage, estimated local cost, and limitations.
 8. `POST /agents/collaboration-pack` writes `agent_collaboration_pack_latest.json` and `.md` under ignored `data/agent_collaboration/` for reviewer evidence.
+
+## Agent Society Evaluation Flow
+
+1. A reviewer calls `GET /agents/society-eval` or `POST /agents/society-eval-pack`.
+2. `AgentSocietyEvaluationService` runs a successful internal collaboration and, by default, a confidential policy-denied collaboration.
+3. The service scores expected roles, shared memory entries, artifact alignment, MCP tool exposure, handoff approval, and stop-before-tool policy behavior.
+4. The response is a typed structured eval result with readiness, score, recommendations, proof commands, and local/mock limitations.
+5. Pack export writes `agent_society_eval_pack_latest.json` and `.md` under ignored `data/agent_society_evals/`.
 
 ## Worker Scale-Out Flow
 

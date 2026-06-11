@@ -27,6 +27,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /agents/run` - runs the demo agent against dynamically discovered skills.
 - `POST /agents/collaborate` - runs a deterministic local multi-agent collaboration over promoted MCP skills with shared state, handoff decisions, policy/entitlement enforcement, traces, and token/cost accounting.
 - `POST /agents/collaboration-pack` - writes the Agent Collaboration Pack Markdown/JSON under ignored local folder `data/agent_collaboration/`.
+- `GET /agents/society-eval` - evaluates the deterministic agent society for role coverage, shared memory, MCP tool use, handoff approval, and policy-denied stop behavior.
+- `POST /agents/society-eval-pack` - writes the Agent Society Evaluation Pack Markdown/JSON under ignored local folder `data/agent_society_evals/`.
 - `GET /audit/events` - returns governance audit events.
 - `POST /audit/query` - searches normalized audit, invocation, governance, workflow, and release evidence by action/type, actor, skill id, workflow template id, status, date range, and free text; returns matches, action/status counts, related invocations, related release/workflow evidence, trace/correlation ids, and missing-evidence warnings.
 - `POST /compliance/attestation` - writes a procurement-ready Compliance Attestation Pack as JSON and Markdown under ignored local folder `data/attestations/`.
@@ -63,6 +65,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
 - `POST /agents/collaborate` - runs a governed multi-agent conversation using intake, retrieval, synthesis, action, and governance reviewer roles over MCP tools.
 - `POST /agents/collaboration-pack` - writes the Agent Collaboration Pack Markdown/JSON under ignored local folder `data/agent_collaboration/`.
+- `GET /agents/society-eval` - evaluates role-playing agents, shared memory alignment, MCP tool use, handoff checks, and policy-gate stop behavior.
+- `POST /agents/society-eval-pack` - writes the Agent Society Evaluation Pack Markdown/JSON under ignored local folder `data/agent_society_evals/`.
 - `GET /workers/runs` - returns local worker run history with transparent timelines, sandbox decisions, invocation ids, trace ids, and structured outputs.
 - `POST /workers/runs` - queues and executes one deterministic local/mock skill run through a worker pool with optional sandbox preflight.
 - `GET /workers/scale-plan` - returns worker pool status, forecast-backed backlog by skill, scale recommendations, recent run history, and local proof commands.
@@ -623,6 +627,23 @@ Get-ChildItem -Recurse -File data\agent_collaboration -ErrorAction SilentlyConti
 `POST /agents/collaborate` runs a deterministic local collaboration among governance reviewer, intake, retrieval, synthesis, and action roles. Each turn records the MCP skill used, shared-state artifact, handoff approval, policy decision, trace ID, latency, and token/cost estimate.
 
 `POST /agents/collaboration-pack` writes `agent_collaboration_pack_latest.json` and `.md` under ignored `data/agent_collaboration/`. The pack demonstrates multi-agent conversation, shared state, handoffs, tool governance, and agent cost tracking without adding an external agent runtime.
+
+## Agent Society Evaluation Pack
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/agents/society-eval -Headers $headers
+Invoke-RestMethod http://localhost:8000/agents/society-eval-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"agent-society-evaluator"}'
+Get-ChildItem -Recurse -File data\agent_society_evals -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /agents/society-eval` runs deterministic local collaboration eval cases for role-playing agents, shared memory, MCP tool use, handoff governance, and a confidential policy-denied stop. It returns structured scorecards and keeps OpenAI/Azure calls optional.
+
+`POST /agents/society-eval-pack` writes `agent_society_eval_pack_latest.json` and `.md` under ignored `data/agent_society_evals/` for reviewer inspection.
 
 ## Worker Scale-Out And Run Transparency
 
