@@ -10,6 +10,7 @@ from app.models import (
     PolicyInvocationContext,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
+    TenantEntitlementReviewPackRequest,
 )
 
 API_KEY = "dev-local-token"
@@ -125,6 +126,36 @@ def test_entitlement_api_evaluate_and_pack_export(
     assert pack.json()["summary"]["denied_skill_count"] >= 1
 
 
+def test_entitlement_coverage_flags_wildcard_review_rows() -> None:
+    state = create_state()
+
+    coverage = state.entitlements.coverage()
+
+    assert coverage.readiness_status == "needs_review"
+    assert coverage.summary["promoted_skill_count"] >= 6
+    assert coverage.summary["exact_policy_count"] >= 3
+    assert coverage.summary["wildcard_policy_count"] >= 1
+    assert coverage.review_required
+    assert any(record.coverage_status == "wildcard_policy" for record in coverage.review_required)
+
+
+def test_entitlement_coverage_api_and_review_pack(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    coverage = client.get("/tenants/entitlements/coverage", headers=auth_headers)
+    pack = client.post(
+        "/tenants/entitlements/review-pack",
+        headers=auth_headers,
+        json={"actor": "pytest-entitlement-reviewer"},
+    )
+
+    assert coverage.status_code == 200
+    assert coverage.json()["summary"]["review_required_count"] >= 1
+    assert pack.status_code == 200
+    assert pack.json()["summary"]["wildcard_policy_count"] >= 1
+
+
 @pytest.mark.asyncio
 async def test_mcp_call_enforces_entitlement_before_tool_execution() -> None:
     state = create_state()
@@ -145,6 +176,14 @@ async def test_mcp_call_enforces_entitlement_before_tool_execution() -> None:
     assert result["status"] == "failed"
     assert "Entitlement denied" in result["error"]
     assert any(event.action == "entitlement.denied" for event in state.audit.events)
+    coverage = state.entitlements.coverage()
+    denied_record = next(
+        record
+        for record in coverage.records
+        if record.tenant_id == "healthcare" and record.skill_id == "translate_text"
+    )
+    assert denied_record.denied_audit_count == 1
+    assert coverage.denied_audit_events[0]["skill_id"] == "translate_text"
 
 
 @pytest.mark.asyncio
@@ -159,3 +198,18 @@ async def test_entitlement_pack_export_writes_local_artifacts(tmp_path) -> None:
     assert export.readiness_status == "ready"
     assert (tmp_path / "tenant_entitlement_pack_latest.json").exists()
     assert (tmp_path / "tenant_entitlement_pack_latest.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_entitlement_review_pack_export_writes_local_artifacts(tmp_path) -> None:
+    state = create_state()
+    state.entitlements.output_dir = tmp_path
+
+    export = await state.entitlements.export_review_pack(
+        TenantEntitlementReviewPackRequest(actor="pytest-entitlement-reviewer")
+    )
+
+    assert export.readiness_status == "needs_review"
+    assert export.summary["review_required_count"] >= 1
+    assert (tmp_path / "tenant_entitlement_review_pack_latest.json").exists()
+    assert (tmp_path / "tenant_entitlement_review_pack_latest.md").exists()

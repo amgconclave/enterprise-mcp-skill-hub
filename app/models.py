@@ -534,6 +534,43 @@ class TenantEntitlementPackResult(BaseModel):
     summary: JsonDict
 
 
+class TenantEntitlementCoverageRecord(BaseModel):
+    tenant_id: str
+    skill_id: str
+    mcp_exposed: bool
+    coverage_status: Literal["exact_policy", "wildcard_policy", "missing_policy"]
+    has_exact_policy: bool
+    uses_wildcard_policy: bool
+    matched_policy_ids: list[str] = Field(default_factory=list)
+    denied_audit_count: int = 0
+    reviewer_action: str
+
+
+class TenantEntitlementCoverageResult(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    tenants: list[str] = Field(default_factory=list)
+    promoted_skill_ids: list[str] = Field(default_factory=list)
+    records: list[TenantEntitlementCoverageRecord] = Field(default_factory=list)
+    review_required: list[TenantEntitlementCoverageRecord] = Field(default_factory=list)
+    denied_audit_events: list[JsonDict] = Field(default_factory=list)
+    reviewer_notes: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementReviewPackRequest(BaseModel):
+    actor: str = "entitlement-reviewer"
+
+
+class TenantEntitlementReviewPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class MarketplaceTenantEligibility(BaseModel):
     scenario_id: str
     tenant: TenantKey

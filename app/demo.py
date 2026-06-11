@@ -38,6 +38,7 @@ from app.models import (
     SkillSloPackRequest,
     SupplyChainPackRequest,
     TenantEntitlementPackRequest,
+    TenantEntitlementReviewPackRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
@@ -169,6 +170,10 @@ async def main() -> None:
     )
     entitlement_pack = await state.entitlements.export_pack(
         TenantEntitlementPackRequest(actor="demo-entitlement-reviewer")
+    )
+    entitlement_coverage = state.entitlements.coverage()
+    entitlement_review_pack = await state.entitlements.export_review_pack(
+        TenantEntitlementReviewPackRequest(actor="demo-entitlement-reviewer")
     )
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
@@ -370,6 +375,16 @@ async def main() -> None:
                 "tenant_entitlement_readiness": entitlement_pack.readiness_status,
                 "tenant entitlement pack path": entitlement_pack.markdown_path,
                 "tenant_entitlement_pack_path": entitlement_pack.markdown_path,
+                "tenant entitlement coverage": entitlement_coverage.readiness_status,
+                "tenant_entitlement_coverage": entitlement_coverage.readiness_status,
+                "tenant entitlement review rows": entitlement_coverage.summary[
+                    "review_required_count"
+                ],
+                "tenant_entitlement_review_rows": entitlement_coverage.summary[
+                    "review_required_count"
+                ],
+                "tenant entitlement review pack path": entitlement_review_pack.markdown_path,
+                "tenant_entitlement_review_pack_path": entitlement_review_pack.markdown_path,
                 "skill marketplace readiness": marketplace_catalog.readiness_status,
                 "skill_marketplace_readiness": marketplace_catalog.readiness_status,
                 "marketplace catalog listings": marketplace_catalog.coverage_summary["listing_count"],

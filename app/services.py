@@ -166,10 +166,14 @@ from app.models import (
     SupplyChainPackResult,
     SupplyChainReport,
     TenantCapabilityDecision,
+    TenantEntitlementCoverageRecord,
+    TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
     TenantEntitlementPackRequest,
     TenantEntitlementPackResult,
+    TenantEntitlementReviewPackRequest,
+    TenantEntitlementReviewPackResult,
     TenantKey,
     TenantPolicyDecision,
     TenantPolicySimulationRequest,
@@ -352,6 +356,7 @@ class SkillRegistry:
 
 class TenantEntitlementService:
     PACK_ID = "tenant_entitlement_pack_latest"
+    REVIEW_PACK_ID = "tenant_entitlement_review_pack_latest"
 
     DEFAULT_POLICIES = [
         {
@@ -630,6 +635,136 @@ class TenantEntitlementService:
             summary=bundle["summary"],
         )
 
+    def coverage(self) -> TenantEntitlementCoverageResult:
+        tenants = sorted({policy.tenant_id for policy in self.policies})
+        promoted_skills = self.registry.mcp_exposed()
+        denied_counts = self._denied_audit_counts()
+        records: list[TenantEntitlementCoverageRecord] = []
+
+        for tenant_id in tenants:
+            wildcard_policies = [
+                policy for policy in self.policies if policy.tenant_id == tenant_id and policy.skill_id == "*"
+            ]
+            for skill in promoted_skills:
+                exact_policies = [
+                    policy for policy in self.policies if policy.tenant_id == tenant_id and policy.skill_id == skill.id
+                ]
+                if exact_policies:
+                    coverage_status = "exact_policy"
+                    reviewer_action = "review exact allow/deny scope before broader rollout"
+                    matched = exact_policies
+                elif wildcard_policies:
+                    coverage_status = "wildcard_policy"
+                    reviewer_action = "consider adding an exact skill policy for tenant rollout evidence"
+                    matched = wildcard_policies
+                else:
+                    coverage_status = "missing_policy"
+                    reviewer_action = "add tenant entitlement policy before allowing MCP discovery"
+                    matched = []
+                records.append(
+                    TenantEntitlementCoverageRecord(
+                        tenant_id=tenant_id,
+                        skill_id=skill.id,
+                        mcp_exposed=True,
+                        coverage_status=coverage_status,
+                        has_exact_policy=bool(exact_policies),
+                        uses_wildcard_policy=not exact_policies and bool(wildcard_policies),
+                        matched_policy_ids=[self._policy_id(policy) for policy in matched],
+                        denied_audit_count=denied_counts.get((tenant_id, skill.id), 0),
+                        reviewer_action=reviewer_action,
+                    )
+                )
+
+        review_required = [
+            record
+            for record in records
+            if record.coverage_status != "exact_policy" or record.denied_audit_count > 0
+        ]
+        missing_count = sum(1 for record in records if record.coverage_status == "missing_policy")
+        wildcard_count = sum(1 for record in records if record.coverage_status == "wildcard_policy")
+        exact_count = sum(1 for record in records if record.coverage_status == "exact_policy")
+        readiness_status: SecurityReadinessStatus = (
+            "blocked" if missing_count else "needs_review" if review_required else "ready"
+        )
+        denied_events = self._denied_audit_events()
+        return TenantEntitlementCoverageResult(
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "tenant_count": len(tenants),
+                "promoted_skill_count": len(promoted_skills),
+                "coverage_record_count": len(records),
+                "exact_policy_count": exact_count,
+                "wildcard_policy_count": wildcard_count,
+                "missing_policy_count": missing_count,
+                "review_required_count": len(review_required),
+                "denied_audit_event_count": len(denied_events),
+            },
+            tenants=tenants,
+            promoted_skill_ids=sorted(skill.id for skill in promoted_skills),
+            records=records,
+            review_required=review_required,
+            denied_audit_events=denied_events,
+            reviewer_notes=[
+                "Coverage is derived from promoted MCP skills and static local entitlement policies.",
+                "Wildcard policy coverage is allowed locally but flagged for reviewer attention before tenant rollout.",
+                "Denied audit evidence comes from enforced entitlement gates and proves denied calls stopped before tool execution.",
+            ],
+        )
+
+    async def export_review_pack(
+        self,
+        request: TenantEntitlementReviewPackRequest | None = None,
+    ) -> TenantEntitlementReviewPackResult:
+        request = request or TenantEntitlementReviewPackRequest()
+        coverage = self.coverage()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.REVIEW_PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.REVIEW_PACK_ID}.md"
+        bundle = {
+            "pack_id": self.REVIEW_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "readiness_status": coverage.readiness_status,
+            "summary": coverage.summary,
+            "coverage": coverage.model_dump(mode="json"),
+            "production_patterns": [
+                "governance: reviewer-facing policy coverage and exception evidence",
+                "tool_governance: entitlement coverage is derived from promoted MCP tool exposure",
+            ],
+            "local_verification_commands": [
+                "python -m pytest tests/test_tenant_entitlements.py -q",
+                "python -m app.mcp_server tools",
+                "python -m app.demo",
+            ],
+            "limitations": [
+                "Coverage uses deterministic local policy fixtures instead of an external IAM or policy engine.",
+                "Wildcard policy reliance is flagged for review but not blocked in local/mock mode.",
+                "Denied audit evidence appears only after enforced entitlement calls have been exercised.",
+            ],
+        }
+        json_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._review_markdown(bundle), encoding="utf-8")
+        self.audit.record(
+            "entitlement.review_pack_exported",
+            "entitlement_pack",
+            self.REVIEW_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": coverage.readiness_status,
+                "review_required_count": coverage.summary["review_required_count"],
+                "wildcard_policy_count": coverage.summary["wildcard_policy_count"],
+            },
+        )
+        return TenantEntitlementReviewPackResult(
+            pack_id=self.REVIEW_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=coverage.readiness_status,
+            json_path=str(json_path),
+            markdown_path=str(markdown_path),
+            summary=coverage.summary,
+        )
+
     def _missing_skill_decision(
         self,
         skill_id: str,
@@ -686,6 +821,35 @@ class TenantEntitlementService:
     def _policy_id(self, policy: TenantSkillEntitlementPolicy) -> str:
         return f"{policy.tenant_id}:{policy.skill_id}"
 
+    def _denied_audit_events(self) -> list[JsonDict]:
+        events: list[JsonDict] = []
+        for event in self.audit.events:
+            if event.action != "entitlement.denied":
+                continue
+            decision = event.metadata.get("entitlement_decision", {})
+            events.append(
+                {
+                    "event_id": event.id,
+                    "trace_id": event.trace_id,
+                    "actor": event.actor,
+                    "tenant_id": decision.get("tenant_id"),
+                    "user_id": decision.get("user_id"),
+                    "skill_id": decision.get("skill_id", event.resource_id),
+                    "role": decision.get("role"),
+                    "created_at": event.created_at.isoformat(),
+                    "reasons": decision.get("reasons", []),
+                }
+            )
+        return events
+
+    def _denied_audit_counts(self) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        for event in self._denied_audit_events():
+            tenant_id = str(event.get("tenant_id") or "unknown")
+            skill_id = str(event.get("skill_id") or "unknown")
+            counts[(tenant_id, skill_id)] = counts.get((tenant_id, skill_id), 0) + 1
+        return counts
+
     def _markdown(self, bundle: JsonDict) -> str:
         lines = [
             "# Tenant RBAC And Skill Entitlement Pack",
@@ -721,6 +885,59 @@ class TenantEntitlementService:
             ]
         )
         lines.extend(f"- {item}" for item in bundle["limitations"])
+        return "\n".join(lines)
+
+    def _review_markdown(self, bundle: JsonDict) -> str:
+        coverage = bundle["coverage"]
+        lines = [
+            "# Tenant Entitlement Coverage Review Pack",
+            "",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Tenants: `{bundle['summary']['tenant_count']}`",
+            f"- Promoted MCP skills: `{bundle['summary']['promoted_skill_count']}`",
+            f"- Exact policies: `{bundle['summary']['exact_policy_count']}`",
+            f"- Wildcard policies: `{bundle['summary']['wildcard_policy_count']}`",
+            f"- Missing policies: `{bundle['summary']['missing_policy_count']}`",
+            f"- Review-required rows: `{bundle['summary']['review_required_count']}`",
+            "",
+            "## Review Required",
+        ]
+        for record in coverage["review_required"][:20]:
+            lines.append(
+                "- "
+                f"`{record['tenant_id']}` / `{record['skill_id']}` "
+                f"status=`{record['coverage_status']}` "
+                f"denied_events=`{record['denied_audit_count']}` "
+                f"action={record['reviewer_action']}"
+            )
+        lines.extend(
+            [
+                "",
+                "## Denied Entitlement Evidence",
+            ]
+        )
+        if coverage["denied_audit_events"]:
+            for event in coverage["denied_audit_events"][:10]:
+                lines.append(
+                    "- "
+                    f"`{event['tenant_id']}` / `{event['skill_id']}` "
+                    f"trace=`{event['trace_id']}` actor=`{event['actor']}`"
+                )
+        else:
+            lines.append("- No enforced entitlement denial has been recorded in this local process yet.")
+        lines.extend(
+            [
+                "",
+                "## Production Patterns",
+                *[f"- {pattern}" for pattern in bundle["production_patterns"]],
+                "",
+                "## Local Verification",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+            ]
+        )
         return "\n".join(lines)
 
 

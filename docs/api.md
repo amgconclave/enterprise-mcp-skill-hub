@@ -41,8 +41,10 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /tenants/policy-simulate` - simulates tenant, role, environment, and data sensitivity policy for MCP skills and workflows; returns allowed, blocked, and review-required decisions, reasons, MCP impact, recommended guardrails, warnings, exclusions, and readiness.
 - `POST /tenants/sandbox-export` - writes `tenant_policy_sandbox_latest.json` and `tenant_policy_sandbox_latest.md` under ignored local folder `data/tenant_sandboxes/`.
 - `GET /tenants/entitlements/policies` - returns local tenant/user RBAC skill entitlement policies.
+- `GET /tenants/entitlements/coverage` - reports promoted MCP skill coverage across tenant exact/wildcard policies, review-required rows, and denied entitlement audit evidence.
 - `POST /tenants/entitlements/evaluate` - evaluates tenant id, user id, scopes, role, environment, sensitivity, and requested skill ids into allowed/denied MCP-safe skill decisions.
 - `POST /tenants/entitlements/pack` - writes `tenant_entitlement_pack_latest.json` and `.md` under ignored local folder `data/entitlement_packs/`.
+- `POST /tenants/entitlements/review-pack` - writes `tenant_entitlement_review_pack_latest.json` and `.md` with entitlement coverage, wildcard-policy review rows, denied audit evidence, and local verification commands.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 - `GET /skills/compatibility` - returns semantic version compatibility checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, and coverage summary.
@@ -368,6 +370,7 @@ The export includes the tenant policy matrix, scenario results, blocked/review a
 
 ```powershell
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/policies -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/coverage -Headers $headers
 
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate `
   -Headers $headers `
@@ -393,9 +396,15 @@ Invoke-RestMethod http://localhost:8000/tenants/entitlements/pack `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"actor":"entitlement-reviewer"}'
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"entitlement-reviewer"}'
 ```
 
-The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The pack writes Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, reviewer proof, and local-only limitations.
+The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The coverage report compares promoted MCP tools against exact and wildcard tenant policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. The packs write Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, coverage review rows, reviewer proof, and local-only limitations.
 
 ## Skill Marketplace Governance And Tenant Rollout
 

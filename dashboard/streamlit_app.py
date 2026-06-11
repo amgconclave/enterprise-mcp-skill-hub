@@ -54,6 +54,7 @@ from app.models import (
     SupplyChainPackRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
+    TenantEntitlementReviewPackRequest,
     TenantPolicySimulationRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
@@ -500,13 +501,14 @@ elif view == "Tenant RBAC / Entitlements":
         skill_ids=selected_skill_ids,
     )
     entitlement = state.entitlements.matrix(entitlement_request)
+    coverage = state.entitlements.coverage()
     col_ready, col_allowed, col_denied, col_safe = st.columns(4)
     col_ready.metric("Readiness", entitlement.readiness_status.upper())
     col_allowed.metric("Allowed", entitlement.summary["allowed_skill_count"])
     col_denied.metric("Denied", entitlement.summary["denied_skill_count"])
     col_safe.metric("MCP-safe tools", entitlement.summary["mcp_safe_tool_count"])
-    tab_decisions, tab_policies, tab_mcp, tab_export, tab_json = st.tabs(
-        ["Decisions", "Policies", "MCP Safe", "Export", "JSON"]
+    tab_decisions, tab_policies, tab_mcp, tab_coverage, tab_export, tab_json = st.tabs(
+        ["Decisions", "Policies", "MCP Safe", "Coverage", "Export", "JSON"]
     )
     with tab_decisions:
         st.dataframe(
@@ -558,6 +560,30 @@ elif view == "Tenant RBAC / Entitlements":
                 },
             }
         )
+    with tab_coverage:
+        st.caption("Policy coverage and exception evidence across promoted MCP tools.")
+        col_cov_ready, col_cov_exact, col_cov_wild, col_cov_review = st.columns(4)
+        col_cov_ready.metric("Coverage", coverage.readiness_status.upper())
+        col_cov_exact.metric("Exact policies", coverage.summary["exact_policy_count"])
+        col_cov_wild.metric("Wildcard rows", coverage.summary["wildcard_policy_count"])
+        col_cov_review.metric("Review rows", coverage.summary["review_required_count"])
+        st.dataframe(
+            [
+                {
+                    "tenant": record.tenant_id,
+                    "skill": record.skill_id,
+                    "status": record.coverage_status,
+                    "policies": ", ".join(record.matched_policy_ids),
+                    "denied_events": record.denied_audit_count,
+                    "reviewer_action": record.reviewer_action,
+                }
+                for record in coverage.review_required
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        with st.expander("Coverage JSON"):
+            st.json(coverage.model_dump(mode="json"))
     with tab_export:
         st.caption("Writes Markdown and JSON under data/entitlement_packs/.")
         if st.button("Export Entitlement Pack", use_container_width=True):
@@ -571,6 +597,14 @@ elif view == "Tenant RBAC / Entitlements":
             )
             st.success("Tenant RBAC entitlement pack exported.")
             st.json(export.model_dump(mode="json"))
+        if st.button("Export Coverage Review Pack", use_container_width=True):
+            review_export = run_async(
+                state.entitlements.export_review_pack(
+                    TenantEntitlementReviewPackRequest(actor="streamlit-entitlement-reviewer")
+                )
+            )
+            st.success("Tenant entitlement coverage review pack exported.")
+            st.json(review_export.model_dump(mode="json"))
     with tab_json:
         st.json(entitlement.model_dump(mode="json"))
 

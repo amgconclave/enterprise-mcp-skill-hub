@@ -24,7 +24,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Cross-Agent Skill Dependency Map + Blast Radius Analyzer for graphing promoted skills, MCP tools/prompts/resources, workflows, release evidence, audit history, and capacity impact before owners change a skill, prompt, resource, or workflow template.
 - Skill Incident Drill + Recovery Runbook for deterministic local reliability scenarios covering schema breakage, disabled skill invocation, policy denial spikes, latency/capacity breaches, and workflow dependency failures.
 - Tenant Policy Sandbox + Data Sensitivity Simulator for healthcare, fintech, public sector, and internal demo tenants, returning allowed, blocked, and review-required MCP skills/workflows plus guardrails and exportable evidence.
-- Tenant RBAC + Skill Entitlement Pack for local tenant/user scopes, allowed and denied skill policies, MCP-safe tool subsets, enforced denied invocation audit events, dashboard review, and ignored `data/entitlement_packs/` artifacts.
+- Tenant RBAC + Skill Entitlement Pack for local tenant/user scopes, allowed and denied skill policies, MCP-safe tool subsets, entitlement coverage drift review, enforced denied invocation audit events, dashboard review, and ignored `data/entitlement_packs/` artifacts.
 - Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
 - Skill Version Compatibility Pack for SemVer checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, dashboard review, and ignored `data/compatibility_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
@@ -434,7 +434,9 @@ Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","environment":"local","data_sensitivity":"internal","user_scopes":["skill.invoke","tenant.healthcare"]}'
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/coverage -Headers $headers
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack -Method POST -Headers $headers
 ```
 
 Entitlement enforcement is opt-in on skill and MCP calls. This example is denied because healthcare agents are not entitled to `translate_text` without reviewer scopes:
@@ -454,7 +456,7 @@ Invoke-RestMethod http://localhost:8000/skills/translate_text/invoke `
   -Body '{"input":{"text":"Patient follow-up note","target_language":"Spanish"},"actor":"care-agent"}'
 ```
 
-`POST /tenants/entitlements/evaluate` returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`. Enforced denied invocations return `403`, create failed invocation history rows, and record `entitlement.denied` audit events. `POST /tenants/entitlements/pack` writes `tenant_entitlement_pack_latest.json` and `.md` under ignored `data/entitlement_packs/`.
+`POST /tenants/entitlements/evaluate` returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`. `GET /tenants/entitlements/coverage` compares promoted MCP tools against tenant exact and wildcard policies, flags review-required wildcard rows, and includes denied-entitlement audit evidence. Enforced denied invocations return `403`, create failed invocation history rows, and record `entitlement.denied` audit events. `POST /tenants/entitlements/pack` writes `tenant_entitlement_pack_latest.json` and `.md`; `POST /tenants/entitlements/review-pack` writes `tenant_entitlement_review_pack_latest.json` and `.md` under ignored `data/entitlement_packs/`.
 
 ## Skill Marketplace Governance And Tenant Rollout
 

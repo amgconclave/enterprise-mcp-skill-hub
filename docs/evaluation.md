@@ -264,6 +264,18 @@ Invoke-RestMethod http://localhost:8000/tenants/sandbox-export -Method POST -Hea
 
 The response separates allowed, blocked, and review-required skills/workflows, reports policy reasons, impacted MCP tools/resources/prompts, recommended guardrails, warnings, readiness, and disabled/draft exclusions. Export writes `tenant_policy_sandbox_latest.json` and `.md` under ignored `data/tenant_sandboxes/` with the policy matrix, scenario results, blocked/review actions, MCP impact, local verification commands, JD skills demonstrated, and five interviewer talking points.
 
+## Tenant Entitlement Coverage Evidence
+
+Tenant entitlement checks demonstrate local RBAC, scope enforcement, MCP-safe tool subsets, and reviewer coverage drift:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate -Method POST -Headers $headers -ContentType "application/json" -Body '{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","user_scopes":["skill.invoke","tenant.healthcare"]}'
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/coverage -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack -Method POST -Headers $headers
+```
+
+The coverage report compares promoted MCP tools against tenant exact and wildcard policies, flags wildcard-only rows for review, and includes denied `entitlement.denied` audit evidence when enforced calls have been exercised. Review pack export writes `tenant_entitlement_review_pack_latest.json` and `.md` under ignored `data/entitlement_packs/` with governance/tool-governance proof, local verification commands, and limitations.
+
 ## Skill Marketplace Rollout Approval Evidence
 
 Marketplace governance demonstrates reviewed local capability rollout instead of raw MCP discovery:

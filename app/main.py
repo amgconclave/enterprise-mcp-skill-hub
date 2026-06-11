@@ -137,10 +137,13 @@ from app.models import (
     SupplyChainPackRequest,
     SupplyChainPackResult,
     SupplyChainReport,
+    TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
     TenantEntitlementPackRequest,
     TenantEntitlementPackResult,
+    TenantEntitlementReviewPackRequest,
+    TenantEntitlementReviewPackResult,
     TenantPolicySimulationRequest,
     TenantPolicySimulationResult,
     TenantSandboxExportRequest,
@@ -279,6 +282,11 @@ def tenant_entitlement_policies(_: str = Depends(require_api_key)) -> list[Tenan
     return state.entitlements.list_policies()
 
 
+@app.get("/tenants/entitlements/coverage", response_model=TenantEntitlementCoverageResult)
+def tenant_entitlement_coverage(_: str = Depends(require_api_key)) -> TenantEntitlementCoverageResult:
+    return state.entitlements.coverage()
+
+
 @app.post("/tenants/entitlements/evaluate", response_model=TenantEntitlementMatrixResult)
 def tenant_entitlement_evaluate(
     request: TenantEntitlementMatrixRequest | None = None,
@@ -293,6 +301,14 @@ async def tenant_entitlement_pack(
     _: str = Depends(require_api_key),
 ) -> TenantEntitlementPackResult:
     return await state.entitlements.export_pack(request or TenantEntitlementPackRequest())
+
+
+@app.post("/tenants/entitlements/review-pack", response_model=TenantEntitlementReviewPackResult)
+async def tenant_entitlement_review_pack(
+    request: TenantEntitlementReviewPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementReviewPackResult:
+    return await state.entitlements.export_review_pack(request or TenantEntitlementReviewPackRequest())
 
 
 @app.get("/marketplace/catalog", response_model=MarketplaceCatalogResult)

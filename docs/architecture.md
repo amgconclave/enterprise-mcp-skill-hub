@@ -252,7 +252,8 @@ The project keeps governance close to the skill runtime:
 3. The response returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`.
 4. A skill or MCP caller can set `X-Entitlement-Enforce: true` plus tenant/user/scope headers to enforce the same decision before execution.
 5. Denied entitlement calls stop before handlers/providers run, create a failed invocation, record `entitlement.denied`, and remain replayable through the invocation replay endpoint.
-6. `POST /tenants/entitlements/pack` writes Markdown and JSON under ignored `data/entitlement_packs/` with scenario matrices, reviewer proof, local commands, and limitations.
+6. `GET /tenants/entitlements/coverage` compares promoted MCP tools against tenant exact and wildcard policies, flags wildcard-only coverage rows for review, and includes denied entitlement audit evidence.
+7. `POST /tenants/entitlements/pack` and `POST /tenants/entitlements/review-pack` write Markdown and JSON under ignored `data/entitlement_packs/` with scenario matrices, coverage drift review, reviewer proof, local commands, and limitations.
 
 ## Skill Marketplace Tenant Rollout Flow
 
