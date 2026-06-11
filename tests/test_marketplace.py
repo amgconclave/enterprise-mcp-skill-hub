@@ -9,7 +9,14 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.bootstrap import create_state, schema
 from app.main import app
-from app.models import MarketplaceRolloutPackRequest, SkillManifest
+from app.models import (
+    MarketplaceApprovalDecisionRequest,
+    MarketplaceApprovalPackRequest,
+    MarketplaceApprovalSubmitRequest,
+    MarketplaceRolloutPackRequest,
+    MarketplaceStageAdvanceRequest,
+    SkillManifest,
+)
 from app.services import SkillMarketplaceGovernanceService
 
 HEADERS = {"X-API-Key": "dev-local-token"}
@@ -132,6 +139,105 @@ def test_rollout_pack_writes_reviewer_artifacts(tmp_path: Path) -> None:
     assert "Local Proof Commands" in markdown
 
 
+def test_approval_workflow_records_owner_signoff_and_stage_gates(tmp_path: Path) -> None:
+    state = marketplace_state(tmp_path)
+
+    submitted = asyncio.run(
+        state.marketplace.submit_approval(
+            MarketplaceApprovalSubmitRequest(
+                skill_id="summarize_document",
+                tenant_scenario_id="internal_ops_local",
+                actor="pytest-marketplace-reviewer",
+                owner="pytest-platform-owner",
+                note="Approve local internal rollout.",
+            )
+        )
+    )
+    decided = state.marketplace.decide_approval(
+        submitted.approval_id,
+        MarketplaceApprovalDecisionRequest(
+            actor="pytest-platform-owner",
+            decision="approve",
+            owner_signoff=True,
+            note="Owner signoff complete.",
+        ),
+    )
+    canary = state.marketplace.advance_stage(
+        submitted.approval_id,
+        MarketplaceStageAdvanceRequest(
+            actor="pytest-release-manager",
+            next_stage="tenant_canary",
+            note="Canary started.",
+        ),
+    )
+    queue = asyncio.run(state.marketplace.approval_queue())
+
+    assert submitted.status == "pending"
+    assert decided.status == "approved"
+    assert decided.current_stage == "owner_signoff"
+    assert decided.signoffs[0]["status"] == "signed"
+    assert canary.current_stage == "tenant_canary"
+    assert queue.summary["approval_record_count"] == 1
+    assert any("human-in-the-loop" in pattern for pattern in queue.architecture_patterns)
+    assert any(row["stage"] == "tenant_general_availability" for row in canary.rollout_stages)
+
+
+def test_approval_workflow_blocks_failed_catalog_promotion_checks(tmp_path: Path) -> None:
+    state = marketplace_state(tmp_path)
+
+    blocked = asyncio.run(
+        state.marketplace.submit_approval(
+            MarketplaceApprovalSubmitRequest(
+                skill_id="translate_text",
+                tenant_scenario_id="fintech_confidential_prod",
+                actor="pytest-marketplace-reviewer",
+                owner="pytest-platform-owner",
+            )
+        )
+    )
+    queue = asyncio.run(state.marketplace.approval_queue())
+
+    assert blocked.status == "blocked"
+    assert blocked.current_stage == "blocked"
+    assert any(check["status"] == "fail" for check in blocked.promotion_checks)
+    assert queue.readiness_status == "blocked"
+    assert queue.summary["failed_catalog_check_count"] >= 1
+
+
+def test_approval_pack_writes_workflow_artifacts(tmp_path: Path) -> None:
+    state = marketplace_state(tmp_path)
+    asyncio.run(
+        state.marketplace.submit_approval(
+            MarketplaceApprovalSubmitRequest(
+                skill_id="summarize_document",
+                tenant_scenario_id="internal_ops_local",
+                actor="pytest-marketplace-reviewer",
+                owner="pytest-platform-owner",
+            )
+        )
+    )
+
+    export = asyncio.run(
+        state.marketplace.approval_pack(
+            MarketplaceApprovalPackRequest(actor="pytest-marketplace-reviewer")
+        )
+    )
+
+    json_path = Path(export.json_path)
+    markdown_path = Path(export.markdown_path)
+    assert export.pack_id == "marketplace_approval_workflow_latest"
+    assert json_path.exists()
+    assert markdown_path.exists()
+    bundle = json.loads(json_path.read_text(encoding="utf-8"))
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "approval_records" in bundle
+    assert "catalog_promotion_checks" in bundle
+    assert "rollout_stage_policy" in bundle
+    assert "architecture_patterns" in bundle
+    assert "Skill Marketplace Approval Workflow Pack" in markdown
+    assert "Architecture Patterns" in markdown
+
+
 def test_marketplace_endpoints_return_catalog_and_pack(tmp_path: Path) -> None:
     main_module.state = marketplace_state(tmp_path)
     client = TestClient(app)
@@ -139,6 +245,33 @@ def test_marketplace_endpoints_return_catalog_and_pack(tmp_path: Path) -> None:
     catalog = client.get("/marketplace/catalog", headers=HEADERS)
     export = client.post(
         "/marketplace/rollout-pack",
+        json={"actor": "pytest-marketplace-reviewer"},
+        headers=HEADERS,
+    )
+    submitted = client.post(
+        "/marketplace/approvals/submit",
+        json={
+            "skill_id": "summarize_document",
+            "tenant_scenario_id": "internal_ops_local",
+            "actor": "pytest-marketplace-reviewer",
+            "owner": "pytest-platform-owner",
+        },
+        headers=HEADERS,
+    )
+    approval_id = submitted.json()["approval_id"]
+    decision = client.post(
+        f"/marketplace/approvals/{approval_id}/decision",
+        json={"actor": "pytest-platform-owner", "decision": "approve", "owner_signoff": True},
+        headers=HEADERS,
+    )
+    stage = client.post(
+        f"/marketplace/approvals/{approval_id}/stage",
+        json={"actor": "pytest-release-manager", "next_stage": "tenant_canary"},
+        headers=HEADERS,
+    )
+    approvals = client.get("/marketplace/approvals", headers=HEADERS)
+    approval_pack = client.post(
+        "/marketplace/approval-pack",
         json={"actor": "pytest-marketplace-reviewer"},
         headers=HEADERS,
     )
@@ -150,6 +283,16 @@ def test_marketplace_endpoints_return_catalog_and_pack(tmp_path: Path) -> None:
     assert export.status_code == 200
     assert export.json()["pack_id"] == "rollout_approval_pack_latest"
     assert Path(export.json()["json_path"]).exists()
+    assert submitted.status_code == 200
+    assert decision.status_code == 200
+    assert decision.json()["status"] == "approved"
+    assert stage.status_code == 200
+    assert stage.json()["current_stage"] == "tenant_canary"
+    assert approvals.status_code == 200
+    assert approvals.json()["summary"]["approval_record_count"] == 1
+    assert approval_pack.status_code == 200
+    assert approval_pack.json()["pack_id"] == "marketplace_approval_workflow_latest"
+    assert Path(approval_pack.json()["json_path"]).exists()
 
 
 def test_dashboard_smoke_artifact_inventory_and_api_contract_wire_marketplace(tmp_path: Path) -> None:
@@ -162,9 +305,14 @@ def test_dashboard_smoke_artifact_inventory_and_api_contract_wire_marketplace(tm
 
     assert any(view["label"] == "Skill Marketplace" for view in smoke.expected_views)
     assert any(endpoint["path"] == "/marketplace/catalog" for endpoint in smoke.endpoint_references)
+    assert any(endpoint["path"] == "/marketplace/approval-pack" for endpoint in smoke.endpoint_references)
     assert any(tab["artifact_dir"] == "data/marketplace_packs/" for tab in smoke.generated_artifact_tabs)
     assert any(item.directory == "data/marketplace_packs" for item in inventory.items)
     assert any(
         item["path"] == "/marketplace/rollout-pack"
+        for item in api_contract.docs_api_coverage
+    )
+    assert any(
+        item["path"] == "/marketplace/approval-pack"
         for item in api_contract.docs_api_coverage
     )

@@ -31,6 +31,15 @@ TenantEntitlementDecisionValue = Literal["allow", "deny"]
 MarketplaceListingStatus = Literal["approved", "promoted", "draft", "disabled"]
 MarketplaceRiskLevel = Literal["low", "medium", "high"]
 MarketplaceReviewState = Literal["none", "approval_required", "review_required", "blocked", "disabled_block"]
+MarketplaceApprovalStatus = Literal["pending", "approved", "rejected", "blocked"]
+MarketplaceDecision = Literal["approve", "reject"]
+MarketplaceRolloutStage = Literal[
+    "catalog_review",
+    "owner_signoff",
+    "tenant_canary",
+    "tenant_general_availability",
+    "blocked",
+]
 SkillCompatibilityStatus = Literal["compatible", "needs_review", "incompatible", "deprecated"]
 SkillVersionDelta = Literal["initial", "patch", "minor", "major", "same", "non_semver"]
 WorkflowReviewStatus = Literal["draft", "in_review", "approved", "rejected"]
@@ -651,6 +660,75 @@ class MarketplaceRolloutPackRequest(BaseModel):
 
 
 class MarketplaceRolloutPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class MarketplaceApprovalSubmitRequest(BaseModel):
+    skill_id: str = "summarize_document"
+    tenant_scenario_id: str = "internal_ops_local"
+    actor: str = "marketplace-reviewer"
+    owner: str = "platform-owner"
+    owner_role: str = "platform_owner"
+    note: str | None = None
+
+
+class MarketplaceApprovalDecisionRequest(BaseModel):
+    actor: str = "marketplace-reviewer"
+    decision: MarketplaceDecision = "approve"
+    owner_signoff: bool = True
+    note: str | None = None
+
+
+class MarketplaceStageAdvanceRequest(BaseModel):
+    actor: str = "marketplace-release-manager"
+    next_stage: MarketplaceRolloutStage = "tenant_canary"
+    note: str | None = None
+
+
+class MarketplaceApprovalPackRequest(BaseModel):
+    actor: str = "marketplace-reviewer"
+
+
+class MarketplaceApprovalRecord(BaseModel):
+    approval_id: str
+    skill_id: str
+    tenant_scenario_id: str
+    status: MarketplaceApprovalStatus
+    current_stage: MarketplaceRolloutStage
+    requested_by: str
+    owner: str
+    owner_role: str
+    created_at: datetime
+    updated_at: datetime
+    trace_id: str
+    listing_snapshot: JsonDict
+    tenant_decision: JsonDict
+    promotion_checks: list[JsonDict] = Field(default_factory=list)
+    required_signoffs: list[JsonDict] = Field(default_factory=list)
+    signoffs: list[JsonDict] = Field(default_factory=list)
+    rollout_stages: list[JsonDict] = Field(default_factory=list)
+    reviewer_notes: list[str] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+
+
+class MarketplaceApprovalQueueResult(BaseModel):
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    approval_records: list[MarketplaceApprovalRecord] = Field(default_factory=list)
+    catalog_promotion_checks: list[JsonDict] = Field(default_factory=list)
+    rollout_stage_policy: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class MarketplaceApprovalPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

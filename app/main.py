@@ -77,9 +77,16 @@ from app.models import (
     LaunchChecklistRequest,
     LaunchChecklistResult,
     LocalSnapshot,
+    MarketplaceApprovalDecisionRequest,
+    MarketplaceApprovalPackRequest,
+    MarketplaceApprovalPackResult,
+    MarketplaceApprovalQueueResult,
+    MarketplaceApprovalRecord,
+    MarketplaceApprovalSubmitRequest,
     MarketplaceCatalogResult,
     MarketplaceRolloutPackRequest,
     MarketplaceRolloutPackResult,
+    MarketplaceStageAdvanceRequest,
     McpToolDefinition,
     PolicyInvocationContext,
     PolicySimulationRequest,
@@ -330,6 +337,64 @@ async def marketplace_rollout_pack(
     _: str = Depends(require_api_key),
 ) -> MarketplaceRolloutPackResult:
     return await state.marketplace.rollout_pack(request or MarketplaceRolloutPackRequest())
+
+
+@app.get("/marketplace/approvals", response_model=MarketplaceApprovalQueueResult)
+async def marketplace_approval_queue(_: str = Depends(require_api_key)) -> MarketplaceApprovalQueueResult:
+    return await state.marketplace.approval_queue()
+
+
+@app.post("/marketplace/approvals/submit", response_model=MarketplaceApprovalRecord)
+async def marketplace_submit_approval(
+    request: MarketplaceApprovalSubmitRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> MarketplaceApprovalRecord:
+    try:
+        return await state.marketplace.submit_approval(request or MarketplaceApprovalSubmitRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/marketplace/approvals/{approval_id}/decision", response_model=MarketplaceApprovalRecord)
+def marketplace_approval_decision(
+    approval_id: str,
+    request: MarketplaceApprovalDecisionRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> MarketplaceApprovalRecord:
+    try:
+        return state.marketplace.decide_approval(
+            approval_id,
+            request or MarketplaceApprovalDecisionRequest(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/marketplace/approvals/{approval_id}/stage", response_model=MarketplaceApprovalRecord)
+def marketplace_approval_stage(
+    approval_id: str,
+    request: MarketplaceStageAdvanceRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> MarketplaceApprovalRecord:
+    try:
+        return state.marketplace.advance_stage(
+            approval_id,
+            request or MarketplaceStageAdvanceRequest(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/marketplace/approval-pack", response_model=MarketplaceApprovalPackResult)
+async def marketplace_approval_pack(
+    request: MarketplaceApprovalPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> MarketplaceApprovalPackResult:
+    return await state.marketplace.approval_pack(request or MarketplaceApprovalPackRequest())
 
 
 @app.get("/skills/compatibility", response_model=SkillCompatibilityReport)

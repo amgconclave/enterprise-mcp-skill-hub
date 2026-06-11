@@ -49,6 +49,11 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /tenants/entitlements/review-pack` - writes `tenant_entitlement_review_pack_latest.json` and `.md` with entitlement coverage, wildcard-policy review rows, denied audit evidence, and local verification commands.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
+- `GET /marketplace/approvals` - returns the local approval queue, catalog promotion checks, owner signoff requirements, rollout stage policy, local proof commands, and architecture patterns for durable workflows, human-in-the-loop, governance, and tool governance.
+- `POST /marketplace/approvals/submit` - creates a local marketplace approval record for one skill and tenant scenario after schema, MCP exposure, tenant policy, risk, and version promotion checks.
+- `POST /marketplace/approvals/{approval_id}/decision` - records owner signoff approval or rejection for a marketplace rollout approval record.
+- `POST /marketplace/approvals/{approval_id}/stage` - advances an approved marketplace rollout through tenant canary and tenant general availability stages.
+- `POST /marketplace/approval-pack` - writes the Skill Marketplace Approval Workflow Pack Markdown/JSON under ignored local folder `data/marketplace_packs/`.
 - `GET /skills/compatibility` - returns semantic version compatibility checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, and coverage summary.
 - `GET /skills/{skill_id}/compatibility` - returns the compatibility record for one skill.
 - `POST /skills/compatibility-pack` - writes the Skill Version Compatibility Pack Markdown/JSON under ignored local folder `data/compatibility_packs/`.
@@ -423,11 +428,35 @@ Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"actor":"marketplace-reviewer"}'
+
+$approval = Invoke-RestMethod http://localhost:8000/marketplace/approvals/submit `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"summarize_document","tenant_scenario_id":"internal_ops_local","actor":"marketplace-reviewer","owner":"platform-owner"}'
+
+Invoke-RestMethod "http://localhost:8000/marketplace/approvals/$($approval.approval_id)/decision" `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-owner","decision":"approve","owner_signoff":true}'
+
+Invoke-RestMethod "http://localhost:8000/marketplace/approvals/$($approval.approval_id)/stage" `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"release-manager","next_stage":"tenant_canary"}'
+
+Invoke-RestMethod http://localhost:8000/marketplace/approval-pack `
+  -Headers $headers `
+  -Method POST
 ```
 
 The catalog returns approved/promoted/draft/disabled skill listings, version history, deterministic tenant eligibility for internal ops, regulated healthcare, fintech/confidential, and public-sector restricted scenarios, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollout rows, and coverage summary.
 
 The rollout approval pack writes `rollout_approval_pack_latest.json` and `.md` under ignored `data/marketplace_packs/`. It includes rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
+
+The approval workflow endpoints add local human-in-the-loop evidence on top of catalog governance. Approval records capture promotion checks, owner signoff, tenant scenario, current rollout stage, trace ID, reviewer notes, and stage exit criteria. The approval workflow pack writes `marketplace_approval_workflow_latest.json` and `.md` under ignored `data/marketplace_packs/`.
 
 ## Skill Usage Analytics And Cost Chargeback
 

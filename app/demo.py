@@ -23,6 +23,8 @@ from app.models import (
     GovernedSkillPlatformPackRequest,
     InvocationSandboxPackRequest,
     LaunchChecklistRequest,
+    MarketplaceApprovalPackRequest,
+    MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
@@ -181,6 +183,18 @@ async def main() -> None:
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
         MarketplaceRolloutPackRequest(actor="demo-marketplace-reviewer")
+    )
+    await state.marketplace.submit_approval(
+        MarketplaceApprovalSubmitRequest(
+            skill_id="summarize_document",
+            tenant_scenario_id="internal_ops_local",
+            actor="demo-marketplace-reviewer",
+            owner="demo-platform-owner",
+            note="Demo marketplace approval workflow.",
+        )
+    )
+    marketplace_approval_pack = await state.marketplace.approval_pack(
+        MarketplaceApprovalPackRequest(actor="demo-marketplace-reviewer")
     )
     compatibility_report = state.compatibility.report()
     compatibility_pack = state.compatibility.pack(
@@ -407,6 +421,8 @@ async def main() -> None:
                 "marketplace_catalog_listings": marketplace_catalog.coverage_summary["listing_count"],
                 "tenant rollout approval pack path": marketplace_pack.markdown_path,
                 "tenant_rollout_approval_pack_path": marketplace_pack.markdown_path,
+                "marketplace approval workflow pack path": marketplace_approval_pack.markdown_path,
+                "marketplace_approval_workflow_pack_path": marketplace_approval_pack.markdown_path,
                 "skill compatibility readiness": compatibility_report.readiness_status,
                 "skill_compatibility_readiness": compatibility_report.readiness_status,
                 "skill compatibility pack path": compatibility_pack.markdown_path,

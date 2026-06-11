@@ -34,7 +34,11 @@ from app.models import (
     InvocationSandboxEvaluateRequest,
     InvocationSandboxPackRequest,
     LaunchChecklistRequest,
+    MarketplaceApprovalDecisionRequest,
+    MarketplaceApprovalPackRequest,
+    MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
+    MarketplaceStageAdvanceRequest,
     PolicyInvocationContext,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
@@ -623,8 +627,8 @@ elif view == "Skill Marketplace":
     col_blocked.metric("Blocked rollouts", catalog.coverage_summary["blocked_rollout_count"])
     col_review.metric("Review required", catalog.coverage_summary["review_required_rollout_count"])
 
-    tab_catalog, tab_tenants, tab_versions, tab_export, tab_json = st.tabs(
-        ["Catalog", "Tenant Rollout", "Versions", "Export", "JSON"]
+    tab_catalog, tab_tenants, tab_versions, tab_approvals, tab_export, tab_json = st.tabs(
+        ["Catalog", "Tenant Rollout", "Versions", "Approval Workflow", "Export", "JSON"]
     )
     with tab_catalog:
         st.dataframe(
@@ -663,6 +667,98 @@ elif view == "Skill Marketplace":
             use_container_width=True,
             hide_index=True,
         )
+    with tab_approvals:
+        queue = run_async(state.marketplace.approval_queue())
+        col_queue_ready, col_pending, col_approved, col_blocked = st.columns(4)
+        col_queue_ready.metric("Workflow readiness", queue.readiness_status.upper())
+        col_pending.metric("Pending", queue.summary["pending_count"])
+        col_approved.metric("Approved", queue.summary["approved_count"])
+        col_blocked.metric("Blocked", queue.summary["blocked_count"])
+        st.dataframe(queue.catalog_promotion_checks, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [
+                {
+                    "approval_id": record.approval_id,
+                    "skill": record.skill_id,
+                    "scenario": record.tenant_scenario_id,
+                    "status": record.status,
+                    "stage": record.current_stage,
+                    "owner": record.owner,
+                    "updated_at": record.updated_at,
+                }
+                for record in queue.approval_records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        col_submit, col_decide, col_stage = st.columns(3)
+        with col_submit:
+            selected_skill = st.selectbox(
+                "Approval skill",
+                [listing.skill_id for listing in catalog.listings],
+                key="marketplace_approval_skill",
+            )
+            selected_scenario = st.selectbox(
+                "Tenant scenario",
+                [scenario["id"] for scenario in catalog.tenant_scenarios],
+                key="marketplace_approval_scenario",
+            )
+            if st.button("Submit Approval", use_container_width=True):
+                record = run_async(
+                    state.marketplace.submit_approval(
+                        MarketplaceApprovalSubmitRequest(
+                            skill_id=selected_skill,
+                            tenant_scenario_id=selected_scenario,
+                            actor="streamlit-marketplace-reviewer",
+                            owner="streamlit-platform-owner",
+                            owner_role="platform_owner",
+                            note="Dashboard-submitted marketplace approval.",
+                        )
+                    )
+                )
+                st.json(record.model_dump(mode="json"))
+        approval_ids = [record.approval_id for record in queue.approval_records]
+        with col_decide:
+            selected_approval = st.selectbox(
+                "Approval decision",
+                approval_ids or ["no-approval-records"],
+                key="marketplace_decision_id",
+            )
+            decision = st.selectbox("Decision", ["approve", "reject"], key="marketplace_decision")
+            if st.button("Record Decision", use_container_width=True) and approval_ids:
+                record = state.marketplace.decide_approval(
+                    selected_approval,
+                    MarketplaceApprovalDecisionRequest(
+                        actor="streamlit-marketplace-reviewer",
+                        decision=decision,
+                        owner_signoff=True,
+                        note="Dashboard marketplace owner signoff.",
+                    ),
+                )
+                st.json(record.model_dump(mode="json"))
+        with col_stage:
+            selected_stage_approval = st.selectbox(
+                "Stage approval",
+                approval_ids or ["no-approval-records"],
+                key="marketplace_stage_id",
+            )
+            next_stage = st.selectbox(
+                "Next stage",
+                ["tenant_canary", "tenant_general_availability"],
+                key="marketplace_next_stage",
+            )
+            if st.button("Advance Stage", use_container_width=True) and approval_ids:
+                record = state.marketplace.advance_stage(
+                    selected_stage_approval,
+                    MarketplaceStageAdvanceRequest(
+                        actor="streamlit-release-manager",
+                        next_stage=next_stage,
+                        note="Dashboard rollout stage advancement.",
+                    ),
+                )
+                st.json(record.model_dump(mode="json"))
+        with st.expander("Approval workflow JSON"):
+            st.json(queue.model_dump(mode="json"))
     with tab_export:
         st.caption("Writes Markdown and JSON under data/marketplace_packs/.")
         if st.button("Export Tenant Rollout Pack", use_container_width=True):
@@ -672,6 +768,14 @@ elif view == "Skill Marketplace":
                 )
             )
             st.success("Tenant Rollout approval pack exported.")
+            st.json(export.model_dump(mode="json"))
+        if st.button("Export Approval Workflow Pack", use_container_width=True):
+            export = run_async(
+                state.marketplace.approval_pack(
+                    MarketplaceApprovalPackRequest(actor="streamlit-marketplace-reviewer")
+                )
+            )
+            st.success("Marketplace approval workflow pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(catalog.model_dump(mode="json"))

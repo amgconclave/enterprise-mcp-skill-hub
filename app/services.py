@@ -91,12 +91,20 @@ from app.models import (
     LaunchChecklistRequest,
     LaunchChecklistResult,
     LocalSnapshot,
+    MarketplaceApprovalDecisionRequest,
+    MarketplaceApprovalPackRequest,
+    MarketplaceApprovalPackResult,
+    MarketplaceApprovalQueueResult,
+    MarketplaceApprovalRecord,
+    MarketplaceApprovalSubmitRequest,
     MarketplaceCatalogResult,
     MarketplaceReviewState,
     MarketplaceRiskLevel,
     MarketplaceRolloutPackRequest,
     MarketplaceRolloutPackResult,
+    MarketplaceRolloutStage,
     MarketplaceSkillListing,
+    MarketplaceStageAdvanceRequest,
     MarketplaceTenantEligibility,
     McpToolDefinition,
     PolicyInvocationContext,
@@ -8498,10 +8506,18 @@ class SkillVersionCompatibilityService:
 
 class SkillMarketplaceGovernanceService:
     PACK_ID = "rollout_approval_pack_latest"
+    APPROVAL_PACK_ID = "marketplace_approval_workflow_latest"
+    ROLLOUT_STAGES: tuple[MarketplaceRolloutStage, ...] = (
+        "catalog_review",
+        "owner_signoff",
+        "tenant_canary",
+        "tenant_general_availability",
+    )
 
     def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
         self.app_state = app_state
         self.output_dir = output_dir or Path("data") / "marketplace_packs"
+        self._approvals: dict[str, MarketplaceApprovalRecord] = {}
 
     async def catalog(self) -> MarketplaceCatalogResult:
         scenario_requests = self._tenant_rollout_scenarios()
@@ -8589,6 +8605,269 @@ class SkillMarketplaceGovernanceService:
             json_path=str(json_path.resolve()),
             markdown_path=str(markdown_path.resolve()),
             summary=bundle["summary"],
+        )
+
+    async def approval_queue(self) -> MarketplaceApprovalQueueResult:
+        catalog = await self.catalog()
+        records = sorted(self._approvals.values(), key=lambda row: (row.created_at, row.approval_id))
+        catalog_checks = self._catalog_promotion_checks(catalog)
+        failed_catalog_rows = [
+            row for row in catalog_checks if row["status"] == "fail"
+        ]
+        pending_records = [row for row in records if row.status == "pending"]
+        blocked_records = [row for row in records if row.status == "blocked"]
+        readiness: SecurityReadinessStatus = "ready"
+        if blocked_records or failed_catalog_rows:
+            readiness = "blocked"
+        elif pending_records or catalog.review_required_rollouts:
+            readiness = "needs_review"
+        summary = {
+            "approval_record_count": len(records),
+            "pending_count": len(pending_records),
+            "approved_count": sum(1 for row in records if row.status == "approved"),
+            "rejected_count": sum(1 for row in records if row.status == "rejected"),
+            "blocked_count": len(blocked_records),
+            "catalog_promotion_check_count": len(catalog_checks),
+            "failed_catalog_check_count": len(failed_catalog_rows),
+            "review_required_rollout_count": len(catalog.review_required_rollouts),
+            "readiness_status": readiness,
+        }
+        return MarketplaceApprovalQueueResult(
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary=summary,
+            approval_records=records,
+            catalog_promotion_checks=catalog_checks,
+            rollout_stage_policy=self._rollout_stage_policy(),
+            architecture_patterns=self._architecture_patterns(),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._approval_limitations(),
+        )
+
+    async def submit_approval(
+        self,
+        request: MarketplaceApprovalSubmitRequest | None = None,
+    ) -> MarketplaceApprovalRecord:
+        request = request or MarketplaceApprovalSubmitRequest()
+        catalog = await self.catalog()
+        listing = self._find_listing(catalog, request.skill_id)
+        scenario = self._find_scenario(catalog, request.tenant_scenario_id)
+        tenant_decision = self._find_tenant_decision(listing, request.tenant_scenario_id)
+        promotion_checks = self._promotion_checks_for_listing(listing, tenant_decision)
+        failed_checks = [check for check in promotion_checks if check["status"] == "fail"]
+        status: str = "blocked" if failed_checks else "pending"
+        current_stage: MarketplaceRolloutStage = "blocked" if failed_checks else "catalog_review"
+        trace_id = new_trace_id()
+        approval_id = new_id("mka")
+        now = utc_now()
+        record = MarketplaceApprovalRecord(
+            approval_id=approval_id,
+            skill_id=listing.skill_id,
+            tenant_scenario_id=request.tenant_scenario_id,
+            status=status,
+            current_stage=current_stage,
+            requested_by=request.actor,
+            owner=request.owner,
+            owner_role=request.owner_role,
+            created_at=now,
+            updated_at=now,
+            trace_id=trace_id,
+            listing_snapshot={
+                "name": listing.name,
+                "version": listing.version,
+                "lifecycle_status": listing.lifecycle_status,
+                "listing_status": listing.listing_status,
+                "risk_level": listing.risk_level,
+                "required_review_state": listing.required_review_state,
+                "mcp_exposure_state": listing.mcp_exposure_state,
+                "scenario": scenario,
+            },
+            tenant_decision=tenant_decision.model_dump(mode="json"),
+            promotion_checks=promotion_checks,
+            required_signoffs=self._required_signoffs(listing, tenant_decision),
+            signoffs=[],
+            rollout_stages=self._initial_rollout_stages(current_stage),
+            reviewer_notes=[
+                note
+                for note in [
+                    request.note,
+                    "Approval is blocked until failed promotion checks are cleared." if failed_checks else None,
+                ]
+                if note
+            ],
+            architecture_patterns=self._architecture_patterns(),
+        )
+        self._approvals[approval_id] = record
+        self.app_state.audit.record(
+            "marketplace.approval_submitted",
+            "marketplace_approval",
+            approval_id,
+            trace_id,
+            request.actor,
+            {
+                "skill_id": listing.skill_id,
+                "tenant_scenario_id": request.tenant_scenario_id,
+                "status": status,
+                "failed_check_count": len(failed_checks),
+            },
+        )
+        return record
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        request: MarketplaceApprovalDecisionRequest | None = None,
+    ) -> MarketplaceApprovalRecord:
+        request = request or MarketplaceApprovalDecisionRequest()
+        record = self._get_approval(approval_id)
+        if record.status == "blocked" and request.decision == "approve":
+            raise ValueError("Blocked marketplace approvals cannot be approved until failed checks are cleared.")
+        if request.decision == "approve" and not request.owner_signoff:
+            raise ValueError("Owner signoff is required before approving marketplace rollout.")
+        now = utc_now()
+        if request.decision == "reject":
+            updated = record.model_copy(
+                update={
+                    "status": "rejected",
+                    "current_stage": "blocked",
+                    "updated_at": now,
+                    "signoffs": [
+                        *record.signoffs,
+                        self._signoff_row(request.actor, "rejected", request.note),
+                    ],
+                    "rollout_stages": self._mark_stage(record.rollout_stages, "blocked", "rejected", request.actor),
+                    "reviewer_notes": [*record.reviewer_notes, request.note or "Rollout rejected by reviewer."],
+                }
+            )
+        else:
+            updated = record.model_copy(
+                update={
+                    "status": "approved",
+                    "current_stage": "owner_signoff",
+                    "updated_at": now,
+                    "signoffs": [
+                        *record.signoffs,
+                        self._signoff_row(request.actor, "signed", request.note),
+                    ],
+                    "rollout_stages": self._mark_stage(
+                        record.rollout_stages,
+                        "owner_signoff",
+                        "completed",
+                        request.actor,
+                    ),
+                    "reviewer_notes": [*record.reviewer_notes, request.note or "Owner signoff approved."],
+                }
+            )
+        self._approvals[approval_id] = updated
+        self.app_state.audit.record(
+            "marketplace.approval_decided",
+            "marketplace_approval",
+            approval_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "decision": request.decision,
+                "status": updated.status,
+                "current_stage": updated.current_stage,
+                "skill_id": updated.skill_id,
+                "tenant_scenario_id": updated.tenant_scenario_id,
+            },
+        )
+        return updated
+
+    def advance_stage(
+        self,
+        approval_id: str,
+        request: MarketplaceStageAdvanceRequest | None = None,
+    ) -> MarketplaceApprovalRecord:
+        request = request or MarketplaceStageAdvanceRequest()
+        record = self._get_approval(approval_id)
+        if record.status != "approved":
+            raise ValueError("Only approved marketplace records can advance rollout stages.")
+        if request.next_stage == "blocked":
+            raise ValueError("Use a reject decision instead of advancing to blocked.")
+        current_index = self.ROLLOUT_STAGES.index(record.current_stage)
+        next_index = self.ROLLOUT_STAGES.index(request.next_stage)
+        if next_index != current_index + 1:
+            raise ValueError(
+                f"Next stage must be {self.ROLLOUT_STAGES[current_index + 1]!r} from {record.current_stage!r}."
+            )
+        updated = record.model_copy(
+            update={
+                "current_stage": request.next_stage,
+                "updated_at": utc_now(),
+                "rollout_stages": self._mark_stage(
+                    record.rollout_stages,
+                    request.next_stage,
+                    "completed",
+                    request.actor,
+                ),
+                "reviewer_notes": [
+                    *record.reviewer_notes,
+                    request.note or f"Advanced rollout to {request.next_stage}.",
+                ],
+            }
+        )
+        self._approvals[approval_id] = updated
+        self.app_state.audit.record(
+            "marketplace.approval_stage_advanced",
+            "marketplace_approval",
+            approval_id,
+            new_trace_id(),
+            request.actor,
+            {
+                "skill_id": updated.skill_id,
+                "tenant_scenario_id": updated.tenant_scenario_id,
+                "current_stage": updated.current_stage,
+            },
+        )
+        return updated
+
+    async def approval_pack(
+        self,
+        request: MarketplaceApprovalPackRequest | None = None,
+    ) -> MarketplaceApprovalPackResult:
+        request = request or MarketplaceApprovalPackRequest()
+        queue = await self.approval_queue()
+        bundle = {
+            "pack_id": self.APPROVAL_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": queue.readiness_status,
+            "summary": queue.summary,
+            "approval_queue": queue.model_dump(mode="json"),
+            "approval_records": [row.model_dump(mode="json") for row in queue.approval_records],
+            "catalog_promotion_checks": queue.catalog_promotion_checks,
+            "rollout_stage_policy": queue.rollout_stage_policy,
+            "architecture_patterns": queue.architecture_patterns,
+            "local_proof_commands": queue.local_proof_commands,
+            "limitations": queue.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.APPROVAL_PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.APPROVAL_PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._approval_markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "marketplace.approval_pack_exported",
+            "marketplace_approval_pack",
+            self.APPROVAL_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": queue.readiness_status,
+                "approval_record_count": queue.summary["approval_record_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return MarketplaceApprovalPackResult(
+            pack_id=self.APPROVAL_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=queue.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=queue.summary,
         )
 
     def _tenant_rollout_scenarios(self) -> list[JsonDict]:
@@ -8946,6 +9225,257 @@ class SkillMarketplaceGovernanceService:
             },
         ]
 
+    def _find_listing(
+        self,
+        catalog: MarketplaceCatalogResult,
+        skill_id: str,
+    ) -> MarketplaceSkillListing:
+        for listing in catalog.listings:
+            if listing.skill_id == skill_id:
+                return listing
+        raise KeyError(f"Unknown marketplace skill: {skill_id}")
+
+    def _find_scenario(self, catalog: MarketplaceCatalogResult, scenario_id: str) -> JsonDict:
+        for scenario in catalog.tenant_scenarios:
+            if scenario["id"] == scenario_id:
+                return scenario
+        raise KeyError(f"Unknown marketplace tenant scenario: {scenario_id}")
+
+    def _find_tenant_decision(
+        self,
+        listing: MarketplaceSkillListing,
+        scenario_id: str,
+    ) -> MarketplaceTenantEligibility:
+        for eligibility in listing.tenant_eligibility:
+            if eligibility.scenario_id == scenario_id:
+                return eligibility
+        raise KeyError(f"Skill {listing.skill_id!r} has no eligibility row for scenario {scenario_id!r}.")
+
+    def _promotion_checks_for_listing(
+        self,
+        listing: MarketplaceSkillListing,
+        tenant_decision: MarketplaceTenantEligibility,
+    ) -> list[JsonDict]:
+        mcp_exposed = bool(listing.mcp_exposure_state["mcp_exposed"])
+        checks = [
+            {
+                "id": "schema_valid",
+                "status": "pass" if listing.mcp_exposure_state["schema_valid"] else "fail",
+                "evidence": (
+                    "Manifest input/output schemas validate."
+                    if listing.mcp_exposure_state["schema_valid"]
+                    else f"Schema errors: {listing.mcp_exposure_state['schema_errors']}"
+                ),
+            },
+            {
+                "id": "mcp_exposed",
+                "status": "pass" if mcp_exposed else "fail",
+                "evidence": (
+                    f"Promoted MCP tool `{listing.skill_id}` is exposed."
+                    if mcp_exposed
+                    else "Skill is not currently exposed as an MCP tool."
+                ),
+            },
+            {
+                "id": "tenant_policy",
+                "status": self._decision_check_status(tenant_decision.decision),
+                "evidence": (
+                    f"{tenant_decision.tenant}/{tenant_decision.environment} returned "
+                    f"`{tenant_decision.decision}`."
+                ),
+            },
+            {
+                "id": "risk_level",
+                "status": "fail" if listing.risk_level == "high" else "warn" if listing.risk_level == "medium" else "pass",
+                "evidence": f"Marketplace risk level is `{listing.risk_level}` with flags {listing.risk_flags}.",
+            },
+            {
+                "id": "version_history",
+                "status": "pass",
+                "evidence": " ".join(listing.version_comparison_notes),
+            },
+        ]
+        return checks
+
+    def _decision_check_status(self, decision: TenantPolicyDecision) -> str:
+        if decision == "blocked":
+            return "fail"
+        if decision == "review_required":
+            return "warn"
+        return "pass"
+
+    def _catalog_promotion_checks(self, catalog: MarketplaceCatalogResult) -> list[JsonDict]:
+        rows: list[JsonDict] = []
+        for listing in catalog.listings:
+            for eligibility in listing.tenant_eligibility:
+                checks = self._promotion_checks_for_listing(listing, eligibility)
+                failed = [check for check in checks if check["status"] == "fail"]
+                warned = [check for check in checks if check["status"] == "warn"]
+                rows.append(
+                    {
+                        "skill_id": listing.skill_id,
+                        "tenant_scenario_id": eligibility.scenario_id,
+                        "tenant": eligibility.tenant,
+                        "status": "fail" if failed else "warn" if warned else "pass",
+                        "failed_check_ids": [check["id"] for check in failed],
+                        "warn_check_ids": [check["id"] for check in warned],
+                        "review_state": listing.required_review_state,
+                        "recommended_action": self._catalog_check_action(listing, eligibility, failed, warned),
+                    }
+                )
+        return rows
+
+    def _catalog_check_action(
+        self,
+        listing: MarketplaceSkillListing,
+        eligibility: MarketplaceTenantEligibility,
+        failed: list[JsonDict],
+        warned: list[JsonDict],
+    ) -> str:
+        if failed:
+            return "Block approval until schema, MCP exposure, tenant policy, and risk failures are cleared."
+        if warned:
+            return f"Route {listing.skill_id} to owner signoff for {eligibility.tenant} before canary."
+        return "Eligible for owner signoff and tenant canary."
+
+    def _required_signoffs(
+        self,
+        listing: MarketplaceSkillListing,
+        tenant_decision: MarketplaceTenantEligibility,
+    ) -> list[JsonDict]:
+        signoffs = [
+            {
+                "role": "platform_owner",
+                "reason": "Confirms reusable skill ownership, version intent, and MCP catalog promotion.",
+                "required": True,
+            },
+            {
+                "role": "tenant_owner",
+                "reason": f"Confirms rollout acceptability for `{tenant_decision.tenant}`.",
+                "required": True,
+            },
+        ]
+        if listing.risk_level in {"medium", "high"} or tenant_decision.data_sensitivity == "confidential":
+            signoffs.append(
+                {
+                    "role": "security_reviewer",
+                    "reason": "Required for medium/high risk or confidential data rollout.",
+                    "required": True,
+                }
+            )
+        return signoffs
+
+    def _initial_rollout_stages(self, current_stage: MarketplaceRolloutStage) -> list[JsonDict]:
+        rows = [
+            {
+                "stage": stage,
+                "status": "pending",
+                "owner": self._stage_owner(stage),
+                "exit_criteria": self._stage_exit_criteria(stage),
+                "completed_at": None,
+                "completed_by": None,
+            }
+            for stage in self.ROLLOUT_STAGES
+        ]
+        if current_stage == "blocked":
+            rows.append(
+                {
+                    "stage": "blocked",
+                    "status": "active",
+                    "owner": "marketplace-reviewer",
+                    "exit_criteria": "Clear failed promotion checks and submit a new approval request.",
+                    "completed_at": utc_now().isoformat(),
+                    "completed_by": "system",
+                }
+            )
+            return rows
+        return self._mark_stage(rows, current_stage, "completed", "system")
+
+    def _rollout_stage_policy(self) -> list[JsonDict]:
+        return [
+            {
+                "stage": stage,
+                "owner": self._stage_owner(stage),
+                "exit_criteria": self._stage_exit_criteria(stage),
+                "pattern": "durable_workflow",
+            }
+            for stage in self.ROLLOUT_STAGES
+        ]
+
+    def _stage_owner(self, stage: str) -> str:
+        owners = {
+            "catalog_review": "marketplace-reviewer",
+            "owner_signoff": "platform-owner",
+            "tenant_canary": "tenant-owner",
+            "tenant_general_availability": "release-manager",
+            "blocked": "marketplace-reviewer",
+        }
+        return owners[stage]
+
+    def _stage_exit_criteria(self, stage: str) -> str:
+        criteria = {
+            "catalog_review": "All promotion checks have no failures and reviewer notes are attached.",
+            "owner_signoff": "Required platform, tenant, and security signoffs are recorded.",
+            "tenant_canary": "Canary tenant rollout completes with no new policy, SLO, or usage anomalies.",
+            "tenant_general_availability": "Release manager confirms broad tenant rollout and monitoring owner.",
+            "blocked": "A reviewer rejects rollout or failed checks require a new request.",
+        }
+        return criteria[stage]
+
+    def _mark_stage(
+        self,
+        stages: list[JsonDict],
+        target_stage: str,
+        status: str,
+        actor: str,
+    ) -> list[JsonDict]:
+        updated = []
+        for stage in stages:
+            if stage["stage"] != target_stage:
+                updated.append(stage)
+                continue
+            updated.append(
+                {
+                    **stage,
+                    "status": status,
+                    "completed_at": utc_now().isoformat(),
+                    "completed_by": actor,
+                }
+            )
+        if target_stage == "blocked" and not any(stage["stage"] == "blocked" for stage in updated):
+            updated.append(
+                {
+                    "stage": "blocked",
+                    "status": status,
+                    "owner": self._stage_owner("blocked"),
+                    "exit_criteria": self._stage_exit_criteria("blocked"),
+                    "completed_at": utc_now().isoformat(),
+                    "completed_by": actor,
+                }
+            )
+        return updated
+
+    def _signoff_row(self, actor: str, status: str, note: str | None) -> JsonDict:
+        return {
+            "actor": actor,
+            "status": status,
+            "note": note,
+            "signed_at": utc_now().isoformat(),
+        }
+
+    def _get_approval(self, approval_id: str) -> MarketplaceApprovalRecord:
+        if approval_id not in self._approvals:
+            raise KeyError(f"Unknown marketplace approval: {approval_id}")
+        return self._approvals[approval_id]
+
+    def _architecture_patterns(self) -> list[str]:
+        return [
+            "durable workflows: approval records capture stage, signoff, trace, checks, and artifact export state",
+            "human-in-the-loop: owner signoff is required before canary or general-availability rollout",
+            "governance: promotion checks combine schema, MCP exposure, tenant policy, risk, and version evidence",
+            "tool governance: only promoted, schema-valid MCP-exposed skills can pass rollout gates",
+        ]
+
     def _local_proof_commands(self) -> list[str]:
         return [
             "python -m pytest -q",
@@ -8958,8 +9488,16 @@ class SkillMarketplaceGovernanceService:
             "python -m app.mcp_server tools",
             "python -m app.mcp_server resources",
             "python -m app.mcp_server prompts",
-            'rg "marketplace/catalog|marketplace/rollout-pack|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            'rg "marketplace/catalog|marketplace/rollout-pack|marketplace/approvals|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _approval_limitations(self) -> list[str]:
+        return [
+            "Approval records are in-process local state; export the approval pack for durable reviewer evidence.",
+            "Owner identity is recorded from request metadata only; production deployments should add SSO-backed identity.",
+            "Tenant canary and general-availability stages are simulated local gates, not live tenant control-plane changes.",
+            "Promotion checks are deterministic and use local catalog, policy, MCP exposure, and version history signals.",
         ]
 
     def _limitations(self) -> list[str]:
@@ -9032,6 +9570,72 @@ class SkillMarketplaceGovernanceService:
                 "## Limitations",
                 "",
                 *[f"- {note}" for note in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _approval_markdown(self, bundle: JsonDict) -> str:
+        queue = bundle["approval_queue"]
+        lines = [
+            "# Skill Marketplace Approval Workflow Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            "",
+            "## Summary",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["summary"].items()],
+            "",
+            "## Approval Records",
+            "",
+        ]
+        if bundle["approval_records"]:
+            lines.extend(
+                [
+                    (
+                        f"- `{record['approval_id']}` `{record['skill_id']}` "
+                        f"`{record['tenant_scenario_id']}` `{record['status']}` "
+                        f"stage `{record['current_stage']}`"
+                    )
+                    for record in bundle["approval_records"]
+                ]
+            )
+        else:
+            lines.append("- none")
+        lines.extend(
+            [
+                "",
+                "## Catalog Promotion Checks",
+                "",
+                *[
+                    (
+                        f"- `{row['status']}` `{row['skill_id']}` `{row['tenant_scenario_id']}`: "
+                        f"{row['recommended_action']}"
+                    )
+                    for row in bundle["catalog_promotion_checks"]
+                ],
+                "",
+                "## Rollout Stage Policy",
+                "",
+                *[
+                    f"- `{row['stage']}` owner `{row['owner']}`: {row['exit_criteria']}"
+                    for row in bundle["rollout_stage_policy"]
+                ],
+                "",
+                "## Architecture Patterns",
+                "",
+                *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+                "",
+                "## Local Proof Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {note}" for note in queue["limitations"]],
                 "",
             ]
         )
@@ -16609,6 +17213,11 @@ class DashboardSmokeService:
             self._endpoint_ref("runtime_pack", "POST", "/runtime/demo-pack", "Writes Runtime Demo Server Pack artifacts."),
             self._endpoint_ref("marketplace_catalog", "GET", "/marketplace/catalog", "Skill Marketplace catalog."),
             self._endpoint_ref("marketplace_rollout_pack", "POST", "/marketplace/rollout-pack", "Writes Tenant Rollout approval pack."),
+            self._endpoint_ref("marketplace_approvals", "GET", "/marketplace/approvals", "Skill Marketplace approval queue."),
+            self._endpoint_ref("marketplace_approval_submit", "POST", "/marketplace/approvals/submit", "Submits a tenant rollout approval workflow."),
+            self._endpoint_ref("marketplace_approval_decision", "POST", "/marketplace/approvals/{approval_id}/decision", "Records owner signoff or rejection."),
+            self._endpoint_ref("marketplace_approval_stage", "POST", "/marketplace/approvals/{approval_id}/stage", "Advances approved tenant rollout stages."),
+            self._endpoint_ref("marketplace_approval_pack", "POST", "/marketplace/approval-pack", "Writes Marketplace Approval Workflow artifacts."),
             self._endpoint_ref("skill_compatibility", "GET", "/skills/compatibility", "Semantic version compatibility report."),
             self._endpoint_ref("skill_compatibility_pack", "POST", "/skills/compatibility-pack", "Writes Skill Version Compatibility artifacts."),
             self._endpoint_ref("usage_analytics", "GET", "/usage/analytics", "Skill Usage Analytics and chargeback signals."),
@@ -16678,6 +17287,7 @@ class DashboardSmokeService:
             self._artifact_tab("repository_automation", "Repository Automation", "Automation Pack", "data/repository_automation/"),
             self._artifact_tab("runtime_demo", "Runtime Demo", "Runtime Demo Pack", "data/runtime_packs/"),
             self._artifact_tab("marketplace_pack", "Skill Marketplace", "Tenant Rollout", "data/marketplace_packs/"),
+            self._artifact_tab("marketplace_approval_pack", "Skill Marketplace", "Approval Workflow", "data/marketplace_packs/"),
             self._artifact_tab("skill_compatibility", "Skill Compatibility", "Compatibility Pack", "data/compatibility_packs/"),
             self._artifact_tab("usage_chargeback", "Skill Usage Analytics", "Cost Chargeback", "data/usage_packs/"),
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
@@ -18256,8 +18866,13 @@ class ArtifactInventoryService:
                 Path("data") / "marketplace_packs",
                 "POST /marketplace/rollout-pack",
                 "Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers",
-                ["rollout_approval_pack_latest.json", "rollout_approval_pack_latest.md"],
-                "Marketplace governance proof with tenant rollout recommendations, disabled-skill blocks, version notes, and reviewer checklist.",
+                [
+                    "rollout_approval_pack_latest.json",
+                    "rollout_approval_pack_latest.md",
+                    "marketplace_approval_workflow_latest.json",
+                    "marketplace_approval_workflow_latest.md",
+                ],
+                "Marketplace governance proof with tenant rollout recommendations, approval workflow, owner signoff, stage gates, disabled-skill blocks, version notes, and reviewer checklist.",
             ),
             self._catalog_row(
                 "compatibility_packs",
