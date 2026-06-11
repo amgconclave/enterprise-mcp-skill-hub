@@ -10,6 +10,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /skills/register` - registers a valid `SkillManifest`; if no lifecycle status is supplied, it is stored as `validated`.
 - `POST /skills/validate` - validates a raw manifest payload without registration.
 - `POST /policy/simulate` - returns an allow/deny decision, reasons, and matched rules for role, environment, data sensitivity, skill tags/provider, and requested action.
+- `GET /sandbox/policy` - returns mock tool sandbox limits, blocked action classes, endpoint policy, per-skill risk labels, sandbox decisions, audit evidence, and verification commands.
+- `POST /sandbox/evaluate` - dry-runs a skill input against sandbox limits and action-class policy without executing the skill.
+- `POST /sandbox/policy-pack` - writes `invocation_sandbox_policy_pack_latest.json` and `.md` under ignored local folder `data/sandbox_policies/`.
 - `GET /workflows/templates` - lists approved reusable workflow templates from `sample_data/workflow_templates.json` plus approved local review submissions.
 - `POST /workflows/templates/submit` - submits a new `WorkflowTemplate` for local review and stores it under `data/workflow_reviews/` with `in_review` status.
 - `GET /workflows/reviews` - lists submitted templates with review status, validation status, required role, sensitivity, missing skills, invalid skills, and policy warnings.
@@ -150,7 +153,25 @@ Or enforce through headers: `X-Policy-Enforce: true`, `X-Policy-Role`, `X-Policy
 
 Tenant/user entitlements can also be enforced by including `X-Entitlement-Enforce: true`, `X-Tenant-ID`, `X-User-ID`, and comma-separated `X-User-Scopes`. Entitlement-denied calls return `403`, create failed invocation rows, and record `entitlement.denied` audit events.
 
+Invocation sandbox checks can also be enforced by including `X-Sandbox-Enforce: true`, `X-Action-Class`, and `X-Sandbox-Endpoint`, or by setting `policy_context.enforce_sandbox=true`. Sandbox-denied calls return `403`, create failed invocation rows, and record `sandbox.denied` audit events before schema validation or handler execution.
+
 Denied invocations are still stored in local invocation history. Replaying one through `POST /invocations/{invocation_id}/replay` evaluates the same enforced policy context and returns a failed replay with `same_output=true` when the denial is unchanged.
+
+## Invocation Sandbox
+
+The sandbox policy is a local task-sandbox and run-transparency layer for mock MCP tools. It does not provide OS isolation, but it blocks risky action classes and oversized payloads before skill execution.
+
+```powershell
+Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers
+Invoke-RestMethod http://localhost:8000/sandbox/evaluate `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"action_class":"skill_invocation","endpoint":"mcp:tool/search_knowledge_base","enforce":true}'
+Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Headers $headers -Method POST
+```
+
+The policy report includes typed limits, blocked action classes such as `external_network`, `filesystem_write`, `process_spawn`, `secret_access`, and `repo_mutation`, per-skill risk labels, endpoint policy for FastAPI and MCP calls, recent decisions, audit evidence, reviewer checklist items, local verification commands, and limitations. The policy pack writes Markdown/JSON under ignored `data/sandbox_policies/`.
 
 ## Workflow Composition
 

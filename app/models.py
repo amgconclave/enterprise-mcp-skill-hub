@@ -12,6 +12,19 @@ PolicyRole = Literal["admin", "reviewer", "agent", "viewer"]
 DataSensitivity = Literal["public", "internal", "confidential"]
 PolicyDecisionValue = Literal["allow", "deny"]
 SecurityReadinessStatus = Literal["ready", "needs_review", "blocked"]
+InvocationSandboxDecisionValue = Literal["allow", "deny"]
+InvocationSandboxRiskLabel = Literal["low", "medium", "high", "critical"]
+InvocationSandboxActionClass = Literal[
+    "skill_invocation",
+    "resource_access",
+    "prompt_render",
+    "external_network",
+    "filesystem_write",
+    "process_spawn",
+    "secret_access",
+    "repo_mutation",
+    "unknown",
+]
 TenantKey = Literal["healthcare", "fintech", "public_sector", "internal_demo"]
 TenantPolicyDecision = Literal["allowed", "blocked", "review_required"]
 TenantEntitlementDecisionValue = Literal["allow", "deny"]
@@ -120,6 +133,7 @@ class SkillInvocation(BaseModel):
     policy_context: PolicyInvocationContext | None = None
     policy_decision: PolicySimulationResult | None = None
     entitlement_decision: SkillEntitlementDecision | None = None
+    sandbox_decision: InvocationSandboxDecision | None = None
 
 
 class McpToolDefinition(BaseModel):
@@ -1372,6 +1386,9 @@ class PolicyInvocationContext(BaseModel):
     user_id: str = "demo-user"
     user_scopes: list[str] = Field(default_factory=lambda: ["skill.invoke"])
     enforce_entitlements: bool = False
+    enforce_sandbox: bool = False
+    action_class: InvocationSandboxActionClass = "skill_invocation"
+    endpoint: str | None = None
 
 
 class PolicySimulationRequest(BaseModel):
@@ -1391,6 +1408,70 @@ class PolicySimulationResult(BaseModel):
     decision: PolicyDecisionValue
     reasons: list[str]
     matched_rules: list[str]
+
+
+class InvocationSandboxLimits(BaseModel):
+    max_payload_bytes: int = 4096
+    max_string_chars: int = 3000
+    max_array_items: int = 50
+    max_object_depth: int = 6
+    max_estimated_input_tokens: int = 900
+
+
+class InvocationSandboxDecision(BaseModel):
+    skill_id: str
+    actor: str
+    provider: str
+    endpoint: str
+    action_class: InvocationSandboxActionClass
+    decision: InvocationSandboxDecisionValue
+    risk_label: InvocationSandboxRiskLabel
+    reasons: list[str] = Field(default_factory=list)
+    matched_rules: list[str] = Field(default_factory=list)
+    limits: InvocationSandboxLimits
+    observed: JsonDict = Field(default_factory=dict)
+    trace_id: str
+    generated_at: datetime
+
+
+class InvocationSandboxEvaluateRequest(BaseModel):
+    skill_id: str = "search_knowledge_base"
+    input: JsonDict = Field(default_factory=dict)
+    actor: str = "sandbox-reviewer"
+    policy_context: PolicyInvocationContext | None = None
+    action_class: InvocationSandboxActionClass = "skill_invocation"
+    endpoint: str = "fastapi:/skills/{skill_id}/invoke"
+    enforce: bool = False
+
+
+class InvocationSandboxReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    limits: InvocationSandboxLimits
+    blocked_action_classes: list[InvocationSandboxActionClass]
+    endpoint_policy: list[JsonDict] = Field(default_factory=list)
+    skill_risk_labels: list[JsonDict] = Field(default_factory=list)
+    decisions: list[InvocationSandboxDecision] = Field(default_factory=list)
+    audit_evidence: list[JsonDict] = Field(default_factory=list)
+    reviewer_checklist: list[JsonDict] = Field(default_factory=list)
+    local_verification_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class InvocationSandboxPackRequest(BaseModel):
+    actor: str = "sandbox-policy-reviewer"
+    scenarios: list[InvocationSandboxEvaluateRequest] = Field(default_factory=list)
+
+
+class InvocationSandboxPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
 
 
 class WorkflowTemplate(BaseModel):

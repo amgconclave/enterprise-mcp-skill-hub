@@ -55,6 +55,11 @@ from app.models import (
     GovernanceReport,
     HealthResponse,
     InvocationReplayResult,
+    InvocationSandboxDecision,
+    InvocationSandboxEvaluateRequest,
+    InvocationSandboxPackRequest,
+    InvocationSandboxPackResult,
+    InvocationSandboxReport,
     InvokeSkillRequest,
     LaunchChecklistRequest,
     LaunchChecklistResult,
@@ -212,6 +217,30 @@ def simulate_policy(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return state.policy.simulate(manifest, request)
+
+
+@app.get("/sandbox/policy", response_model=InvocationSandboxReport)
+def invocation_sandbox_policy(_: str = Depends(require_api_key)) -> InvocationSandboxReport:
+    return state.invocation_sandbox.report()
+
+
+@app.post("/sandbox/evaluate", response_model=InvocationSandboxDecision)
+def invocation_sandbox_evaluate(
+    request: InvocationSandboxEvaluateRequest,
+    _: str = Depends(require_api_key),
+) -> InvocationSandboxDecision:
+    try:
+        return state.invocation_sandbox.evaluate(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/sandbox/policy-pack", response_model=InvocationSandboxPackResult)
+def invocation_sandbox_policy_pack(
+    request: InvocationSandboxPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> InvocationSandboxPackResult:
+    return state.invocation_sandbox.pack(request or InvocationSandboxPackRequest())
 
 
 @app.post("/tenants/policy-simulate", response_model=TenantPolicySimulationResult)
@@ -603,7 +632,7 @@ async def invoke_skill(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if invocation.status == "failed":
-        if invocation.error and invocation.error.startswith(("Policy denied", "Entitlement denied")):
+        if invocation.error and invocation.error.startswith(("Policy denied", "Entitlement denied", "Sandbox denied")):
             raise HTTPException(status_code=403, detail=invocation.error)
         raise HTTPException(status_code=422, detail=invocation.error)
     return invocation
@@ -928,6 +957,9 @@ def _policy_context_from_request(
         "user_id": "x-user-id",
         "user_scopes": "x-user-scopes",
         "enforce_entitlements": "x-entitlement-enforce",
+        "enforce_sandbox": "x-sandbox-enforce",
+        "action_class": "x-action-class",
+        "endpoint": "x-sandbox-endpoint",
     }
     header_values = {
         field: http_request.headers.get(header)
@@ -942,6 +974,13 @@ def _policy_context_from_request(
         header_values["enforce"] = header_values["enforce"].lower() in {"1", "true", "yes", "on"}
     if "enforce_entitlements" in header_values:
         header_values["enforce_entitlements"] = header_values["enforce_entitlements"].lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if "enforce_sandbox" in header_values:
+        header_values["enforce_sandbox"] = header_values["enforce_sandbox"].lower() in {
             "1",
             "true",
             "yes",

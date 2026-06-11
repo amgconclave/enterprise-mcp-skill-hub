@@ -31,6 +31,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
 - Skill SLO + Error Budget Pack for per-skill availability SLOs, error budget burn, latency budget, release-gate blockers, reviewer proof commands, and ignored `data/slo_packs/` artifacts.
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
+- Invocation Sandbox Policy Pack for mock tool payload limits, blocked action classes, risk labels, FastAPI/MCP endpoint policy, enforced denied invocations, and ignored `data/sandbox_policies/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, audit events, and ignored `data/prompt_governance/` artifacts.
 - Privacy Retention + Redaction Pack for scanning invocation/audit payloads and ad hoc JSON for local PII patterns, redacted previews, retention actions, deletion candidates, audit events, and ignored `data/privacy_packs/` artifacts.
 - Supply Chain SBOM + License Governance Pack for local direct-dependency manifest hashes, license posture, pinning review, optional external-provider dependency gates, approval requirements, dashboard review, and ignored `data/supply_chain/` artifacts.
@@ -509,6 +510,22 @@ Get-ChildItem -Recurse -File data\provider_packs -ErrorAction SilentlyContinue |
 ```
 
 `GET /providers/readiness` performs static local checks for `mock`, `openai`, and `azure_openai` provider posture without network calls or secret-value export. `POST /providers/fallback-pack` writes `provider_fallback_pack_latest.json` and `.md` under ignored `data/provider_packs/` with provider checks, credential-presence signals, fallback routes, re-enable gates, reviewer checklist, audit events, local proof commands, and limitations. The Streamlit dashboard has a `Provider Readiness` view, and `python -m app.demo` prints provider readiness plus the Provider Fallback Pack path.
+
+## Invocation Sandbox Policy Pack
+
+Evaluate and enforce local task-sandbox policy before mock tool execution:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers
+Invoke-RestMethod http://localhost:8000/sandbox/evaluate -Method POST -Headers $headers -ContentType "application/json" -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"action_class":"skill_invocation","endpoint":"mcp:tool/search_knowledge_base","enforce":true}'
+Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /sandbox/policy` returns sandbox limits, blocked action classes, endpoint policy, per-skill risk labels, recent sandbox decisions, audit evidence, and local verification commands. `POST /sandbox/evaluate` returns a structured allow/deny decision without executing the skill. `POST /sandbox/policy-pack` writes `invocation_sandbox_policy_pack_latest.json` and `.md` under ignored `data/sandbox_policies/`.
+
+Normal invocation can enforce the sandbox by setting `policy_context.enforce_sandbox=true` or sending `X-Sandbox-Enforce: true`, `X-Action-Class`, and `X-Sandbox-Endpoint`. Denied calls return `403`, create failed invocation history rows, and record `sandbox.denied` audit events. The Streamlit dashboard has an `Invocation Sandbox` view, `python -m app.demo` prints sandbox readiness plus the policy pack path, and the MCP inspector supports `python -m app.mcp_server call ... --enforce-sandbox`.
 
 ## Prompt Governance And Injection Risk
 

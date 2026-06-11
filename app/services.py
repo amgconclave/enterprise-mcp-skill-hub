@@ -64,6 +64,12 @@ from app.models import (
     GovernanceCheck,
     GovernanceReport,
     InvocationReplayResult,
+    InvocationSandboxDecision,
+    InvocationSandboxEvaluateRequest,
+    InvocationSandboxLimits,
+    InvocationSandboxPackRequest,
+    InvocationSandboxPackResult,
+    InvocationSandboxReport,
     JsonDict,
     LaunchChecklistRequest,
     LaunchChecklistResult,
@@ -722,6 +728,7 @@ class SkillInvocationService:
         self.entitlements = entitlements
         self.invocations: list[SkillInvocation] = []
         self.reliability: SkillReliabilityService | None = None
+        self.sandbox: InvocationSandboxPolicyService | None = None
 
     async def invoke(
         self,
@@ -734,6 +741,36 @@ class SkillInvocationService:
         manifest = self.registry.get(skill_id)
         policy_decision: PolicySimulationResult | None = None
         entitlement_decision: SkillEntitlementDecision | None = None
+        sandbox_decision: InvocationSandboxDecision | None = None
+        if policy_context and policy_context.enforce_sandbox and self.sandbox:
+            sandbox_request = InvocationSandboxEvaluateRequest(
+                skill_id=skill_id,
+                input=payload,
+                actor=actor,
+                policy_context=policy_context,
+                action_class=policy_context.action_class,
+                endpoint=policy_context.endpoint or f"fastapi:/skills/{skill_id}/invoke",
+                enforce=True,
+            )
+            sandbox_decision = self.sandbox.evaluate(sandbox_request, trace_id=trace_id)
+            if sandbox_decision.decision == "deny":
+                return self._record_failure(
+                    manifest,
+                    payload,
+                    trace_id,
+                    actor,
+                    f"Sandbox denied invocation: {'; '.join(sandbox_decision.reasons)}",
+                    0.0,
+                    audit_action="sandbox.denied",
+                    metadata={
+                        "status": "failed",
+                        "sandbox_decision": sandbox_decision.model_dump(mode="json"),
+                    },
+                    policy_context=policy_context,
+                    policy_decision=policy_decision,
+                    entitlement_decision=entitlement_decision,
+                    sandbox_decision=sandbox_decision,
+                )
         if policy_context and policy_context.enforce_entitlements:
             entitlement_decision = self.entitlements.decide(manifest, policy_context)
             if entitlement_decision.decision == "deny":
@@ -752,6 +789,7 @@ class SkillInvocationService:
                     policy_context=policy_context,
                     policy_decision=policy_decision,
                     entitlement_decision=entitlement_decision,
+                    sandbox_decision=sandbox_decision,
                 )
         if policy_context and policy_context.enforce:
             policy_decision = self.policy.simulate(manifest, policy_context)
@@ -771,6 +809,7 @@ class SkillInvocationService:
                     policy_context=policy_context,
                     policy_decision=policy_decision,
                     entitlement_decision=entitlement_decision,
+                    sandbox_decision=sandbox_decision,
                 )
         if not manifest.enabled:
             return self._record_failure(
@@ -783,6 +822,7 @@ class SkillInvocationService:
                 policy_context=policy_context,
                 policy_decision=policy_decision,
                 entitlement_decision=entitlement_decision,
+                sandbox_decision=sandbox_decision,
             )
         if self.reliability:
             breaker_error = self.reliability.before_invocation(manifest, trace_id, actor)
@@ -799,6 +839,7 @@ class SkillInvocationService:
                     policy_context=policy_context,
                     policy_decision=policy_decision,
                     entitlement_decision=entitlement_decision,
+                    sandbox_decision=sandbox_decision,
                 )
         errors = self.validator.validate_invocation(manifest, payload)
         if errors:
@@ -812,6 +853,7 @@ class SkillInvocationService:
                 policy_context=policy_context,
                 policy_decision=policy_decision,
                 entitlement_decision=entitlement_decision,
+                sandbox_decision=sandbox_decision,
             )
         with Timer() as timer:
             output = await self._execute_skill(manifest, payload)
@@ -827,6 +869,7 @@ class SkillInvocationService:
                 policy_context=policy_context,
                 policy_decision=policy_decision,
                 entitlement_decision=entitlement_decision,
+                sandbox_decision=sandbox_decision,
             )
         usage = TokenUsage(
             input_tokens=sum(len(str(value).split()) for value in payload.values()),
@@ -847,6 +890,7 @@ class SkillInvocationService:
             policy_context=policy_context,
             policy_decision=policy_decision,
             entitlement_decision=entitlement_decision,
+            sandbox_decision=sandbox_decision,
         )
         self.invocations.append(invocation)
         self.audit.record("skill.invoked", "skill", skill_id, trace_id, actor, {"status": "succeeded"})
@@ -881,7 +925,25 @@ class SkillInvocationService:
         replay_error: str | None = None
         policy_decision: PolicySimulationResult | None = None
         entitlement_decision: SkillEntitlementDecision | None = None
-        if original.policy_context and original.policy_context.enforce_entitlements:
+        sandbox_decision: InvocationSandboxDecision | None = None
+        if original.policy_context and original.policy_context.enforce_sandbox and self.sandbox:
+            sandbox_decision = self.sandbox.evaluate(
+                InvocationSandboxEvaluateRequest(
+                    skill_id=original.skill_id,
+                    input=original.input,
+                    actor="replay",
+                    policy_context=original.policy_context,
+                    action_class=original.policy_context.action_class,
+                    endpoint=original.policy_context.endpoint
+                    or f"fastapi:/skills/{original.skill_id}/invoke",
+                    enforce=True,
+                )
+            )
+            if sandbox_decision.decision == "deny":
+                replay_status = "failed"
+                replay_error = f"Sandbox denied invocation: {'; '.join(sandbox_decision.reasons)}"
+                drift_notes.append("Replay stopped at the same enforced sandbox gate.")
+        if replay_status == "succeeded" and original.policy_context and original.policy_context.enforce_entitlements:
             entitlement_decision = self.entitlements.decide(manifest, original.policy_context)
             if entitlement_decision.decision == "deny":
                 replay_status = "failed"
@@ -944,6 +1006,7 @@ class SkillInvocationService:
                 "replay_status": replay_status,
                 "policy_decision": policy_decision.model_dump(mode="json") if policy_decision else None,
                 "entitlement_decision": entitlement_decision.model_dump(mode="json") if entitlement_decision else None,
+                "sandbox_decision": sandbox_decision.model_dump(mode="json") if sandbox_decision else None,
             },
         )
         return InvocationReplayResult(
@@ -1008,6 +1071,7 @@ class SkillInvocationService:
         policy_context: PolicyInvocationContext | None = None,
         policy_decision: PolicySimulationResult | None = None,
         entitlement_decision: SkillEntitlementDecision | None = None,
+        sandbox_decision: InvocationSandboxDecision | None = None,
     ) -> SkillInvocation:
         usage = TokenUsage()
         invocation = SkillInvocation(
@@ -1025,6 +1089,7 @@ class SkillInvocationService:
             policy_context=policy_context,
             policy_decision=policy_decision,
             entitlement_decision=entitlement_decision,
+            sandbox_decision=sandbox_decision,
         )
         self.invocations.append(invocation)
         self.audit.record(
@@ -1051,6 +1116,480 @@ class SkillInvocationService:
         if self.reliability:
             self.reliability.record_invocation(invocation)
         return invocation
+
+
+class InvocationSandboxPolicyService:
+    REPORT_ID = "invocation_sandbox_policy_latest"
+    PACK_ID = "invocation_sandbox_policy_pack_latest"
+    BLOCKED_ACTION_CLASSES = [
+        "external_network",
+        "filesystem_write",
+        "process_spawn",
+        "secret_access",
+        "repo_mutation",
+    ]
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        limits: InvocationSandboxLimits | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "sandbox_policies"
+        self.limits = limits or InvocationSandboxLimits()
+        self.decisions: list[InvocationSandboxDecision] = []
+
+    def evaluate(
+        self,
+        request: InvocationSandboxEvaluateRequest,
+        trace_id: str | None = None,
+    ) -> InvocationSandboxDecision:
+        trace_id = trace_id or new_trace_id()
+        manifest = self.app_state.registry.get(request.skill_id)
+        endpoint = request.endpoint.replace("{skill_id}", request.skill_id)
+        observed = self._observe_payload(request.input)
+        reasons: list[str] = []
+        matched_rules: list[str] = []
+        risk_scores: list[int] = [1]
+        decision = "allow"
+
+        if request.action_class in self.BLOCKED_ACTION_CLASSES:
+            decision = "deny"
+            risk_scores.append(4)
+            matched_rules.append("action_class_blocked")
+            reasons.append(f"Action class '{request.action_class}' is blocked by the local task sandbox.")
+        else:
+            matched_rules.append("action_class_allowed")
+            reasons.append(f"Action class '{request.action_class}' is allowed for local MCP skill invocation.")
+
+        limit_checks = [
+            (
+                "payload_bytes",
+                observed["payload_bytes"],
+                self.limits.max_payload_bytes,
+                "payload_bytes_within_limit",
+                "payload_bytes_exceeded",
+            ),
+            (
+                "max_string_chars",
+                observed["max_string_chars"],
+                self.limits.max_string_chars,
+                "string_chars_within_limit",
+                "string_chars_exceeded",
+            ),
+            (
+                "max_array_items",
+                observed["max_array_items"],
+                self.limits.max_array_items,
+                "array_items_within_limit",
+                "array_items_exceeded",
+            ),
+            (
+                "max_object_depth",
+                observed["max_object_depth"],
+                self.limits.max_object_depth,
+                "object_depth_within_limit",
+                "object_depth_exceeded",
+            ),
+            (
+                "estimated_input_tokens",
+                observed["estimated_input_tokens"],
+                self.limits.max_estimated_input_tokens,
+                "estimated_tokens_within_limit",
+                "estimated_tokens_exceeded",
+            ),
+        ]
+        for label, value, limit, allow_rule, deny_rule in limit_checks:
+            if value > limit:
+                decision = "deny"
+                risk_scores.append(3)
+                matched_rules.append(deny_rule)
+                reasons.append(f"{label}={value} exceeds sandbox limit {limit}.")
+            else:
+                matched_rules.append(allow_rule)
+
+        if self.app_state.provider.name == "mock":
+            matched_rules.append("mock_tool_sandbox_enforced")
+            reasons.append("Mock provider calls are constrained by deterministic local sandbox limits.")
+        else:
+            risk_scores.append(2)
+            matched_rules.append("external_provider_review")
+            reasons.append("Non-mock provider mode requires provider readiness and fallback review.")
+
+        if request.policy_context and request.policy_context.data_sensitivity == "confidential":
+            risk_scores.append(2)
+            matched_rules.append("confidential_payload_review")
+            reasons.append("Confidential payloads receive elevated sandbox risk labeling.")
+
+        if "retrieval" in manifest.tags or "resources" in manifest.tags:
+            risk_scores.append(2)
+            matched_rules.append("retrieval_tool_context_boundary")
+            reasons.append("Retrieval/resource skills are labeled for context-boundary review.")
+
+        risk_label = self._risk_label(max(risk_scores), decision)
+        if decision == "allow":
+            reasons.append("No blocking sandbox rule matched before invocation.")
+
+        sandbox_decision = InvocationSandboxDecision(
+            skill_id=request.skill_id,
+            actor=request.actor,
+            provider=self.app_state.provider.name,
+            endpoint=endpoint,
+            action_class=request.action_class,
+            decision=decision,
+            risk_label=risk_label,
+            reasons=reasons,
+            matched_rules=matched_rules,
+            limits=self.limits,
+            observed=observed,
+            trace_id=trace_id,
+            generated_at=utc_now(),
+        )
+        self.decisions.append(sandbox_decision)
+        self.app_state.audit.record(
+            "sandbox.evaluated",
+            "sandbox_policy",
+            request.skill_id,
+            trace_id,
+            request.actor,
+            {
+                "decision": decision,
+                "risk_label": risk_label,
+                "action_class": request.action_class,
+                "endpoint": endpoint,
+                "enforced": request.enforce,
+                "observed": observed,
+            },
+        )
+        return sandbox_decision
+
+    def report(self) -> InvocationSandboxReport:
+        decisions = self._report_decisions()
+        denied_count = sum(1 for decision in decisions if decision.decision == "deny")
+        high_risk_count = sum(
+            1 for decision in decisions if decision.risk_label in {"high", "critical"}
+        )
+        readiness_status: SecurityReadinessStatus = "ready"
+        if denied_count:
+            readiness_status = "needs_review"
+        if not self._gitignore_ok():
+            readiness_status = "blocked"
+        return InvocationSandboxReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "decision_count": len(decisions),
+                "denied_decision_count": denied_count,
+                "high_risk_decision_count": high_risk_count,
+                "blocked_action_class_count": len(self.BLOCKED_ACTION_CLASSES),
+                "endpoint_policy_count": len(self._endpoint_policy()),
+                "mock_provider": self.app_state.provider.name == "mock",
+                "patterns_used": ["task sandbox", "run transparency", "typed contracts", "structured outputs"],
+            },
+            limits=self.limits,
+            blocked_action_classes=list(self.BLOCKED_ACTION_CLASSES),
+            endpoint_policy=self._endpoint_policy(),
+            skill_risk_labels=self._skill_risk_labels(),
+            decisions=decisions,
+            audit_evidence=self._audit_evidence(),
+            reviewer_checklist=self._reviewer_checklist(decisions),
+            local_verification_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(
+        self,
+        request: InvocationSandboxPackRequest | None = None,
+    ) -> InvocationSandboxPackResult:
+        request = request or InvocationSandboxPackRequest()
+        scenarios = request.scenarios or self._default_scenarios(request.actor)
+        scenario_decisions = [self.evaluate(scenario) for scenario in scenarios]
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "summary": {
+                **report.summary,
+                "scenario_count": len(scenario_decisions),
+                "scenario_denied_count": sum(1 for item in scenario_decisions if item.decision == "deny"),
+            },
+            "policy_report": report.model_dump(mode="json"),
+            "scenario_decisions": [decision.model_dump(mode="json") for decision in scenario_decisions],
+            "sandbox_limits": self.limits.model_dump(mode="json"),
+            "blocked_action_classes": list(self.BLOCKED_ACTION_CLASSES),
+            "endpoint_policy": report.endpoint_policy,
+            "audit_evidence": report.audit_evidence,
+            "reviewer_checklist": report.reviewer_checklist,
+            "local_verification_commands": report.local_verification_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "sandbox.policy_pack_exported",
+            "sandbox_policy_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "scenario_count": len(scenario_decisions),
+            },
+        )
+        return InvocationSandboxPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _report_decisions(self) -> list[InvocationSandboxDecision]:
+        if self.decisions:
+            return sorted(self.decisions, key=lambda decision: decision.generated_at)
+        return [self.evaluate(scenario) for scenario in self._default_scenarios("sandbox-report")]
+
+    def _default_scenarios(self, actor: str) -> list[InvocationSandboxEvaluateRequest]:
+        return [
+            InvocationSandboxEvaluateRequest(
+                skill_id="search_knowledge_base",
+                input={"query": "AI governance policy audit trail", "limit": 2},
+                actor=actor,
+                action_class="skill_invocation",
+                endpoint="mcp:tool/search_knowledge_base",
+                enforce=True,
+            ),
+            InvocationSandboxEvaluateRequest(
+                skill_id="summarize_document",
+                input={"text": "local " * 1200},
+                actor=actor,
+                action_class="skill_invocation",
+                endpoint="fastapi:/skills/summarize_document/invoke",
+                enforce=True,
+            ),
+            InvocationSandboxEvaluateRequest(
+                skill_id="extract_entities",
+                input={"text": "Attempt to write files and call external services."},
+                actor=actor,
+                action_class="filesystem_write",
+                endpoint="fastapi:/skills/extract_entities/invoke",
+                enforce=True,
+            ),
+        ]
+
+    def _observe_payload(self, payload: JsonDict) -> JsonDict:
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        stats = {
+            "payload_bytes": len(serialized.encode("utf-8")),
+            "max_string_chars": 0,
+            "max_array_items": 0,
+            "max_object_depth": 1,
+            "object_key_count": 0,
+            "estimated_input_tokens": len(serialized.split()),
+        }
+
+        def walk(value: object, depth: int) -> None:
+            stats["max_object_depth"] = max(stats["max_object_depth"], depth)
+            if isinstance(value, dict):
+                stats["object_key_count"] += len(value)
+                for child in value.values():
+                    walk(child, depth + 1)
+            elif isinstance(value, list):
+                stats["max_array_items"] = max(stats["max_array_items"], len(value))
+                for child in value:
+                    walk(child, depth + 1)
+            elif isinstance(value, str):
+                stats["max_string_chars"] = max(stats["max_string_chars"], len(value))
+
+        walk(payload, 1)
+        return stats
+
+    def _risk_label(self, score: int, decision: str) -> str:
+        if decision == "deny" and score >= 4:
+            return "critical"
+        if decision == "deny" or score >= 3:
+            return "high"
+        if score == 2:
+            return "medium"
+        return "low"
+
+    def _endpoint_policy(self) -> list[JsonDict]:
+        return [
+            {
+                "endpoint": "/skills/{skill_id}/invoke",
+                "surface": "FastAPI",
+                "allowed_action_classes": ["skill_invocation"],
+                "enforcement_header": "X-Sandbox-Enforce: true",
+                "blocked_action_classes": list(self.BLOCKED_ACTION_CLASSES),
+            },
+            {
+                "endpoint": "mcp:tool/{skill_id}",
+                "surface": "MCP CLI/adapter",
+                "allowed_action_classes": ["skill_invocation"],
+                "enforcement_flag": "--enforce-sandbox",
+                "blocked_action_classes": list(self.BLOCKED_ACTION_CLASSES),
+            },
+            {
+                "endpoint": "/sandbox/evaluate",
+                "surface": "FastAPI",
+                "allowed_action_classes": [
+                    "skill_invocation",
+                    "resource_access",
+                    "prompt_render",
+                    "unknown",
+                ],
+                "enforcement": "dry-run evaluation; does not execute the skill",
+                "blocked_action_classes": list(self.BLOCKED_ACTION_CLASSES),
+            },
+        ]
+
+    def _skill_risk_labels(self) -> list[JsonDict]:
+        rows = []
+        for skill in self.app_state.registry.list():
+            risk = "low"
+            reasons = []
+            if "retrieval" in skill.tags or "resources" in skill.tags:
+                risk = "medium"
+                reasons.append("retrieval_context_boundary")
+            if "agent-tools" in skill.tags or "automation" in skill.tags:
+                risk = "medium"
+                reasons.append("agent_tool_or_automation")
+            if not self.app_state.registry.is_mcp_exposed(skill):
+                risk = "high"
+                reasons.append("not_mcp_exposed")
+            rows.append(
+                {
+                    "skill_id": skill.id,
+                    "risk_label": risk,
+                    "tags": skill.tags,
+                    "mcp_exposed": self.app_state.registry.is_mcp_exposed(skill),
+                    "reasons": reasons or ["standard_local_mock_skill"],
+                }
+            )
+        return rows
+
+    def _audit_evidence(self) -> list[JsonDict]:
+        return [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.action.startswith("sandbox.")
+        ][-25:]
+
+    def _reviewer_checklist(self, decisions: list[InvocationSandboxDecision]) -> list[JsonDict]:
+        return [
+            {
+                "item": "Sandbox limits are typed and returned by the policy endpoint.",
+                "status": "pass" if self.limits.max_payload_bytes > 0 else "fail",
+                "proof": "GET /sandbox/policy",
+            },
+            {
+                "item": "Blocked action classes produce denied structured decisions.",
+                "status": "pass" if any(decision.decision == "deny" for decision in decisions) else "fail",
+                "proof": "POST /sandbox/evaluate with action_class=filesystem_write",
+            },
+            {
+                "item": "Sandbox evaluations are traceable in audit history.",
+                "status": "pass" if self._audit_evidence() else "fail",
+                "proof": "audit action sandbox.evaluated",
+            },
+            {
+                "item": "Generated sandbox policy artifacts are ignored local evidence.",
+                "status": "pass" if self._gitignore_ok() else "fail",
+                "proof": "data/sandbox_policies/",
+            },
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_invocation_sandbox.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "python -m app.mcp_server call --name search_knowledge_base --arguments \"{\\\"query\\\":\\\"policy\\\",\\\"limit\\\":2}\" --enforce-sandbox",
+            'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Sandbox policies are deterministic local fixtures, not OS, container, or network isolation.",
+            "The local mock provider remains default; optional external providers should be paired with provider readiness gates.",
+            "Payload token counts are approximate whitespace estimates for local governance evidence.",
+            "Generated policy packs are reviewer artifacts under ignored data/sandbox_policies/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/sandbox_policies/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# Invocation Sandbox Policy Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Scenarios: `{bundle['summary']['scenario_count']}`",
+            f"- Denied scenarios: `{bundle['summary']['scenario_denied_count']}`",
+            "",
+            "## Sandbox Limits",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["sandbox_limits"].items()],
+            "",
+            "## Blocked Action Classes",
+            "",
+            *[f"- `{action}`" for action in bundle["blocked_action_classes"]],
+            "",
+            "## Scenario Decisions",
+        ]
+        for decision in bundle["scenario_decisions"]:
+            lines.extend(
+                [
+                    "",
+                    f"### {decision['skill_id']} / {decision['action_class']}",
+                    f"- Decision: `{decision['decision']}`",
+                    f"- Risk label: `{decision['risk_label']}`",
+                    f"- Endpoint: `{decision['endpoint']}`",
+                    f"- Matched rules: `{', '.join(decision['matched_rules'])}`",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "## Endpoint Policy",
+                "",
+                *[
+                    f"- `{item['endpoint']}` ({item['surface']}): blocked `{', '.join(item['blocked_action_classes'])}`"
+                    for item in bundle["endpoint_policy"]
+                ],
+                "",
+                "## Reviewer Checklist",
+                "",
+                *[
+                    f"- `{item['status']}` {item['item']} Proof: `{item['proof']}`"
+                    for item in bundle["reviewer_checklist"]
+                ],
+                "",
+                "## Local Verification Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {item}" for item in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
 
 
 class PromptRegistry:
@@ -12422,6 +12961,7 @@ class CiDoctorService:
         "data/tenant_sandboxes/",
         "data/usage_packs/",
         "data/provider_packs/",
+        "data/sandbox_policies/",
         "data/portfolio_demo/",
         "data/portfolio_packs/",
         "data/launch_checklists/",
@@ -14662,6 +15202,7 @@ class DashboardSmokeService:
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
+            {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
@@ -14705,6 +15246,9 @@ class DashboardSmokeService:
             self._endpoint_ref("slo_pack", "POST", "/slo/pack", "Writes SLO Error Budget artifacts."),
             self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
+            self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
+            self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
+            self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
             self._endpoint_ref("privacy_retention", "GET", "/privacy/retention-report", "Privacy and retention scan signals."),
@@ -14747,6 +15291,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
+            self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
@@ -14816,6 +15361,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
@@ -14835,6 +15382,7 @@ class DashboardSmokeService:
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
+            'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -14845,6 +15393,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -15387,6 +15936,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
                 ["provider_fallback_pack_latest.json", "provider_fallback_pack_latest.md"],
                 "Mock-default provider posture, optional OpenAI/Azure checks, fallback matrix, re-enable gates, and audit-backed reviewer proof.",
+            ),
+            self._catalog_row(
+                "sandbox_policies",
+                "Invocation Sandbox Policy Pack",
+                Path("data") / "sandbox_policies",
+                "POST /sandbox/policy-pack",
+                "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
+                ["invocation_sandbox_policy_pack_latest.json", "invocation_sandbox_policy_pack_latest.md"],
+                "Mock tool sandbox limits, blocked action classes, risk labels, endpoint policy, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
                 "prompt_governance",
@@ -16693,6 +17251,7 @@ class PersistenceService:
             "audit_events": [event.model_dump(mode="json") for event in app_state.audit.events],
             "metrics": [metric.model_dump(mode="json") for metric in app_state.metrics.metrics],
             "reliability_report": app_state.reliability.report().model_dump(mode="json"),
+            "invocation_sandbox_report": app_state.invocation_sandbox.report().model_dump(mode="json"),
             "provider_readiness_report": app_state.provider_readiness.readiness().model_dump(mode="json"),
             "prompt_governance_report": app_state.prompt_governance.report().model_dump(mode="json"),
             "privacy_retention_report": app_state.privacy_retention.report().model_dump(mode="json"),
@@ -16744,6 +17303,7 @@ class AppState:
     usage: SkillUsageAnalyticsService = field(init=False)
     reliability: SkillReliabilityService = field(init=False)
     slo: SkillSloService = field(init=False)
+    invocation_sandbox: InvocationSandboxPolicyService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
@@ -16802,6 +17362,8 @@ class AppState:
         self.reliability = SkillReliabilityService(self)
         self.invocation_service.reliability = self.reliability
         self.slo = SkillSloService(self)
+        self.invocation_sandbox = InvocationSandboxPolicyService(self)
+        self.invocation_service.sandbox = self.invocation_sandbox
         self.provider_readiness = ProviderReadinessService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)

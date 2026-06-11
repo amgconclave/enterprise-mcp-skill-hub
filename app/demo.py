@@ -16,6 +16,7 @@ from app.models import (
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
+    InvocationSandboxPackRequest,
     LaunchChecklistRequest,
     MarketplaceRolloutPackRequest,
     PolicySimulationRequest,
@@ -184,6 +185,10 @@ async def main() -> None:
     provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
     provider_fallback_pack = state.provider_readiness.fallback_pack(
         ProviderFallbackPackRequest(actor="demo-provider-reviewer")
+    )
+    invocation_sandbox_report = state.invocation_sandbox.report()
+    invocation_sandbox_pack = state.invocation_sandbox.pack(
+        InvocationSandboxPackRequest(actor="demo-sandbox-reviewer")
     )
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
@@ -372,6 +377,16 @@ async def main() -> None:
                 "provider_current": provider_readiness.current_provider["name"],
                 "provider fallback pack path": provider_fallback_pack.markdown_path,
                 "provider_fallback_pack_path": provider_fallback_pack.markdown_path,
+                "invocation sandbox readiness": invocation_sandbox_report.readiness_status,
+                "invocation_sandbox_readiness": invocation_sandbox_report.readiness_status,
+                "invocation sandbox denied decisions": invocation_sandbox_report.summary[
+                    "denied_decision_count"
+                ],
+                "invocation_sandbox_denied_decisions": invocation_sandbox_report.summary[
+                    "denied_decision_count"
+                ],
+                "invocation sandbox pack path": invocation_sandbox_pack.markdown_path,
+                "invocation_sandbox_pack_path": invocation_sandbox_pack.markdown_path,
                 "prompt governance readiness": prompt_governance_report.readiness_status,
                 "prompt_governance_readiness": prompt_governance_report.readiness_status,
                 "prompt governance findings": prompt_governance_report.summary["finding_count"],

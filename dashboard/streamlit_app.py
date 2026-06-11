@@ -26,6 +26,8 @@ from app.models import (
     EnterprisePortfolioDemoPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
+    InvocationSandboxEvaluateRequest,
+    InvocationSandboxPackRequest,
     LaunchChecklistRequest,
     MarketplaceRolloutPackRequest,
     PolicyInvocationContext,
@@ -82,6 +84,7 @@ view = st.sidebar.radio(
         "Promote Skill",
         "Invoke Skill",
         "Policy Simulator",
+        "Invocation Sandbox",
         "Tenant Policy Sandbox",
         "Tenant RBAC / Entitlements",
         "Skill Marketplace",
@@ -267,6 +270,90 @@ elif view == "Policy Simulator":
         use_container_width=True,
         hide_index=True,
     )
+
+elif view == "Invocation Sandbox":
+    st.subheader("Invocation Sandbox")
+    st.caption("Evaluate local task-sandbox limits, blocked action classes, and risk labels before invocation.")
+    report = state.invocation_sandbox.report()
+    col_ready, col_decisions, col_denied, col_blocked = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_decisions.metric("Decisions", report.summary["decision_count"])
+    col_denied.metric("Denied", report.summary["denied_decision_count"])
+    col_blocked.metric("Blocked action classes", report.summary["blocked_action_class_count"])
+    tab_policy, tab_evaluate, tab_decisions, tab_export, tab_json = st.tabs(
+        ["Policy", "Evaluate", "Decisions", "Export", "JSON"]
+    )
+    with tab_policy:
+        st.json(report.limits.model_dump(mode="json"))
+        st.dataframe(report.endpoint_policy, use_container_width=True, hide_index=True)
+        st.dataframe(report.skill_risk_labels, use_container_width=True, hide_index=True)
+    with tab_evaluate:
+        selected_skill = st.selectbox(
+            "Sandbox skill",
+            [skill.id for skill in state.registry.mcp_exposed()],
+            key="sandbox_skill",
+        )
+        action_class = st.selectbox(
+            "Action class",
+            [
+                "skill_invocation",
+                "resource_access",
+                "prompt_render",
+                "external_network",
+                "filesystem_write",
+                "process_spawn",
+                "secret_access",
+                "repo_mutation",
+                "unknown",
+            ],
+        )
+        endpoint = st.text_input("Endpoint", value=f"fastapi:/skills/{selected_skill}/invoke")
+        payload_text = st.text_area(
+            "Input JSON",
+            value=json.dumps({"query": "AI governance policy", "limit": 2}, indent=2),
+            height=220,
+            key="sandbox_payload",
+        )
+        if st.button("Evaluate Sandbox", use_container_width=True):
+            decision = state.invocation_sandbox.evaluate(
+                InvocationSandboxEvaluateRequest(
+                    skill_id=selected_skill,
+                    input=json.loads(payload_text),
+                    actor="streamlit-sandbox-reviewer",
+                    action_class=action_class,
+                    endpoint=endpoint,
+                    enforce=True,
+                )
+            )
+            st.json(decision.model_dump(mode="json"))
+    with tab_decisions:
+        st.dataframe(
+            [
+                {
+                    "decision": decision.decision,
+                    "risk": decision.risk_label,
+                    "skill": decision.skill_id,
+                    "action_class": decision.action_class,
+                    "endpoint": decision.endpoint,
+                    "rules": ", ".join(decision.matched_rules),
+                    "trace_id": decision.trace_id,
+                }
+                for decision in report.decisions
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(report.audit_evidence, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/sandbox_policies/.")
+        if st.button("Export Sandbox Policy Pack", use_container_width=True):
+            export = state.invocation_sandbox.pack(
+                InvocationSandboxPackRequest(actor="streamlit-sandbox-reviewer")
+            )
+            st.success("Sandbox policy pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Tenant Policy Sandbox":
     st.subheader("Tenant Policy Sandbox")
