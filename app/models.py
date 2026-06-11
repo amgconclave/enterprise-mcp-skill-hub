@@ -1686,6 +1686,51 @@ class AuditPackResult(BaseModel):
     summary: JsonDict
 
 
+class SupplyChainPackageRecord(BaseModel):
+    package_id: str
+    name: str
+    ecosystem: str
+    source: str
+    scope: str
+    specifier: str
+    version_constraint: str
+    version_pinned: bool
+    license: str
+    license_status: Literal["allowed", "review_required", "blocked", "unknown"]
+    risk_flags: list[str] = Field(default_factory=list)
+    approval_required: bool = False
+    reviewer_notes: list[str] = Field(default_factory=list)
+
+
+class SupplyChainReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    summary: JsonDict
+    manifests: list[JsonDict]
+    packages: list[SupplyChainPackageRecord]
+    policy_checks: list[JsonDict]
+    license_policy: JsonDict
+    approval_gates: list[JsonDict]
+    local_verification_commands: list[str]
+    limitations: list[str]
+
+
+class SupplyChainPackRequest(BaseModel):
+    actor: str = "supply-chain-reviewer"
+
+
+class SupplyChainPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class InvocationReplayResult(BaseModel):
     invocation_id: str
     skill_id: str

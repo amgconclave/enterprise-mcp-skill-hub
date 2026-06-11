@@ -33,6 +33,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, audit events, and ignored `data/prompt_governance/` artifacts.
 - Privacy Retention + Redaction Pack for scanning invocation/audit payloads and ad hoc JSON for local PII patterns, redacted previews, retention actions, deletion candidates, audit events, and ignored `data/privacy_packs/` artifacts.
+- Supply Chain SBOM + License Governance Pack for local direct-dependency manifest hashes, license posture, pinning review, optional external-provider dependency gates, approval requirements, dashboard review, and ignored `data/supply_chain/` artifacts.
 - Enterprise Readiness Scorecard + Portfolio Demo Pack that rolls governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into one executive artifact.
 - API Smoke Matrix + Local Launch Checklist for quickly verifying auth/health, skills, MCP surfaces, governance, workflows, releases, capacity, tenant policy, usage analytics, incidents, and enterprise readiness in interviews or README walkthroughs.
 - Release Candidate Quality Gate + GitHub Publish Pack for deterministic local release gate scoring, endpoint/MCP/artifact inventory, verification commands, recruiter notes, and ignored `data/release_packs/` Markdown/JSON artifacts.
@@ -46,7 +47,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Prompt Governance, Privacy Retention, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -84,6 +85,8 @@ Invoke-RestMethod http://localhost:8000/release/quality-gate -Headers $headers
 Invoke-RestMethod http://localhost:8000/release/publish-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/ops/ci-doctor -Headers $headers
 Invoke-RestMethod http://localhost:8000/ops/audit-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/reviewer/quickstart -Headers $headers
 Invoke-RestMethod http://localhost:8000/reviewer/walkthrough-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/artifacts/inventory -Headers $headers
@@ -597,6 +600,24 @@ Invoke-RestMethod http://localhost:8000/ops/audit-pack `
 `GET /ops/ci-doctor` returns structured checks for pytest, ruff, eval/conformance, demo, MCP inspector commands, GitHub Actions workflow presence, Docker Compose presence, `.env.example`, README sections, docs presence, generated artifact ignores, dependency files, local/mock provider notes, and a suspicious secret scan summary.
 
 `POST /ops/audit-pack` writes `audit_pack_latest.json` and `audit_pack_latest.md` under ignored `data/audit_packs/`. The Audit Pack includes CI Doctor results, dependency inventory, secret scan summary, local verification commands, a publish-safety checklist, remediation notes, recruiter/interviewer explanation, and limitations. The Streamlit dashboard has a `CI Doctor / Audit Pack` view, and `python -m app.demo` prints CI Doctor status/score plus the Audit Pack path.
+
+## Supply Chain SBOM And License Governance
+
+Review direct dependency supply-chain posture before publishing or enabling hosted-provider paths:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/supply-chain/pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"supply-chain-reviewer"}'
+```
+
+`GET /supply-chain/report` returns manifest hashes, direct Python/npm dependency rows, local license metadata, policy checks, runtime pinning signals, optional external-provider dependency gates, approval requirements, proof commands, and limitations.
+
+`POST /supply-chain/pack` writes `supply_chain_pack_latest.json` and `supply_chain_pack_latest.md` under ignored `data/supply_chain/`. The Streamlit dashboard has a `Supply Chain` view, and `python -m app.demo` prints supply-chain readiness plus the pack path. The report is deterministic and local; it does not resolve transitive dependencies or query PyPI/npm.
 
 ## Release Candidate Quality Gate And Publish Pack
 

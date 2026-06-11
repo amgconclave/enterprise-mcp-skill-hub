@@ -44,6 +44,7 @@ from app.models import (
     SkillManifest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
+    SupplyChainPackRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantPolicySimulationRequest,
@@ -97,6 +98,7 @@ view = st.sidebar.radio(
         "API Contract",
         "Launch Checklist",
         "CI Doctor / Audit Pack",
+        "Supply Chain",
         "UI Verification",
         "Git Readiness",
         "Runtime Demo",
@@ -1288,6 +1290,41 @@ elif view == "CI Doctor / Audit Pack":
             st.info("Export to generate the CI Doctor Audit Pack artifact path.")
     with tab_json:
         st.json(doctor.model_dump(mode="json"))
+
+elif view == "Supply Chain":
+    st.subheader("Supply Chain")
+    st.caption("Direct-dependency SBOM, license policy, pinning review, and local reviewer artifacts.")
+    report = state.supply_chain.report(actor="streamlit-supply-chain-reviewer")
+    col_status, col_score, col_packages, col_approvals = st.columns(4)
+    col_status.metric("Readiness", report.readiness_status.upper())
+    col_score.metric("Score", report.score)
+    col_packages.metric("Packages", report.summary["package_count"])
+    col_approvals.metric("Approvals", report.summary["approval_required_count"])
+
+    tab_checks, tab_packages, tab_policy, tab_export, tab_json = st.tabs(
+        ["Policy Checks", "SBOM", "License Policy", "Supply Chain Pack", "JSON"]
+    )
+    with tab_checks:
+        st.dataframe(report.policy_checks, use_container_width=True, hide_index=True)
+        st.dataframe(report.manifests, use_container_width=True, hide_index=True)
+    with tab_packages:
+        st.dataframe(
+            [package.model_dump(mode="json") for package in report.packages],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_policy:
+        st.json(report.license_policy)
+        st.dataframe(report.approval_gates, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/supply_chain/.")
+        actor = st.text_input("Supply-chain pack actor", value="streamlit-supply-chain-reviewer")
+        if st.button("Export Supply Chain Pack", use_container_width=True):
+            export = state.supply_chain.pack(SupplyChainPackRequest(actor=actor))
+            st.success("Supply Chain Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "UI Verification":
     st.subheader("UI Verification")

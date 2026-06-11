@@ -117,6 +117,9 @@ from app.models import (
     SkillStatusRequest,
     SkillVersion,
     SmokeMatrixResult,
+    SupplyChainPackRequest,
+    SupplyChainPackResult,
+    SupplyChainReport,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
     TenantEntitlementPackRequest,
@@ -491,6 +494,19 @@ async def ops_audit_pack(
     _: str = Depends(require_api_key),
 ) -> AuditPackResult:
     return await state.ci_doctor.audit_pack(request or AuditPackRequest())
+
+
+@app.get("/supply-chain/report", response_model=SupplyChainReport)
+def supply_chain_report(_: str = Depends(require_api_key)) -> SupplyChainReport:
+    return state.supply_chain.report(actor="api-supply-chain-reviewer")
+
+
+@app.post("/supply-chain/pack", response_model=SupplyChainPackResult)
+def supply_chain_pack(
+    request: SupplyChainPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SupplyChainPackResult:
+    return state.supply_chain.pack(request or SupplyChainPackRequest())
 
 
 @app.get("/ui/dashboard-smoke", response_model=DashboardSmokeResult)

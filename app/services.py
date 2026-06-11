@@ -146,6 +146,10 @@ from app.models import (
     SkillVersion,
     SmokeMatrixEndpoint,
     SmokeMatrixResult,
+    SupplyChainPackageRecord,
+    SupplyChainPackRequest,
+    SupplyChainPackResult,
+    SupplyChainReport,
     TenantCapabilityDecision,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
@@ -10847,6 +10851,7 @@ class SmokeMatrixService:
         usage = self.app_state.usage.analytics()
         reliability = self.app_state.reliability.report()
         slo = self.app_state.slo.report()
+        supply_chain = self.app_state.supply_chain.report(actor="smoke-matrix")
         prompt_governance = self.app_state.prompt_governance.report()
         enterprise = await self.app_state.enterprise.scorecard()
         tools = self.app_state.mcp.list_tools()
@@ -10865,6 +10870,7 @@ class SmokeMatrixService:
                 usage.readiness_status,
                 reliability.readiness_status,
                 slo.readiness_status,
+                supply_chain.readiness_status,
                 prompt_governance.readiness_status,
                 enterprise.readiness_status,
             ],
@@ -10885,6 +10891,7 @@ class SmokeMatrixService:
                 "usage analytics",
                 "skill reliability",
                 "skill slo",
+                "supply chain",
                 "prompt governance",
                 "incidents",
                 "enterprise readiness",
@@ -10918,6 +10925,9 @@ class SmokeMatrixService:
             "slo_readiness": slo.readiness_status,
             "slo_release_gate": slo.release_gate["status"],
             "slo_blocked_release_skill_count": slo.summary["blocked_release_skill_count"],
+            "supply_chain_readiness": supply_chain.readiness_status,
+            "supply_chain_package_count": supply_chain.summary["package_count"],
+            "supply_chain_approval_required_count": supply_chain.summary["approval_required_count"],
             "prompt_governance_readiness": prompt_governance.readiness_status,
             "prompt_governance_findings": prompt_governance.summary["finding_count"],
             "prompt_governance_approvals": prompt_governance.summary["approval_required_count"],
@@ -11254,6 +11264,29 @@ class SmokeMatrixService:
                 "Writes Provider Readiness and Fallback reviewer artifacts.",
             ),
             self._endpoint(
+                "supply chain",
+                "GET",
+                "/supply-chain/report",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
+                [],
+                "Returns local direct-dependency SBOM, manifest hashes, license posture, pinning signals, and approval gates.",
+            ),
+            self._endpoint(
+                "supply chain",
+                "POST",
+                "/supply-chain/pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
+                [
+                    "data/supply_chain/supply_chain_pack_latest.json",
+                    "data/supply_chain/supply_chain_pack_latest.md",
+                ],
+                "Writes Supply Chain SBOM + License Governance reviewer artifacts.",
+            ),
+            self._endpoint(
                 "prompt governance",
                 "GET",
                 "/prompt-governance/report",
@@ -11555,6 +11588,11 @@ class SmokeMatrixService:
                 Path("data") / "provider_packs" / ProviderReadinessService.PACK_ID,
             ),
             (
+                "Supply Chain SBOM + License Governance Pack",
+                "POST /supply-chain/pack",
+                Path("data") / "supply_chain" / SupplyChainGovernanceService.PACK_ID,
+            ),
+            (
                 "Prompt Governance + Injection Risk Pack",
                 "POST /prompt-governance/pack",
                 Path("data") / "prompt_governance" / PromptGovernanceService.PACK_ID,
@@ -11637,6 +11675,8 @@ class SmokeMatrixService:
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/api/contract-audit -Headers $headers",
@@ -12387,6 +12427,7 @@ class CiDoctorService:
         "data/launch_checklists/",
         "data/release_packs/",
         "data/audit_packs/",
+        "data/supply_chain/",
         "data/reviewer_packs/",
         "data/artifact_indexes/",
         "data/ui_verification/",
@@ -13003,6 +13044,474 @@ class CiDoctorService:
     def _redacted_excerpt(self, line: str) -> str:
         collapsed = " ".join(line.strip().split())
         return re.sub(r"([=:]\s*['\"]?)[^'\"\s]{4,}", r"\1[REDACTED]", collapsed)[:160]
+
+
+class SupplyChainGovernanceService:
+    REPORT_ID = "supply_chain_report_latest"
+    PACK_ID = "supply_chain_pack_latest"
+    LICENSE_CATALOG = {
+        "fastapi": "MIT",
+        "httpx": "BSD-3-Clause",
+        "pydantic": "MIT",
+        "pydantic-settings": "MIT",
+        "pyyaml": "MIT",
+        "streamlit": "Apache-2.0",
+        "uvicorn": "BSD-3-Clause",
+        "pytest": "MIT",
+        "pytest-asyncio": "Apache-2.0",
+        "ruff": "MIT",
+        "openai": "Apache-2.0",
+        "zod": "MIT",
+        "zod-to-json-schema": "ISC",
+        "typescript": "Apache-2.0",
+    }
+    ALLOWED_LICENSES = {"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "PSF-2.0"}
+    REVIEW_LICENSES = {"LGPL-2.1", "LGPL-3.0", "MPL-2.0", "UNKNOWN"}
+    BLOCKED_LICENSES = {"AGPL-3.0", "GPL-2.0", "GPL-3.0", "Proprietary"}
+
+    def __init__(
+        self,
+        app_state: AppState,
+        output_dir: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "supply_chain"
+        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+
+    def report(self, actor: str = "supply-chain-reviewer") -> SupplyChainReport:
+        manifests, packages = self._inventory()
+        policy_checks = self._policy_checks(manifests, packages)
+        fail_count = sum(1 for check in policy_checks if check["status"] == "fail")
+        warn_count = sum(1 for check in policy_checks if check["status"] == "warn")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if fail_count:
+            readiness_status = "blocked"
+        elif warn_count:
+            readiness_status = "needs_review"
+        score = self._score(policy_checks)
+        summary = {
+            "local_only": True,
+            "manifest_count": len(manifests),
+            "package_count": len(packages),
+            "approval_required_count": sum(1 for package in packages if package.approval_required),
+            "blocked_package_count": sum(1 for package in packages if package.license_status == "blocked"),
+            "unknown_license_count": sum(1 for package in packages if package.license_status == "unknown"),
+            "unpinned_package_count": sum(1 for package in packages if not package.version_pinned),
+            "runtime_unpinned_count": sum(
+                1 for package in packages if package.scope == "runtime" and not package.version_pinned
+            ),
+            "external_provider_dependency_count": sum(
+                1 for package in packages if "optional_external_provider" in package.risk_flags
+            ),
+            "artifact_root": str(self.output_dir),
+        }
+        self.app_state.audit.record(
+            "supply_chain.report_generated",
+            "supply_chain_report",
+            self.REPORT_ID,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness_status,
+                "score": score,
+                "package_count": len(packages),
+                "approval_required_count": summary["approval_required_count"],
+            },
+        )
+        return SupplyChainReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            score=score,
+            summary=summary,
+            manifests=manifests,
+            packages=packages,
+            policy_checks=policy_checks,
+            license_policy=self._license_policy(),
+            approval_gates=self._approval_gates(packages),
+            local_verification_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: SupplyChainPackRequest | None = None) -> SupplyChainPackResult:
+        request = request or SupplyChainPackRequest()
+        report = self.report(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "score": report.score,
+            "report": report.model_dump(mode="json"),
+            "license_policy": report.license_policy,
+            "approval_gates": report.approval_gates,
+            "local_verification_commands": report.local_verification_commands,
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "supply_chain.pack_exported",
+            "supply_chain_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "score": report.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "package_count": report.summary["package_count"],
+                "approval_required_count": report.summary["approval_required_count"],
+            },
+        )
+        return SupplyChainPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            score=report.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": report.readiness_status,
+                "score": report.score,
+                "package_count": report.summary["package_count"],
+                "approval_required_count": report.summary["approval_required_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _inventory(self) -> tuple[list[JsonDict], list[SupplyChainPackageRecord]]:
+        manifests = []
+        raw_packages: list[JsonDict] = []
+        pyproject = self._root(Path("pyproject.toml"))
+        if pyproject.exists():
+            manifests.append(self._manifest_row(Path("pyproject.toml"), "python_project"))
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            project = data.get("project", {})
+            for dep in project.get("dependencies", []):
+                raw_packages.append(self._raw_package(dep, "python", "pyproject.toml", "runtime"))
+            for group, deps in project.get("optional-dependencies", {}).items():
+                for dep in deps:
+                    raw_packages.append(self._raw_package(dep, "python", f"pyproject.toml[{group}]", group))
+        for filename, scope in [("requirements.txt", "runtime"), ("requirements-dev.txt", "dev")]:
+            path = self._root(Path(filename))
+            if path.exists():
+                manifests.append(self._manifest_row(Path(filename), f"python_{scope}"))
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or stripped.startswith("-r "):
+                        continue
+                    raw_packages.append(self._raw_package(stripped, "python", filename, scope))
+        package_json = self._root(Path("typescript-bridge") / "package.json")
+        if package_json.exists():
+            manifests.append(self._manifest_row(Path("typescript-bridge") / "package.json", "node_bridge"))
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            for section, scope in [("dependencies", "bridge_runtime"), ("devDependencies", "bridge_dev")]:
+                for name, version in package.get(section, {}).items():
+                    raw_packages.append(
+                        {
+                            "name": name,
+                            "ecosystem": "npm",
+                            "source": f"typescript-bridge/package.json:{section}",
+                            "scope": scope,
+                            "specifier": f"{name}@{version}",
+                            "version_constraint": version,
+                        }
+                    )
+        deduped = {}
+        for package in raw_packages:
+            key = (package["name"].lower(), package["ecosystem"], package["source"])
+            deduped[key] = package
+        records = [self._package_record(index, package) for index, package in enumerate(deduped.values(), start=1)]
+        return manifests, sorted(records, key=lambda item: (item.ecosystem, item.name, item.source))
+
+    def _manifest_row(self, path: Path, kind: str) -> JsonDict:
+        full_path = self._root(path)
+        content = full_path.read_text(encoding="utf-8")
+        return {
+            "path": path.as_posix(),
+            "kind": kind,
+            "exists": True,
+            "sha256": sha256(content.encode("utf-8")).hexdigest(),
+            "size_bytes": len(content.encode("utf-8")),
+        }
+
+    def _raw_package(self, specifier: str, ecosystem: str, source: str, scope: str) -> JsonDict:
+        name = self._dependency_name(specifier)
+        return {
+            "name": name,
+            "ecosystem": ecosystem,
+            "source": source,
+            "scope": scope,
+            "specifier": specifier,
+            "version_constraint": specifier[len(name) :].strip() or "*",
+        }
+
+    def _package_record(self, index: int, package: JsonDict) -> SupplyChainPackageRecord:
+        name = package["name"]
+        normalized_name = name.lower()
+        license_name = self.LICENSE_CATALOG.get(normalized_name, "UNKNOWN")
+        license_status = self._license_status(license_name)
+        version_pinned = self._is_pinned(package["version_constraint"], package["ecosystem"])
+        risk_flags = []
+        reviewer_notes = []
+        if license_status in {"blocked", "review_required", "unknown"}:
+            risk_flags.append(f"license_{license_status}")
+            reviewer_notes.append("License needs security/legal review before enterprise rollout.")
+        if not version_pinned:
+            risk_flags.append("floating_version")
+            reviewer_notes.append("Version constraint is not exact; pin or lock before production release.")
+        if package["scope"] == "runtime" and not version_pinned:
+            risk_flags.append("unpinned_runtime_dependency")
+        if normalized_name in {"openai"}:
+            risk_flags.append("optional_external_provider")
+            reviewer_notes.append("External provider package is optional and must stay disabled without credentials.")
+        if package["ecosystem"] == "npm":
+            risk_flags.append("typescript_bridge_dependency")
+        approval_required = bool(risk_flags) or license_status != "allowed"
+        return SupplyChainPackageRecord(
+            package_id=f"pkg_{index:03d}",
+            name=name,
+            ecosystem=package["ecosystem"],
+            source=package["source"],
+            scope=package["scope"],
+            specifier=package["specifier"],
+            version_constraint=package["version_constraint"],
+            version_pinned=version_pinned,
+            license=license_name,
+            license_status=license_status,
+            risk_flags=sorted(set(risk_flags)),
+            approval_required=approval_required,
+            reviewer_notes=reviewer_notes or ["Direct dependency is allowed by the local license policy."],
+        )
+
+    def _policy_checks(
+        self,
+        manifests: list[JsonDict],
+        packages: list[SupplyChainPackageRecord],
+    ) -> list[JsonDict]:
+        blocked = [package for package in packages if package.license_status == "blocked"]
+        unknown = [package for package in packages if package.license_status == "unknown"]
+        unpinned_runtime = [
+            package for package in packages if package.scope == "runtime" and not package.version_pinned
+        ]
+        external_provider = [
+            package for package in packages if "optional_external_provider" in package.risk_flags
+        ]
+        return [
+            {
+                "id": "manifest_presence",
+                "status": "pass" if len(manifests) >= 3 else "fail",
+                "title": "Dependency manifest coverage",
+                "detail": f"Found {len(manifests)} first-party dependency manifest(s).",
+                "evidence": [manifest["path"] for manifest in manifests],
+                "remediation": "Restore pyproject.toml, requirements.txt, requirements-dev.txt, and TypeScript bridge package.json.",
+            },
+            {
+                "id": "license_policy",
+                "status": "fail" if blocked else ("warn" if unknown else "pass"),
+                "title": "License policy",
+                "detail": f"Blocked packages: {len(blocked)}; unknown licenses: {len(unknown)}.",
+                "evidence": [f"{package.name}:{package.license}" for package in [*blocked, *unknown]],
+                "remediation": "Replace blocked packages and document unknown licenses before production rollout.",
+            },
+            {
+                "id": "pinning_policy",
+                "status": "warn" if unpinned_runtime else "pass",
+                "title": "Runtime pinning policy",
+                "detail": f"Runtime packages with floating constraints: {len(unpinned_runtime)}.",
+                "evidence": [f"{package.source}:{package.specifier}" for package in unpinned_runtime],
+                "remediation": "Use lock files or exact pins for production images while keeping demo constraints readable.",
+            },
+            {
+                "id": "external_provider_dependencies",
+                "status": "warn" if external_provider else "pass",
+                "title": "Optional external provider dependencies",
+                "detail": f"Optional external-provider packages: {len(external_provider)}.",
+                "evidence": [f"{package.source}:{package.specifier}" for package in external_provider],
+                "remediation": "Keep hosted-provider dependencies optional and gated by local/mock defaults.",
+            },
+            {
+                "id": "artifact_ignore",
+                "status": "pass" if "data/supply_chain/" in self._read_text(Path(".gitignore")) else "fail",
+                "title": "Generated supply-chain artifacts ignored",
+                "detail": "Supply-chain artifacts are stored under ignored data/supply_chain/.",
+                "evidence": ["data/supply_chain/"] if "data/supply_chain/" in self._read_text(Path(".gitignore")) else [],
+                "remediation": "Add data/supply_chain/ to .gitignore.",
+            },
+        ]
+
+    def _license_status(self, license_name: str) -> str:
+        if license_name in self.ALLOWED_LICENSES:
+            return "allowed"
+        if license_name in self.BLOCKED_LICENSES:
+            return "blocked"
+        if license_name == "UNKNOWN":
+            return "unknown"
+        if license_name in self.REVIEW_LICENSES:
+            return "review_required"
+        return "review_required"
+
+    def _is_pinned(self, constraint: str, ecosystem: str) -> bool:
+        stripped = constraint.strip()
+        if ecosystem == "npm":
+            return bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", stripped))
+        return stripped.startswith("==") or stripped.startswith("===")
+
+    def _license_policy(self) -> JsonDict:
+        return {
+            "allowed_licenses": sorted(self.ALLOWED_LICENSES),
+            "review_required_licenses": sorted(self.REVIEW_LICENSES),
+            "blocked_licenses": sorted(self.BLOCKED_LICENSES),
+            "policy_notes": [
+                "Direct dependencies are reviewed from local manifests only.",
+                "Unknown licenses require review before enterprise rollout.",
+                "GPL/AGPL/proprietary licenses are treated as blocking for this portfolio project.",
+            ],
+        }
+
+    def _approval_gates(self, packages: list[SupplyChainPackageRecord]) -> list[JsonDict]:
+        return [
+            {
+                "gate": "legal_review",
+                "required": any(package.license_status != "allowed" for package in packages),
+                "reason": "Required when direct dependency licenses are blocked, unknown, or review-required.",
+            },
+            {
+                "gate": "platform_owner_pin_review",
+                "required": any(not package.version_pinned for package in packages),
+                "reason": "Required before production image release when direct dependency constraints float.",
+            },
+            {
+                "gate": "external_provider_reenable",
+                "required": any("optional_external_provider" in package.risk_flags for package in packages),
+                "reason": "Required before enabling hosted OpenAI/Azure provider paths outside local/mock mode.",
+            },
+        ]
+
+    def _reviewer_checklist(self, report: SupplyChainReport) -> list[JsonDict]:
+        return [
+            {"item": "Review all direct dependency manifests and hashes", "status": "required"},
+            {
+                "item": "Resolve blocked or unknown direct dependency licenses",
+                "status": "clear" if report.summary["blocked_package_count"] == 0 and report.summary["unknown_license_count"] == 0 else "required",
+            },
+            {
+                "item": "Pin or lock runtime dependencies before production release",
+                "status": "required" if report.summary["runtime_unpinned_count"] else "clear",
+            },
+            {"item": "Keep generated SBOM/license artifacts ignored", "status": "required"},
+            {"item": "Run the repo verification commands before publishing", "status": "required"},
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
+            'rg "supply-chain|Supply Chain|supply_chain" app dashboard docs README.md tests',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The SBOM is direct-dependency only; it does not resolve transitive packages.",
+            "License metadata comes from a deterministic local allowlist for this repo, not package registries.",
+            "Version pinning is a static manifest signal and does not replace a production lockfile review.",
+            "Generated artifacts are local reviewer evidence under ignored data/supply_chain/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["report"]
+        lines = [
+            "# Supply Chain SBOM + License Governance Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            f"- Packages: `{report['summary']['package_count']}`",
+            f"- Approval required: `{report['summary']['approval_required_count']}`",
+            "",
+            "## Policy Checks",
+            "",
+            "| Status | Check | Detail |",
+            "| --- | --- | --- |",
+            *[
+                f"| `{check['status']}` | {check['title']} | {check['detail']} |"
+                for check in report["policy_checks"]
+            ],
+            "",
+            "## Direct Dependency SBOM",
+            "",
+            "| Ecosystem | Package | Source | Constraint | License | Flags |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| {package['ecosystem']} | `{package['name']}` | `{package['source']}` | `{package['version_constraint']}` | `{package['license']}` | {', '.join(package['risk_flags']) or 'none'} |"
+                for package in report["packages"]
+            ],
+            "",
+            "## Approval Gates",
+            "",
+            *[
+                f"- `{gate['gate']}` required=`{gate['required']}`: {gate['reason']}"
+                for gate in bundle["approval_gates"]
+            ],
+            "",
+            "## Local Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[f"- `{item['status']}` {item['item']}" for item in bundle["reviewer_checklist"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _score(self, checks: list[JsonDict]) -> int:
+        if not checks:
+            return 0
+        score = round(100 * sum(1 for check in checks if check["status"] == "pass") / len(checks))
+        score -= min(45, 15 * sum(1 for check in checks if check["status"] == "fail"))
+        score -= min(25, 5 * sum(1 for check in checks if check["status"] == "warn"))
+        if any(check["status"] == "fail" for check in checks):
+            score = min(score, 69)
+        elif any(check["status"] == "warn" for check in checks):
+            score = min(score, 89)
+        return max(0, min(100, score))
+
+    def _read_text(self, path: Path) -> str:
+        full_path = self._root(path)
+        if not full_path.exists() or not full_path.is_file():
+            return ""
+        return full_path.read_text(encoding="utf-8")
+
+    def _root(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+    def _dependency_name(self, specifier: str) -> str:
+        return re.split(r"[<>=!~;\[]", specifier.strip(), maxsplit=1)[0].strip()
 
 
 class ReviewerQuickstartService:
@@ -14157,6 +14666,7 @@ class DashboardSmokeService:
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
             {"id": "ci_doctor", "label": "CI Doctor / Audit Pack", "purpose": "Static local CI and publish audit."},
+            {"id": "supply_chain", "label": "Supply Chain", "purpose": "SBOM and license governance."},
             {"id": "release_pack", "label": "Release Pack", "purpose": "Release quality and publish artifacts."},
             {"id": "mcp_inspector", "label": "MCP Inspector", "purpose": "Tools/resources/prompts proof."},
             {"id": "ui_verification", "label": "UI Verification", "purpose": "Dashboard smoke and UI pack."},
@@ -14200,6 +14710,8 @@ class DashboardSmokeService:
             self._endpoint_ref("privacy_retention", "GET", "/privacy/retention-report", "Privacy and retention scan signals."),
             self._endpoint_ref("privacy_redact", "POST", "/privacy/redact", "Previews local redaction for JSON payloads."),
             self._endpoint_ref("privacy_retention_pack", "POST", "/privacy/retention-pack", "Writes Privacy Retention artifacts."),
+            self._endpoint_ref("supply_chain_report", "GET", "/supply-chain/report", "Direct-dependency SBOM and license policy."),
+            self._endpoint_ref("supply_chain_pack", "POST", "/supply-chain/pack", "Writes Supply Chain governance artifacts."),
             self._endpoint_ref("api_contract_audit", "GET", "/api/contract-audit", "API and MCP contract audit."),
             self._endpoint_ref("api_reviewer_collection", "POST", "/api/reviewer-collection", "Writes API Reviewer Collection artifacts."),
         ]
@@ -14223,6 +14735,7 @@ class DashboardSmokeService:
             self._artifact_tab("readme_checklist", "Artifact Inventory", "Export", "data/artifact_indexes/"),
             self._artifact_tab("launch_checklist", "Launch Checklist", "Export", "data/launch_checklists/"),
             self._artifact_tab("audit_pack", "CI Doctor / Audit Pack", "Audit Pack", "data/audit_packs/"),
+            self._artifact_tab("supply_chain", "Supply Chain", "Supply Chain Pack", "data/supply_chain/"),
             self._artifact_tab("release_pack", "Release Pack", "Publish Pack", "data/release_packs/"),
             self._artifact_tab("ui_verification", "UI Verification", "Verification Pack", "data/ui_verification/"),
             self._artifact_tab("git_push_plan", "Git Readiness", "Push Plan", "data/git_packs/"),
@@ -14302,6 +14815,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/usage/chargeback-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/reliability/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers",
@@ -14319,6 +14834,7 @@ class DashboardSmokeService:
             'rg "reliability/skills|reliability/pack|circuit-breakers|Skill Reliability|reliability_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "slo/report|slo/pack|Skill SLO|slo_packs|error budget" app dashboard docs README.md tests scripts sample_data',
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
+            'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
             'rg "prompt-governance|prompt_governance|Prompt Governance|Injection Risk" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\ui_verification -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\git_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -14328,6 +14844,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\usage_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\reliability_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\prompt_governance -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\api_contracts -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
@@ -14701,6 +15218,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/ops/audit-pack -Method POST -Headers $headers",
                 ["audit_pack_latest.json", "audit_pack_latest.md"],
                 "Dependency, docs, ignore, command, local/mock posture, and suspicious secret scan proof before publishing.",
+            ),
+            self._catalog_row(
+                "supply_chain",
+                "Supply Chain SBOM + License Governance Pack",
+                Path("data") / "supply_chain",
+                "POST /supply-chain/pack",
+                "Invoke-RestMethod http://localhost:8000/supply-chain/pack -Method POST -Headers $headers",
+                ["supply_chain_pack_latest.json", "supply_chain_pack_latest.md"],
+                "Direct-dependency SBOM, license posture, pinning review, optional provider dependency gates, and local reviewer evidence.",
             ),
             self._catalog_row(
                 "reviewer_packs",
@@ -16210,6 +16736,7 @@ class AppState:
     portfolio: PortfolioEvidenceService = field(init=False)
     release_candidate: ReleaseCandidateService = field(init=False)
     ci_doctor: CiDoctorService = field(init=False)
+    supply_chain: SupplyChainGovernanceService = field(init=False)
     reviewer: ReviewerQuickstartService = field(init=False)
     ui_verification: DashboardSmokeService = field(init=False)
     runtime_demo: RuntimeDemoService = field(init=False)
@@ -16267,6 +16794,7 @@ class AppState:
         self.portfolio = PortfolioEvidenceService(self)
         self.release_candidate = ReleaseCandidateService(self)
         self.ci_doctor = CiDoctorService(self)
+        self.supply_chain = SupplyChainGovernanceService(self)
         self.reviewer = ReviewerQuickstartService(self)
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)

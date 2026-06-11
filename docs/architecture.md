@@ -34,6 +34,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `SmokeMatrixService` assembles a deterministic local API smoke matrix and writes launch checklist artifacts under `data/launch_checklists/` for README and interview verification.
 - `ReleaseCandidateService` composes readiness, smoke, release, docs, tests, eval, demo, MCP, endpoint, and artifact signals into a Release Candidate quality gate and writes a GitHub Publish Pack under ignored `data/release_packs/`.
 - `CiDoctorService` performs deterministic local CI Doctor checks across command coverage, GitHub Actions, Docker Compose, environment examples, README/docs, ignored artifact folders, dependency manifests, local/mock provider posture, and suspicious secret scan summaries, then writes Audit Pack artifacts under ignored `data/audit_packs/`.
+- `SupplyChainGovernanceService` builds a local direct-dependency SBOM from Python and TypeScript manifests, applies deterministic license/pinning/provider review policy, and writes Supply Chain artifacts under ignored `data/supply_chain/`.
 - `ReviewerQuickstartService` composes smoke, portfolio, release, CI Doctor, MCP inventory, endpoint walkthrough, and artifact proof signals into `GET /reviewer/quickstart`, then writes recruiter/engineer Walkthrough Pack artifacts under ignored `data/reviewer_packs/`.
 - `ArtifactInventoryService` catalogs generated MCP proof artifact directories, producer endpoints/commands, latest local files, ignored status, reviewer purpose, and freshness notes, then writes a README Checklist pack under ignored `data/artifact_indexes/`.
 - `ApiContractService` builds an API Contract snapshot from FastAPI route decorators, docs/api coverage, dashboard smoke wiring, generated artifact endpoints, demo flow expectations, and MCP tools/resources/prompts, then writes Reviewer Collection artifacts under ignored `data/api_contracts/`.
@@ -292,6 +293,15 @@ The project keeps governance close to the skill runtime:
 5. The service writes `audit_pack_latest.json` and `audit_pack_latest.md` under ignored `data/audit_packs/`.
 6. The Audit Pack includes CI Doctor results, dependency inventory, secret scan summary, local verification commands, publish-safety checklist, remediation notes, recruiter/interviewer explanation, and limitations.
 7. The workflow stays deterministic and local/mock; it does not call external CI, package registry, source-control, or secret-scanning services.
+
+## Supply Chain SBOM Flow
+
+1. A reviewer calls `GET /supply-chain/report`.
+2. `SupplyChainGovernanceService` parses `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, and `typescript-bridge/package.json`.
+3. The response returns manifest hashes, direct dependency rows, local license policy decisions, pinning signals, optional external-provider dependency gates, approval requirements, local proof commands, and limitations.
+4. A reviewer calls `POST /supply-chain/pack`.
+5. The service writes `supply_chain_pack_latest.json` and `.md` under ignored `data/supply_chain/`.
+6. The workflow is deterministic and local/mock; it does not resolve transitive dependencies or query PyPI/npm.
 
 ## Reviewer Quickstart Flow
 

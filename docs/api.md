@@ -52,6 +52,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /slo/pack` - writes the Skill SLO + Error Budget Pack Markdown/JSON under ignored local folder `data/slo_packs/`.
 - `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
+- `GET /supply-chain/report` - returns a local direct-dependency SBOM with manifest hashes, license policy decisions, pinning signals, optional provider dependency gates, approval requirements, and limitations.
+- `POST /supply-chain/pack` - writes the Supply Chain SBOM + License Governance Pack Markdown/JSON under ignored local folder `data/supply_chain/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.
 - `POST /prompt-governance/validate` - validates submitted prompt or resource text with local deterministic prompt-governance rules.
 - `POST /prompt-governance/pack` - writes the Prompt Governance + Injection Risk Pack Markdown/JSON under ignored local folder `data/prompt_governance/`.
@@ -643,6 +645,24 @@ Invoke-RestMethod http://localhost:8000/ops/audit-pack `
 The CI Doctor response includes `readiness_status`, `score`, `summary`, `checks`, `command_checks`, `dependency_inventory`, `secret_scan_summary`, `local_runtime_notes`, and `publish_safety_checklist`. The command checks cover pytest, ruff, golden eval, validate-only eval, conformance, Dashboard Smoke, demo, and MCP tools/resources/prompts commands. The repo checks cover GitHub Actions workflow presence, Docker Compose presence, `.env.example`, README required sections, docs presence, generated artifact ignores, dependency files, local/mock provider notes, and suspicious secret-pattern scan summary.
 
 The Audit Pack export writes `audit_pack_latest.json` and `audit_pack_latest.md` under `data/audit_packs/`. It includes CI Doctor results, dependency inventory, secret scan summary, local verification commands, publish-safety checklist, remediation notes, recruiter/interviewer explanation, local runtime notes, and limitations. The secret scan is deterministic and local; it reports redacted suspicious patterns rather than printing credential values.
+
+## Supply Chain SBOM And License Governance
+
+Review direct dependency supply-chain posture without external package registry calls:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/supply-chain/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/supply-chain/pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"supply-chain-reviewer"}'
+```
+
+The Supply Chain report includes manifest hashes, direct Python/npm dependencies, local license metadata, license policy checks, runtime pinning signals, optional external-provider dependency gates, approval requirements, local proof commands, and limitations.
+
+The Supply Chain Pack writes `supply_chain_pack_latest.json` and `.md` under ignored `data/supply_chain/`. It is deterministic and local; it does not resolve transitive dependencies or query PyPI/npm.
 
 ## Release Candidate Quality Gate And Publish Pack
 

@@ -30,6 +30,7 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
+    SupplyChainPackRequest,
     TenantEntitlementPackRequest,
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
@@ -210,6 +211,10 @@ async def main() -> None:
     ci_doctor = await state.ci_doctor.ci_doctor()
     audit_pack = await state.ci_doctor.audit_pack(
         AuditPackRequest(actor="demo-ci-doctor")
+    )
+    supply_chain_report = state.supply_chain.report(actor="demo-supply-chain-reviewer")
+    supply_chain_pack = state.supply_chain.pack(
+        SupplyChainPackRequest(actor="demo-supply-chain-reviewer")
     )
     reviewer_quickstart = await state.reviewer.quickstart()
     walkthrough_pack = await state.reviewer.walkthrough_pack(
@@ -408,6 +413,12 @@ async def main() -> None:
                 "ci_doctor_score": ci_doctor.score,
                 "audit pack path": audit_pack.markdown_path,
                 "audit_pack_path": audit_pack.markdown_path,
+                "supply chain readiness": supply_chain_report.readiness_status,
+                "supply_chain_readiness": supply_chain_report.readiness_status,
+                "supply chain package count": supply_chain_report.summary["package_count"],
+                "supply_chain_package_count": supply_chain_report.summary["package_count"],
+                "supply chain pack path": supply_chain_pack.markdown_path,
+                "supply_chain_pack_path": supply_chain_pack.markdown_path,
                 "reviewer quickstart status": reviewer_quickstart.readiness_status,
                 "reviewer_quickstart_status": reviewer_quickstart.readiness_status,
                 "reviewer quickstart count": reviewer_quickstart.summary["quickstart_item_count"],
