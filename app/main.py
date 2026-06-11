@@ -102,6 +102,9 @@ from app.models import (
     ReleasePublishPackRequest,
     ReleasePublishPackResult,
     ReleaseQualityGate,
+    RepositoryAutomationPackRequest,
+    RepositoryAutomationPackResult,
+    RepositoryAutomationPlanResult,
     ResourceDefinition,
     ResourcePayload,
     ReviewerQuickstartResult,
@@ -626,6 +629,19 @@ def git_push_plan(
     _: str = Depends(require_api_key),
 ) -> GitPushPlanResult:
     return state.git_readiness.push_plan(request or GitPushPlanRequest())
+
+
+@app.get("/repository/automation-plan", response_model=RepositoryAutomationPlanResult)
+def repository_automation_plan(_: str = Depends(require_api_key)) -> RepositoryAutomationPlanResult:
+    return state.git_readiness.automation_plan()
+
+
+@app.post("/repository/automation-pack", response_model=RepositoryAutomationPackResult)
+def repository_automation_pack(
+    request: RepositoryAutomationPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> RepositoryAutomationPackResult:
+    return state.git_readiness.automation_pack(request or RepositoryAutomationPackRequest())
 
 
 @app.get("/runtime/demo-readiness", response_model=RuntimeDemoReadinessResult)

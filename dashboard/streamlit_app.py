@@ -42,6 +42,7 @@ from app.models import (
     PromptGovernanceValidationRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
+    RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
     SkillCompatibilityPackRequest,
@@ -113,6 +114,7 @@ view = st.sidebar.radio(
         "Supply Chain",
         "UI Verification",
         "Git Readiness",
+        "Repository Automation",
         "Runtime Demo",
         "Final Handoff",
         "Release Pack",
@@ -1748,6 +1750,76 @@ elif view == "Git Readiness":
             st.info("Export writes Markdown and JSON under ignored data/git_packs/.")
     with tab_json:
         st.json(readiness.model_dump(mode="json"))
+
+elif view == "Repository Automation":
+    st.subheader("Repository Automation")
+    st.caption("Generate a dry-run repository automation plan with task sandbox decisions and transparent review steps.")
+    plan = state.git_readiness.automation_plan()
+    col_status, col_score, col_tasks, col_blocked = st.columns(4)
+    col_status.metric("Readiness", plan.readiness_status.upper())
+    col_score.metric("Score", plan.score)
+    col_tasks.metric("Planned tasks", plan.summary["planned_task_count"])
+    col_blocked.metric("Blocked mutations", plan.summary["blocked_mutation_count"])
+
+    tab_summary, tab_tasks, tab_runbook, tab_commands, tab_pack, tab_json = st.tabs(
+        ["Summary", "Tasks", "Runbook", "Commands", "Automation Pack", "JSON"]
+    )
+    with tab_summary:
+        st.json(
+            {
+                "repository": plan.repository,
+                "summary": plan.summary,
+                "sandbox_policy": plan.sandbox_policy,
+            }
+        )
+    with tab_tasks:
+        st.dataframe(
+            [
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "action_class": task.action_class,
+                    "sandbox_decision": task.sandbox_decision,
+                    "dry_run_only": task.dry_run_only,
+                    "changed_paths": len(task.changed_paths),
+                    "manual_approval_required": task.manual_approval_required,
+                }
+                for task in plan.automation_tasks
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        selected_task = st.selectbox(
+            "Task details",
+            options=[task.task_id for task in plan.automation_tasks],
+        )
+        task = next(item for item in plan.automation_tasks if item.task_id == selected_task)
+        st.json(task.model_dump(mode="json"))
+    with tab_runbook:
+        st.dataframe(plan.transparent_runbook, use_container_width=True, hide_index=True)
+    with tab_commands:
+        st.dataframe(
+            [{"command": command} for command in plan.local_proof_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [{"limitation": note} for note in plan.limitations],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_pack:
+        actor = st.text_input("Repository automation actor", value="streamlit-repo-reviewer")
+        if st.button("Export Repository Automation Pack", use_container_width=True):
+            export = state.git_readiness.automation_pack(
+                RepositoryAutomationPackRequest(actor=actor)
+            )
+            st.success("Repository automation pack exported.")
+            st.json(export.model_dump(mode="json"))
+        else:
+            st.info("Export writes dry-run Markdown and JSON under ignored data/repository_automation/.")
+    with tab_json:
+        st.json(plan.model_dump(mode="json"))
 
 elif view == "Runtime Demo":
     st.subheader("Runtime Demo")

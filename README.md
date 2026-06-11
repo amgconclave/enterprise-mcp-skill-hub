@@ -47,11 +47,12 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - API Contract Snapshot + MCP Reviewer Collection + Tool Contract Drift Pack for fresh-clone verification of OpenAPI route count, `X-API-Key` protection, docs/api coverage, dashboard smoke alignment, generated artifact endpoints, demo flow endpoints, MCP tools/resources/prompts, manifest/MCP schema fingerprints, version drift remediation, sample commands, and ignored `data/api_contracts/` Markdown/JSON artifacts.
 - Dashboard Smoke Script + UI Verification Pack for deterministic Streamlit source wiring checks, expected views/endpoints, generated artifact tabs, MCP proof surfaces, screenshot placeholders, and ignored `data/ui_verification/` Markdown/JSON artifacts.
 - GitHub Push Readiness + Branch Hygiene Pack for local-only git repo, branch, worktree, generated artifact, workflow, README final handoff, `.env.example`, commit grouping, and MCP publish checks under ignored `data/git_packs/`.
+- Repository Automation Dry-Run Pack for sandboxed repo task planning, blocked mutation evidence, transparent runbook steps, manual approval policy, and ignored `data/repository_automation/` artifacts.
 - Runtime Demo Server Pack for fresh-clone FastAPI, Streamlit, and MCP CLI runtime readiness: exact start/stop commands, expected ports, env defaults, dependency checks, read-only port checks, health/smoke URLs, screenshot placeholders, troubleshooting, and ignored `data/runtime_packs/` Markdown/JSON artifacts.
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Platform Pack, Agent Collaboration, Worker Scale-Out, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Platform Pack, Agent Collaboration, Worker Scale-Out, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -225,6 +226,23 @@ Get-ChildItem -Recurse -File data\git_packs -ErrorAction SilentlyContinue | Sele
 `GET /git/readiness` returns structured local git and publish checks for repo detection, current branch, tracked/untracked/modified/ignored summaries, generated artifact directories that should stay ignored, source/doc/test/dashboard files changed, suspicious large/generated files, GitHub Actions workflow presence, README final handoff mention, `.env.example`, dirty-worktree guidance, recommended commit groups, and MCP-specific publish notes.
 
 `POST /git/push-plan` writes `git_push_plan_latest.json` and `git_push_plan_latest.md` under ignored `data/git_packs/`. The GitHub Push Readiness + Branch Hygiene Pack includes exact non-destructive review commands, suggested commit grouping, do-not-commit generated artifact notes, pre-push verification checklist, MCP command verification, repo limitations, and a recruiter/GitHub README publish blurb. The Streamlit dashboard has a `Git Readiness` view, and `python -m app.demo` prints git readiness status plus the push plan path.
+
+## Repository Automation Dry-Run Pack
+
+Plan repository work as governed, transparent tasks without executing repository mutations:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/repository/automation-plan -Headers $headers
+Invoke-RestMethod http://localhost:8000/repository/automation-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"repo-automation-reviewer"}'
+Get-ChildItem -Recurse -File data\repository_automation -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /repository/automation-plan` derives dry-run repository tasks from local git readiness, labels planned repo mutations as sandbox-blocked, includes read-only review commands, and returns a transparent task timeline plus manual approval policy. `POST /repository/automation-pack` writes `repo_automation_pack_latest.json` and `.md` under ignored `data/repository_automation/`. The Streamlit dashboard has a `Repository Automation` view, and `python -m app.demo` prints repository automation readiness, task count, and artifact path.
 
 ## Runtime Demo Server Pack
 

@@ -28,6 +28,7 @@ from app.models import (
     PromptGovernancePackRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
+    RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
     RuntimeDemoPackRequest,
     SkillCompatibilityPackRequest,
@@ -276,6 +277,10 @@ async def main() -> None:
     git_push_plan = state.git_readiness.push_plan(
         GitPushPlanRequest(actor="demo-github-reviewer")
     )
+    repository_automation_plan = state.git_readiness.automation_plan()
+    repository_automation_pack = state.git_readiness.automation_pack(
+        RepositoryAutomationPackRequest(actor="demo-repo-reviewer")
+    )
     runtime_readiness = state.runtime_demo.readiness()
     runtime_pack = state.runtime_demo.demo_pack(
         RuntimeDemoPackRequest(actor="demo-runtime-reviewer")
@@ -520,6 +525,16 @@ async def main() -> None:
                 "git_readiness_branch": git_readiness.git_repository["current_branch"],
                 "git push plan path": git_push_plan.markdown_path,
                 "git_push_plan_path": git_push_plan.markdown_path,
+                "repository automation readiness": repository_automation_plan.readiness_status,
+                "repository_automation_readiness": repository_automation_plan.readiness_status,
+                "repository automation tasks": repository_automation_plan.summary[
+                    "planned_task_count"
+                ],
+                "repository_automation_tasks": repository_automation_plan.summary[
+                    "planned_task_count"
+                ],
+                "repository automation pack path": repository_automation_pack.markdown_path,
+                "repository_automation_pack_path": repository_automation_pack.markdown_path,
                 "runtime demo readiness": runtime_readiness.readiness_status,
                 "runtime_demo_readiness": runtime_readiness.readiness_status,
                 "runtime demo pack path": runtime_pack.markdown_path,

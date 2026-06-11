@@ -88,6 +88,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /ui/verification-pack` - writes the UI Verification Pack Markdown and JSON under ignored local folder `data/ui_verification/`.
 - `GET /git/readiness` - returns local-only GitHub Push Readiness and Branch Hygiene checks: git repo detection, current branch, tracked/untracked/modified/ignored summaries, generated artifact ignore coverage, source/doc/test/dashboard changes, suspicious large/generated files, GitHub Actions workflow presence, README final handoff mention, `.env.example`, dirty-worktree guidance, recommended commit groups, and MCP publish notes.
 - `POST /git/push-plan` - writes the GitHub Push Readiness + Branch Hygiene Pack Markdown and JSON under ignored local folder `data/git_packs/` with exact non-destructive review commands, commit grouping, do-not-commit generated artifact notes, pre-push verification checklist, MCP command verification, repo limitations, and recruiter/GitHub README publish blurb.
+- `GET /repository/automation-plan` - returns a dry-run repository automation task plan derived from local git readiness with sandbox decisions, blocked repo mutation metadata, read-only review commands, transparent runbook steps, manual approval policy, and limitations.
+- `POST /repository/automation-pack` - writes the Repository Automation Dry-Run Pack Markdown and JSON under ignored local folder `data/repository_automation/`.
 - `GET /runtime/demo-readiness` - returns local FastAPI, Streamlit, and MCP CLI demo readiness with exact start commands, expected ports, env defaults, dependency checks, read-only port checks, health/smoke URLs, MCP verification commands, troubleshooting, and known limitations.
 - `POST /runtime/demo-pack` - writes the Runtime Demo Server Pack Markdown and JSON under ignored local folder `data/runtime_packs/` with start/stop commands, health checks, demo flow order, MCP CLI verification order, screenshot placeholders, troubleshooting, and recruiter/engineer explanations.
 - `GET /handoff/final-audit` - returns the README Consistency final audit with structured checks for README endpoint/MCP mentions, docs/api coverage, architecture/evaluation coverage, demo claims, scripts, dashboard smoke script presence, generated artifact directory docs, MCP tools/resources/prompts clarity, local/mock limitation clarity, and Azure/OpenAI optional notes.
@@ -688,6 +690,20 @@ Invoke-RestMethod http://localhost:8000/git/push-plan `
 `GET /git/readiness` uses only read-only local git inspection commands such as `git status --porcelain=v1 --ignored`, `git branch --show-current`, `git rev-parse`, `git ls-files`, and `git check-ignore`. It does not stage, commit, push, reset, clean, checkout, or call GitHub APIs.
 
 `POST /git/push-plan` writes `git_push_plan_latest.json` and `git_push_plan_latest.md` under ignored `data/git_packs/`. The GitHub Push Readiness + Branch Hygiene Pack includes non-destructive review commands, suggested commit grouping, do-not-commit generated artifact notes, pre-push verification checklist, MCP command verification, repo limitations, and a recruiter/GitHub README publish blurb. The Streamlit dashboard exposes the same workflow in the `Git Readiness` view, and `python -m app.demo` prints git readiness status plus the push plan path.
+
+## Repository Automation Dry-Run
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/repository/automation-plan -Headers $headers
+Invoke-RestMethod http://localhost:8000/repository/automation-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"repo-automation-reviewer"}'
+```
+
+`GET /repository/automation-plan` converts local git readiness into typed, dry-run automation tasks. The response includes repository metadata, sandbox policy, task-level sandbox decisions, blocked `repo_mutation` evidence, read-only commands, required verification checks, transparent timeline stages, and local limitations. `POST /repository/automation-pack` writes `repo_automation_pack_latest.json` and `repo_automation_pack_latest.md` under ignored `data/repository_automation/`. It does not stage, commit, push, pull, reset, clean, checkout, change remotes, or call GitHub APIs.
 
 ## Final Handoff And README Consistency
 
