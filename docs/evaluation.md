@@ -46,6 +46,7 @@ It checks:
 - Agent Society Evaluation tests cover `GET /agents/society-eval`, `POST /agents/society-eval-pack`, role-playing agent coverage, shared memory alignment, MCP tool-use checks, handoff governance, policy-denied stop behavior, generated artifacts under `data/agent_society_evals/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
 - Worker Scale-Out tests cover `GET /workers/runs`, `POST /workers/runs`, `GET /workers/scale-plan`, `POST /workers/runbook-pack`, sandbox preflight before local/mock execution, denied sandbox worker runs, timeline transparency, scale recommendations, generated artifacts under `data/worker_runbooks/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and demo output.
 - Run Transparency tests cover `GET /runs/ledger`, `POST /runs/transparency-pack`, unified task-run ledger normalization across invocations, worker runs, sandbox decisions, exception reviews, and audit-only events, state observation, bounded action-loop steps, replay commands, generated artifacts under `data/run_transparency/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and demo output.
+- Audit Integrity tests cover `GET /audit/integrity`, `POST /audit/integrity-pack`, deterministic hash-chain root hashes across audit events and skill invocations, missing evidence warnings, replay commands, generated artifacts under `data/audit_integrity/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and demo output.
 - Privacy Retention tests cover `GET /privacy/retention-report`, `POST /privacy/redact`, `POST /privacy/retention-pack`, deterministic PII-like fixture findings, redacted previews, retention policy actions, generated artifacts under `data/privacy_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Enterprise readiness tests cover `GET /enterprise/readiness-scorecard`, `POST /enterprise/portfolio-demo-pack`, category aggregation, MCP capability counts, verification commands, generated artifacts under `data/portfolio_demo/`, endpoint behavior, and portfolio/interviewer talking points.
 - Portfolio Pack tests cover `GET /portfolio/evidence-index`, `POST /portfolio/interview-pack`, JD coverage, proof matrix rows, evidence score, generated artifacts under `data/portfolio_packs/`, technical talking points, local verification commands, and resume/GitHub README bullets.
@@ -71,6 +72,7 @@ It checks:
 - The demo prints Agent Collaboration readiness, handoff count, and the exported collaboration pack path.
 - The demo prints Agent Society Evaluation readiness, score, and the exported society eval pack path.
 - The demo prints Worker Scale-Out readiness, local run status, and the exported worker runbook path.
+- The demo prints Audit Integrity readiness, record count, root hash, and exported integrity pack path.
 - The demo prints Privacy Retention readiness, finding count, and the exported Privacy Retention Pack path.
 - The demo prints final audit status/score and the exported Final Handoff Pack path.
 

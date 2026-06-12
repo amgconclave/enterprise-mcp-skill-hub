@@ -31,6 +31,9 @@ from app.models import (
     ArtifactReadmeChecklistRequest,
     ArtifactReadmeChecklistResult,
     AuditEvent,
+    AuditIntegrityPackRequest,
+    AuditIntegrityPackResult,
+    AuditIntegrityReport,
     AuditPackRequest,
     AuditPackResult,
     AuditQueryRequest,
@@ -760,6 +763,19 @@ def task_run_transparency_pack(
     _: str = Depends(require_api_key),
 ) -> TaskRunTransparencyPackResult:
     return state.task_runs.transparency_pack(request or TaskRunTransparencyPackRequest())
+
+
+@app.get("/audit/integrity", response_model=AuditIntegrityReport)
+def audit_integrity(_: str = Depends(require_api_key)) -> AuditIntegrityReport:
+    return state.audit_integrity.report()
+
+
+@app.post("/audit/integrity-pack", response_model=AuditIntegrityPackResult)
+def audit_integrity_pack(
+    request: AuditIntegrityPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> AuditIntegrityPackResult:
+    return state.audit_integrity.pack(request or AuditIntegrityPackRequest())
 
 
 @app.get("/reviewer/quickstart", response_model=ReviewerQuickstartResult)

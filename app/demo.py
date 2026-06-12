@@ -12,6 +12,7 @@ from app.models import (
     ApiContractRemediationPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
+    AuditIntegrityPackRequest,
     AuditPackRequest,
     BlastRadiusRequest,
     CapacityPlanExportRequest,
@@ -286,6 +287,10 @@ async def main() -> None:
     task_run_ledger = state.task_runs.ledger()
     task_run_transparency_pack = state.task_runs.transparency_pack(
         TaskRunTransparencyPackRequest(actor="demo-run-transparency-reviewer")
+    )
+    audit_integrity = state.audit_integrity.report()
+    audit_integrity_pack = state.audit_integrity.pack(
+        AuditIntegrityPackRequest(actor="demo-audit-integrity-reviewer")
     )
     invocation_sandbox_report = state.invocation_sandbox.report()
     invocation_sandbox_pack = state.invocation_sandbox.pack(
@@ -591,6 +596,14 @@ async def main() -> None:
                 "task_run_ledger_entries": task_run_ledger.summary["ledger_entry_count"],
                 "task run transparency pack path": task_run_transparency_pack.markdown_path,
                 "task_run_transparency_pack_path": task_run_transparency_pack.markdown_path,
+                "audit integrity readiness": audit_integrity.readiness_status,
+                "audit_integrity_readiness": audit_integrity.readiness_status,
+                "audit integrity records": audit_integrity.summary["record_count"],
+                "audit_integrity_records": audit_integrity.summary["record_count"],
+                "audit integrity root hash": audit_integrity.root_hash,
+                "audit_integrity_root_hash": audit_integrity.root_hash,
+                "audit integrity pack path": audit_integrity_pack.markdown_path,
+                "audit_integrity_pack_path": audit_integrity_pack.markdown_path,
                 "invocation sandbox readiness": invocation_sandbox_report.readiness_status,
                 "invocation_sandbox_readiness": invocation_sandbox_report.readiness_status,
                 "invocation sandbox denied decisions": invocation_sandbox_report.summary[

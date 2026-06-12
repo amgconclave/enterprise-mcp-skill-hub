@@ -17,6 +17,7 @@ from app.models import (
     ApiContractRemediationPackRequest,
     ApiReviewerCollectionRequest,
     ArtifactReadmeChecklistRequest,
+    AuditIntegrityPackRequest,
     AuditPackRequest,
     AuditQueryRequest,
     BlastRadiusRequest,
@@ -126,6 +127,7 @@ view = st.sidebar.radio(
         "Agent Society Evaluation",
         "Worker Scale-Out",
         "Run Transparency",
+        "Audit Integrity",
         "Prompt Governance",
         "Privacy Retention",
         "Enterprise Readiness",
@@ -1560,6 +1562,52 @@ elif view == "Run Transparency":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(ledger.model_dump(mode="json"))
+
+elif view == "Audit Integrity":
+    st.subheader("Audit Integrity")
+    st.caption("Local hash-chain verification for audit events and skill invocation evidence.")
+    report = state.audit_integrity.report()
+    col_ready, col_records, col_gaps, col_hash = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_records.metric("Records", report.summary["record_count"])
+    col_gaps.metric("Warnings", report.summary["tamper_warning_count"])
+    col_hash.metric("Root hash", report.root_hash[:12])
+
+    tab_chain, tab_warnings, tab_export, tab_json = st.tabs(
+        ["Hash Chain", "Warnings", "Integrity Pack", "JSON"]
+    )
+    with tab_chain:
+        st.dataframe(
+            [
+                {
+                    "sequence": record.sequence,
+                    "type": record.record_type,
+                    "action": record.action,
+                    "resource": f"{record.resource_type}:{record.resource_id}",
+                    "trace_id": record.trace_id,
+                    "status": record.verification_status,
+                    "chain_hash": record.chain_hash[:16],
+                    "risk_flags": ", ".join(record.risk_flags),
+                }
+                for record in report.records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if report.records:
+            st.json(report.records[0].model_dump(mode="json"))
+    with tab_warnings:
+        st.dataframe(report.tamper_warnings, use_container_width=True, hide_index=True)
+        st.json({"gaps": report.gaps, "patterns_used": report.patterns_used})
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/audit_integrity/.")
+        actor = st.text_input("Audit integrity actor", value="streamlit-audit-integrity-reviewer")
+        if st.button("Export Audit Integrity Pack", use_container_width=True):
+            export = state.audit_integrity.pack(AuditIntegrityPackRequest(actor=actor))
+            st.success("Audit Integrity Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Prompt Governance":
     st.subheader("Prompt Governance")

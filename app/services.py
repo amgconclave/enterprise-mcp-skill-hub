@@ -32,6 +32,10 @@ from app.models import (
     ArtifactReadmeChecklistRequest,
     ArtifactReadmeChecklistResult,
     AuditEvent,
+    AuditIntegrityPackRequest,
+    AuditIntegrityPackResult,
+    AuditIntegrityRecord,
+    AuditIntegrityReport,
     AuditPackRequest,
     AuditPackResult,
     AuditQueryRequest,
@@ -17858,6 +17862,7 @@ class DashboardSmokeService:
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "run_transparency", "label": "Run Transparency", "purpose": "Unified task-run ledger, state observation, and replay guidance."},
+            {"id": "audit_integrity", "label": "Audit Integrity", "purpose": "Hash-chain verification for local audit evidence."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "sandbox_exceptions", "label": "Sandbox Exceptions", "purpose": "Human review queue for sandbox-denied tool requests."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
@@ -17931,6 +17936,8 @@ class DashboardSmokeService:
             self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
             self._endpoint_ref("run_ledger", "GET", "/runs/ledger", "Unified task-run observability ledger."),
             self._endpoint_ref("run_transparency_pack", "POST", "/runs/transparency-pack", "Writes Task Run Transparency artifacts."),
+            self._endpoint_ref("audit_integrity", "GET", "/audit/integrity", "Local audit and invocation hash-chain report."),
+            self._endpoint_ref("audit_integrity_pack", "POST", "/audit/integrity-pack", "Writes Audit Integrity artifacts."),
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
             self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
@@ -18000,6 +18007,7 @@ class DashboardSmokeService:
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("worker_queue_admission", "Worker Scale-Out", "Queue Admission Pack", "data/worker_runbooks/"),
             self._artifact_tab("run_transparency", "Run Transparency", "Transparency Pack", "data/run_transparency/"),
+            self._artifact_tab("audit_integrity", "Audit Integrity", "Integrity Pack", "data/audit_integrity/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
@@ -18084,6 +18092,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/audit/integrity -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/audit/integrity-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers",
@@ -18112,6 +18122,7 @@ class DashboardSmokeService:
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "workers/scale-plan|workers/queue-admission|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "runs/ledger|runs/transparency-pack|Run Transparency|run_transparency" app dashboard docs README.md tests scripts sample_data',
+            'rg "audit/integrity|Audit Integrity|audit_integrity|hash chain" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/exceptions|Sandbox Exceptions|sandbox_exceptions|sandbox exception" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
@@ -18129,6 +18140,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\run_transparency -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\audit_integrity -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_exceptions -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -19797,6 +19809,427 @@ class TaskRunObservabilityService:
         return "\n".join(lines)
 
 
+class AuditIntegrityService:
+    REPORT_ID = "audit_integrity_report_latest"
+    PACK_ID = "audit_integrity_pack_latest"
+    GENESIS_HASH = "0" * 64
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "audit_integrity"
+
+    def report(self) -> AuditIntegrityReport:
+        source_rows = self._source_rows()
+        gaps = self._gaps(source_rows)
+        records: list[AuditIntegrityRecord] = []
+        previous_hash = self.GENESIS_HASH
+        for sequence, row in enumerate(source_rows, start=1):
+            content_hash = self._hash(row["payload"])
+            chain_hash = sha256(f"{previous_hash}:{content_hash}".encode()).hexdigest()
+            row_risks = self._record_risks(row, gaps)
+            records.append(
+                AuditIntegrityRecord(
+                    sequence=sequence,
+                    record_id=row["record_id"],
+                    record_type=row["record_type"],
+                    source=row["source"],
+                    action=row["action"],
+                    actor=row["actor"],
+                    resource_type=row["resource_type"],
+                    resource_id=row["resource_id"],
+                    trace_id=row["trace_id"],
+                    created_at=row["created_at"],
+                    previous_hash=previous_hash,
+                    content_hash=content_hash,
+                    chain_hash=chain_hash,
+                    verification_status="warning" if row_risks else "valid",
+                    risk_flags=row_risks,
+                    replay_commands=self._replay_commands(row),
+                    summary=row["summary"],
+                )
+            )
+            previous_hash = chain_hash
+        tamper_warnings = self._tamper_warnings(records, gaps)
+        readiness_status: SecurityReadinessStatus = "ready"
+        if any(record.verification_status == "invalid" for record in records):
+            readiness_status = "blocked"
+        elif tamper_warnings or gaps:
+            readiness_status = "needs_review"
+        summary = {
+            "local_only": True,
+            "record_count": len(records),
+            "audit_event_count": sum(1 for record in records if record.record_type == "audit_event"),
+            "skill_invocation_count": sum(1 for record in records if record.record_type == "skill_invocation"),
+            "gap_count": len(gaps),
+            "tamper_warning_count": len(tamper_warnings),
+            "root_hash": previous_hash,
+            "artifact_root": str(self.output_dir),
+            "gitignore_covered": self._gitignore_ok(),
+        }
+        return AuditIntegrityReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            root_hash=previous_hash,
+            summary=summary,
+            records=records,
+            gaps=gaps,
+            tamper_warnings=tamper_warnings,
+            verification_commands=self._verification_commands(),
+            patterns_used=[
+                "durable workflows: local audit and invocation records are projected into ordered checkpoint evidence.",
+                "governance: every chain row keeps actor, resource, action, trace ID, and replay guidance.",
+                "tool governance: integrity proof stays local and deterministic without exporting secret values.",
+                "handoffs: the pack writes reviewer-ready JSON and Markdown artifacts for audit sign-off.",
+            ],
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: AuditIntegrityPackRequest | None = None) -> AuditIntegrityPackResult:
+        request = request or AuditIntegrityPackRequest()
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "root_hash": report.root_hash,
+            "audit_integrity_report": report.model_dump(mode="json"),
+            "chain_policy": self._chain_policy(),
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "local_proof_commands": report.verification_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "audit_integrity.pack_exported",
+            "audit_integrity_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "root_hash": report.root_hash,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "record_count": report.summary["record_count"],
+            },
+        )
+        return AuditIntegrityPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            root_hash=report.root_hash,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _source_rows(self) -> list[JsonDict]:
+        rows: list[JsonDict] = []
+        for event in self.app_state.audit.events:
+            rows.append(
+                {
+                    "record_id": event.id,
+                    "record_type": "audit_event",
+                    "source": "AuditService",
+                    "action": event.action,
+                    "actor": event.actor,
+                    "resource_type": event.resource_type,
+                    "resource_id": event.resource_id,
+                    "trace_id": event.trace_id,
+                    "created_at": event.created_at,
+                    "payload": event.model_dump(mode="json"),
+                    "summary": {
+                        "metadata_keys": sorted(event.metadata.keys()),
+                        "metadata_hash": self._hash(event.metadata),
+                    },
+                }
+            )
+        for invocation in self.app_state.invocation_service.invocations:
+            rows.append(
+                {
+                    "record_id": invocation.id,
+                    "record_type": "skill_invocation",
+                    "source": "InvocationService",
+                    "action": f"skill.invocation.{invocation.status}",
+                    "actor": "invocation-service",
+                    "resource_type": "skill",
+                    "resource_id": invocation.skill_id,
+                    "trace_id": invocation.trace_id,
+                    "created_at": invocation.created_at,
+                    "payload": invocation.model_dump(mode="json"),
+                    "summary": {
+                        "skill_id": invocation.skill_id,
+                        "version": invocation.version,
+                        "status": invocation.status,
+                        "latency_ms": invocation.latency_ms,
+                        "token_usage": invocation.token_usage.model_dump(mode="json"),
+                    },
+                }
+            )
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["created_at"].isoformat(),
+                row["record_type"],
+                row["record_id"],
+            ),
+        )
+
+    def _gaps(self, rows: list[JsonDict]) -> list[JsonDict]:
+        gaps: list[JsonDict] = []
+        audit_by_trace = defaultdict(list)
+        invocations_by_trace = defaultdict(list)
+        record_ids: set[str] = set()
+        duplicate_ids: set[str] = set()
+        for row in rows:
+            if row["record_id"] in record_ids:
+                duplicate_ids.add(row["record_id"])
+            record_ids.add(row["record_id"])
+            if row["record_type"] == "audit_event":
+                audit_by_trace[row["trace_id"]].append(row)
+            elif row["record_type"] == "skill_invocation":
+                invocations_by_trace[row["trace_id"]].append(row)
+        for duplicate_id in sorted(duplicate_ids):
+            gaps.append(
+                {
+                    "gap_id": f"duplicate_record_id:{duplicate_id}",
+                    "severity": "critical",
+                    "record_id": duplicate_id,
+                    "reason": "Two integrity rows share the same record id.",
+                    "recommended_action": "Inspect local service state before using this evidence for release or compliance review.",
+                }
+            )
+        for trace_id, invocations in sorted(invocations_by_trace.items()):
+            matching_audit = [
+                row
+                for row in audit_by_trace.get(trace_id, [])
+                if row["action"] in {"skill.invoked", "policy.denied", "sandbox.denied", "entitlement.denied", "reliability.circuit_breaker_blocked"}
+            ]
+            if not matching_audit:
+                gaps.append(
+                    {
+                        "gap_id": f"missing_invocation_audit:{trace_id}",
+                        "severity": "high",
+                        "trace_id": trace_id,
+                        "record_ids": [row["record_id"] for row in invocations],
+                        "reason": "Skill invocation exists without a matching audit event for the same trace id.",
+                        "recommended_action": "Replay the invocation and inspect AuditService recording before release.",
+                    }
+                )
+        for trace_id, audit_rows in sorted(audit_by_trace.items()):
+            skill_audit_rows = [
+                row
+                for row in audit_rows
+                if row["action"] in {"skill.invoked", "policy.denied", "sandbox.denied", "entitlement.denied", "reliability.circuit_breaker_blocked"}
+            ]
+            if skill_audit_rows and trace_id not in invocations_by_trace:
+                gaps.append(
+                    {
+                        "gap_id": f"missing_invocation_record:{trace_id}",
+                        "severity": "high",
+                        "trace_id": trace_id,
+                        "record_ids": [row["record_id"] for row in skill_audit_rows],
+                        "reason": "Skill audit event exists without the corresponding invocation record.",
+                        "recommended_action": "Inspect invocation persistence and local task-run ledger output.",
+                    }
+                )
+        return gaps
+
+    def _record_risks(self, row: JsonDict, gaps: list[JsonDict]) -> list[str]:
+        risks: list[str] = []
+        if not row["trace_id"]:
+            risks.append("missing_trace_id")
+        if row["record_type"] == "skill_invocation" and row["summary"].get("status") == "failed":
+            risks.append("failed_invocation")
+        for gap in gaps:
+            if row["record_id"] in gap.get("record_ids", []) or row["record_id"] == gap.get("record_id"):
+                risks.append(gap["gap_id"])
+        return sorted(set(risks))
+
+    def _tamper_warnings(self, records: list[AuditIntegrityRecord], gaps: list[JsonDict]) -> list[JsonDict]:
+        warnings: list[JsonDict] = []
+        expected_previous = self.GENESIS_HASH
+        for record in records:
+            if record.previous_hash != expected_previous:
+                warnings.append(
+                    {
+                        "record_id": record.record_id,
+                        "severity": "critical",
+                        "reason": "Hash chain previous pointer does not match the prior chain hash.",
+                        "expected_previous_hash": expected_previous,
+                        "actual_previous_hash": record.previous_hash,
+                    }
+                )
+            expected_chain = sha256(f"{record.previous_hash}:{record.content_hash}".encode()).hexdigest()
+            if record.chain_hash != expected_chain:
+                warnings.append(
+                    {
+                        "record_id": record.record_id,
+                        "severity": "critical",
+                        "reason": "Hash chain digest does not match the canonical record content hash.",
+                        "expected_chain_hash": expected_chain,
+                        "actual_chain_hash": record.chain_hash,
+                    }
+                )
+            expected_previous = record.chain_hash
+        warnings.extend(
+            {
+                "record_id": gap.get("record_id") or ",".join(gap.get("record_ids", [])),
+                "severity": gap["severity"],
+                "reason": gap["reason"],
+                "gap_id": gap["gap_id"],
+            }
+            for gap in gaps
+        )
+        return warnings
+
+    def _replay_commands(self, row: JsonDict) -> list[str]:
+        if row["record_type"] == "skill_invocation":
+            return [
+                f"Invoke-RestMethod http://localhost:8000/invocations/{row['record_id']}/replay -Method POST -Headers $headers",
+                "Invoke-RestMethod http://localhost:8000/audit/integrity -Headers $headers | ConvertTo-Json -Depth 6",
+            ]
+        if row["resource_type"] == "skill":
+            return [
+                f"Invoke-RestMethod http://localhost:8000/audit/query -Method POST -Headers $headers -ContentType \"application/json\" -Body '{{\"skill_id\":\"{row['resource_id']}\"}}'",
+            ]
+        return [
+            f"Invoke-RestMethod http://localhost:8000/audit/query -Method POST -Headers $headers -ContentType \"application/json\" -Body '{{\"query\":\"{row['trace_id']}\"}}'",
+        ]
+
+    def _chain_policy(self) -> JsonDict:
+        return {
+            "algorithm": "sha256",
+            "ordering": "created_at, record_type, record_id",
+            "genesis_hash": self.GENESIS_HASH,
+            "content_hash": "sha256(canonical_json(record_payload))",
+            "chain_hash": "sha256(previous_hash + ':' + content_hash)",
+            "included_sources": ["AuditService.events", "InvocationService.invocations"],
+            "excluded_sources": [
+                "External CI logs",
+                "Hosted provider logs",
+                "Browser screenshots",
+                "GitHub API events",
+            ],
+        }
+
+    def _reviewer_checklist(self, report: AuditIntegrityReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Review root hash and record count before release handoff.",
+                "status": "pass" if report.records else "warn",
+                "proof": report.root_hash,
+            },
+            {
+                "item": "Inspect gap and tamper warning counts.",
+                "status": "pass" if not report.tamper_warnings else "review",
+                "proof": f"{len(report.gaps)} gap(s), {len(report.tamper_warnings)} warning(s).",
+            },
+            {
+                "item": "Replay a representative invocation trace.",
+                "status": "manual",
+                "proof": "Use the replay command attached to invocation rows.",
+            },
+            {
+                "item": "Regenerate the pack after any demo, eval, or release command.",
+                "status": "manual",
+                "proof": "POST /audit/integrity-pack",
+            },
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_audit_integrity.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/audit/integrity -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/audit/integrity-pack -Method POST -Headers $headers",
+            'rg "audit/integrity|Audit Integrity|audit_integrity|hash chain" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\audit_integrity -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Integrity proof is deterministic local evidence, not a signed external timestamping or WORM storage system.",
+            "The chain is computed from in-memory local services and should be regenerated after each demo, eval, or API run.",
+            "The pack does not call OpenAI, Azure, GitHub, a browser, or external audit tooling.",
+            "Generated integrity artifacts are written under ignored data/audit_integrity/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/audit_integrity/" in gitignore.read_text(encoding="utf-8")
+
+    def _hash(self, payload: JsonDict) -> str:
+        return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["audit_integrity_report"]
+        lines = [
+            "# Audit Integrity Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Root hash: `{bundle['root_hash']}`",
+            f"- Records: `{report['summary']['record_count']}`",
+            f"- Warnings: `{report['summary']['tamper_warning_count']}`",
+            "",
+            "## Hash Chain Policy",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["chain_policy"].items()],
+            "",
+            "## Patterns Used",
+            "",
+            *[f"- {pattern}" for pattern in report["patterns_used"]],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} Proof: {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Warnings",
+            "",
+            *[
+                f"- `{warning['severity']}` {warning['reason']} record=`{warning.get('record_id', 'n/a')}`"
+                for warning in report["tamper_warnings"]
+            ],
+            "",
+            "## Chain Records",
+            "",
+            "| Seq | Type | Action | Resource | Trace | Status | Chain Hash |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| {record['sequence']} | `{record['record_type']}` | `{record['action']}` | `{record['resource_type']}:{record['resource_id']}` | `{record['trace_id']}` | `{record['verification_status']}` | `{record['chain_hash'][:16]}` |"
+                for record in report["records"][:40]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class GovernedSkillPlatformPackService:
     PACK_ID = "governed_skill_platform_pack_latest"
 
@@ -21125,6 +21558,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
                 ["task_run_transparency_pack_latest.json", "task_run_transparency_pack_latest.md"],
                 "Unified task-run ledger across invocations, worker runs, sandbox decisions, exceptions, audit evidence, replay commands, and bounded verification steps.",
+            ),
+            self._catalog_row(
+                "audit_integrity",
+                "Audit Integrity Pack",
+                Path("data") / "audit_integrity",
+                "POST /audit/integrity-pack",
+                "Invoke-RestMethod http://localhost:8000/audit/integrity-pack -Method POST -Headers $headers",
+                ["audit_integrity_pack_latest.json", "audit_integrity_pack_latest.md"],
+                "Local hash-chain proof for audit events and skill invocations with root hash, gap checks, replay commands, and reviewer checklist.",
             ),
             self._catalog_row(
                 "sandbox_policies",
@@ -23317,6 +23759,7 @@ class AppState:
     review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
     task_runs: TaskRunObservabilityService = field(init=False)
+    audit_integrity: AuditIntegrityService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
     api_contracts: ApiContractService = field(init=False)
     git_readiness: GitReadinessService = field(init=False)
@@ -23385,6 +23828,7 @@ class AppState:
         self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
         self.task_runs = TaskRunObservabilityService(self)
+        self.audit_integrity = AuditIntegrityService(self)
         self.artifacts = ArtifactInventoryService(self)
         self.final_handoff = FinalHandoffService(self)
         self.api_contracts = ApiContractService(self)

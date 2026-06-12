@@ -1732,6 +1732,54 @@ class TaskRunTransparencyPackResult(BaseModel):
     summary: JsonDict
 
 
+class AuditIntegrityRecord(BaseModel):
+    sequence: int
+    record_id: str
+    record_type: Literal["audit_event", "skill_invocation"]
+    source: str
+    action: str
+    actor: str
+    resource_type: str
+    resource_id: str
+    trace_id: str
+    created_at: datetime
+    previous_hash: str
+    content_hash: str
+    chain_hash: str
+    verification_status: Literal["valid", "warning", "invalid"]
+    risk_flags: list[str] = Field(default_factory=list)
+    replay_commands: list[str] = Field(default_factory=list)
+    summary: JsonDict = Field(default_factory=dict)
+
+
+class AuditIntegrityReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    root_hash: str
+    summary: JsonDict
+    records: list[AuditIntegrityRecord] = Field(default_factory=list)
+    gaps: list[JsonDict] = Field(default_factory=list)
+    tamper_warnings: list[JsonDict] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AuditIntegrityPackRequest(BaseModel):
+    actor: str = "audit-integrity-reviewer"
+
+
+class AuditIntegrityPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    root_hash: str
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class FinalAuditCheck(BaseModel):
     id: str
     category: str
