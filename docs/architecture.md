@@ -19,6 +19,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `MetricsService` aggregates invocation count, failures, latency, tokens, cost, and per-skill usage.
 - `GovernanceReportService` produces readiness checks across manifest coverage, MCP discovery, resources, prompts, audit trail, and failure rate.
 - `ConformanceReportService` runs contract checks for promoted skills: manifest schema, deterministic sample invocation, output schema, policy simulation, MCP exposure, and prompt/resource references.
+- `EvalRegressionGateService` composes golden eval, conformance, release, reliability, and SLO signals into a local regression gate with state observations, bounded remediation steps, and ignored `data/eval_regression/` reviewer artifacts.
 - `EvidenceBundleService` exports local JSON and Markdown review artifacts with governance, conformance, policy, invocation, audit, and MCP exposure evidence.
 - `ReleaseService` previews promoted skill and approved workflow-template catalog changes against a local release snapshot, reports policy/conformance readiness and MCP impact, and exports governed release notes under `data/releases/`.
 - `AuditQueryService` normalizes audit events, invocations, governance rows, workflow reviews, and release evidence into a deterministic filterable evidence stream for reviewers.

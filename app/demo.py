@@ -20,6 +20,7 @@ from app.models import (
     ConfigHygienePackRequest,
     DependencyReportRequest,
     EnterprisePortfolioDemoPackRequest,
+    EvalRegressionPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
     GovernedSkillPlatformPackRequest,
@@ -146,6 +147,10 @@ async def main() -> None:
         "demo-workflow-reviewer",
     )
     conformance = await state.conformance.generate()
+    eval_regression_gate = await state.eval_regression.gate()
+    eval_regression_pack = await state.eval_regression.pack(
+        EvalRegressionPackRequest(actor="demo-eval-regression-reviewer")
+    )
     replay_source = next(
         invocation
         for invocation in state.invocation_service.invocations
@@ -413,6 +418,12 @@ async def main() -> None:
                     },
                 },
                 "conformance": conformance.model_dump(mode="json"),
+                "eval regression readiness": eval_regression_gate.readiness_status,
+                "eval_regression_readiness": eval_regression_gate.readiness_status,
+                "eval regression score": eval_regression_gate.score,
+                "eval_regression_score": eval_regression_gate.score,
+                "eval regression pack path": eval_regression_pack.markdown_path,
+                "eval_regression_pack_path": eval_regression_pack.markdown_path,
                 "invocation_replay": replay.model_dump(mode="json"),
                 "security_review": security_review.model_dump(mode="json"),
                 "evidence_artifacts": {

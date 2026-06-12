@@ -2723,3 +2723,50 @@ class GoldenEvalSuiteResult(BaseModel):
     score: float
     average_latency_ms: float
     results: list[GoldenEvalCaseResult]
+
+
+class EvalRegressionCaseRecord(BaseModel):
+    case_id: str
+    skill_id: str
+    status: Literal["pass", "fail"]
+    score: float
+    latency_ms: float
+    trace_id: str | None = None
+    severity: Literal["none", "low", "medium", "high", "critical"]
+    recommended_action: str
+    failed_expectations: list[str] = Field(default_factory=list)
+
+
+class EvalRegressionGateResult(BaseModel):
+    gate_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    summary: JsonDict
+    golden_eval: GoldenEvalSuiteResult
+    conformance_status: str
+    release_readiness: SecurityReadinessStatus
+    reliability_readiness: SecurityReadinessStatus
+    slo_release_gate: str
+    regression_cases: list[EvalRegressionCaseRecord]
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    state_observations: list[JsonDict] = Field(default_factory=list)
+    bounded_remediation_steps: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class EvalRegressionPackRequest(BaseModel):
+    actor: str = "eval-regression-reviewer"
+
+
+class EvalRegressionPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    score: int = Field(ge=0, le=100)
+    json_path: str
+    markdown_path: str
+    summary: JsonDict

@@ -61,6 +61,9 @@ from app.models import (
     EnterprisePortfolioDemoPackRequest,
     EnterprisePortfolioDemoPackResult,
     EnterpriseReadinessScorecard,
+    EvalRegressionGateResult,
+    EvalRegressionPackRequest,
+    EvalRegressionPackResult,
     EvidenceExportResult,
     FinalAuditResult,
     FinalHandoffPackRequest,
@@ -1280,6 +1283,19 @@ async def replay_invocation(
 @app.post("/evals/golden", response_model=GoldenEvalSuiteResult)
 async def run_golden_evals(_: str = Depends(require_api_key)) -> GoldenEvalSuiteResult:
     return await GoldenEvalRunner(state).run()
+
+
+@app.get("/evals/regression-gate", response_model=EvalRegressionGateResult)
+async def eval_regression_gate(_: str = Depends(require_api_key)) -> EvalRegressionGateResult:
+    return await state.eval_regression.gate()
+
+
+@app.post("/evals/regression-pack", response_model=EvalRegressionPackResult)
+async def eval_regression_pack(
+    request: EvalRegressionPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> EvalRegressionPackResult:
+    return await state.eval_regression.pack(request or EvalRegressionPackRequest())
 
 
 @app.post("/snapshots/local", response_model=LocalSnapshot)

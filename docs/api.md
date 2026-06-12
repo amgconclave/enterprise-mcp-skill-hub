@@ -142,6 +142,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /releases/preview` - compares promoted/enabled skills and approved workflow templates against `data/releases/current_snapshot.json` or a deterministic generated baseline; returns skill/workflow diffs, policy/conformance status, risk flags, regression commands, MCP impact, governance events, exclusions, and release readiness.
 - `POST /releases/export` - writes governed release notes JSON and Markdown under ignored local folder `data/releases/` and persists `current_snapshot.json` for the next preview.
 - `POST /evals/golden` - runs the golden-case eval suite and returns scored case-level results.
+- `GET /evals/regression-gate` - returns a local Eval Regression Gate combining golden eval, conformance, release, reliability, and SLO state observations with blockers, warnings, scored regression cases, architecture patterns, and bounded remediation steps.
+- `POST /evals/regression-pack` - writes the Eval Regression Gate Pack Markdown and JSON under ignored local folder `data/eval_regression/`.
 - `POST /snapshots/local` - saves a local JSON snapshot under `.local/`.
 - `GET /snapshots/local` - reads the latest local JSON snapshot metadata and payload.
 
@@ -940,6 +942,15 @@ Invoke-RestMethod http://localhost:8000/release/publish-pack `
 The quality gate response includes `status`, `score`, `blockers`, `warnings`, `verification_checklist`, `coverage` for CI/docs/tests/eval/demo/MCP/release, `artifact_coverage`, `local_runtime_notes`, `publish_readiness`, `endpoint_inventory`, `mcp_capability_inventory`, and `summary`.
 
 The Publish Pack export writes `publish_pack_latest.json` and `publish_pack_latest.md` under `data/release_packs/`. It includes release summary, setup/demo commands, verification commands, expected outputs, endpoint inventory, MCP capability inventory, artifact inventory, screenshots/manual verification placeholders, GitHub repo checklist, commit/push readiness notes, recruiter review notes, and known limitations. It is deterministic and local/mock by default; no Azure, OpenAI, paid API, or external release service is required.
+
+## Eval Regression Gate
+
+```powershell
+Invoke-RestMethod http://localhost:8000/evals/regression-gate -Headers $headers
+Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers
+```
+
+The gate composes golden eval cases, conformance, release preview, skill reliability, and SLO release-gate signals into one local regression decision. The pack export writes `eval_regression_pack_latest.json` and `eval_regression_pack_latest.md` under `data/eval_regression/` with state observations, bounded remediation steps, proof commands, reviewer checklist, architecture patterns, and limitations.
 
 ## Promotion Flow
 

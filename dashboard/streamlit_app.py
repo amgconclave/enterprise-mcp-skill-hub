@@ -30,6 +30,7 @@ from app.models import (
     ConfigHygienePackRequest,
     DependencyReportRequest,
     EnterprisePortfolioDemoPackRequest,
+    EvalRegressionPackRequest,
     FinalHandoffPackRequest,
     GitPushPlanRequest,
     GovernedSkillPlatformPackRequest,
@@ -148,6 +149,7 @@ view = st.sidebar.radio(
         "Workflow Review Queue",
         "Demo Agent",
         "Evaluation Lab",
+        "Eval Regression Gate",
         "Conformance / Replay",
         "Security Evidence / Audit",
         "Audit Query / Attestation",
@@ -2774,6 +2776,44 @@ elif view == "Evaluation Lab":
             hide_index=True,
         )
         st.json(result.model_dump(mode="json"))
+
+elif view == "Eval Regression Gate":
+    st.subheader("Eval Regression Gate")
+    st.caption("Golden eval, conformance, release, reliability, and SLO regression gate.")
+    gate = run_async(state.eval_regression.gate())
+    col_ready, col_score, col_failed, col_steps = st.columns(4)
+    col_ready.metric("Readiness", gate.readiness_status.upper())
+    col_score.metric("Score", gate.score)
+    col_failed.metric("Golden failures", gate.summary["golden_failed_cases"])
+    col_steps.metric("Remediation steps", len(gate.bounded_remediation_steps))
+
+    tab_cases, tab_state, tab_steps, tab_pack, tab_json = st.tabs(
+        ["Regression Cases", "State Observations", "Bounded Steps", "Eval Regression Pack", "JSON"]
+    )
+    with tab_cases:
+        st.dataframe(
+            [case.model_dump(mode="json") for case in gate.regression_cases],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json({"blockers": gate.blockers, "warnings": gate.warnings})
+    with tab_state:
+        st.dataframe(gate.state_observations, use_container_width=True, hide_index=True)
+        st.json(gate.summary)
+    with tab_steps:
+        st.dataframe(gate.bounded_remediation_steps, use_container_width=True, hide_index=True)
+        st.json({"architecture_patterns": gate.architecture_patterns})
+    with tab_pack:
+        st.caption("Writes Markdown and JSON under data/eval_regression/.")
+        actor = st.text_input("Eval regression pack actor", value="streamlit-eval-reviewer")
+        if st.button("Export Eval Regression Pack", use_container_width=True):
+            export = run_async(
+                state.eval_regression.pack(EvalRegressionPackRequest(actor=actor))
+            )
+            st.success("Eval Regression Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(gate.model_dump(mode="json"))
 
 elif view == "Conformance / Replay":
     st.subheader("Conformance / Replay")

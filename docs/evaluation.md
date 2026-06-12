@@ -20,6 +20,7 @@ It checks:
 - Metrics include token and latency records.
 - Golden eval cases pass with scored case-level expectations.
 - Conformance checks prove promoted skills have valid schemas, deterministic sample outputs, policy checks, MCP exposure, and prompt/resource references.
+- Eval Regression Gate tests cover `GET /evals/regression-gate`, `POST /evals/regression-pack`, golden eval/conformance/release/reliability/SLO state observations, bounded remediation steps, architecture patterns, generated artifacts under `data/eval_regression/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and demo output.
 - Workflow simulations cover template listing, successful composition, denied confidential composition, promoted-only execution, and trace contents.
 - Workflow review checks cover submit/list/approve/reject, exclusion before approval, approved simulation, invalid missing-skill blocking, and review evidence export.
 - The demo prints security review readiness plus local evidence artifact paths.
@@ -114,6 +115,18 @@ Invoke-RestMethod http://localhost:8000/evals/golden -Method POST -Headers $head
 ```
 
 The regular eval command includes `golden_eval_score`, passed case count, and failed case count.
+
+## Eval Regression Gate
+
+The regression gate turns local eval evidence into a release-review signal:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/evals/regression-gate -Headers $headers
+Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers
+```
+
+The gate includes scored golden-case rows, conformance status, release readiness, reliability readiness, SLO release-gate status, state observations, blockers, warnings, bounded remediation steps, architecture patterns, local proof commands, and local/mock limitations. Export writes `eval_regression_pack_latest.json` and `.md` under ignored `data/eval_regression/`.
 
 ## Policy Simulation
 

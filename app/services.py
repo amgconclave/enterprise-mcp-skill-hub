@@ -74,6 +74,10 @@ from app.models import (
     EnterprisePortfolioDemoPackResult,
     EnterpriseReadinessCategoryScore,
     EnterpriseReadinessScorecard,
+    EvalRegressionCaseRecord,
+    EvalRegressionGateResult,
+    EvalRegressionPackRequest,
+    EvalRegressionPackResult,
     EvidenceExportResult,
     FinalAuditCheck,
     FinalAuditResult,
@@ -4429,6 +4433,367 @@ class ConformanceReportService:
             refs.extend(resource.uri for resource in self.app_state.resources.list() if resource.uri.startswith("resource://policy/"))
         available = {resource.uri for resource in self.app_state.resources.list()}
         return sorted({ref for ref in refs if ref in available})
+
+
+class EvalRegressionGateService:
+    GATE_ID = "eval_regression_gate_latest"
+    PACK_ID = "eval_regression_pack_latest"
+    LATENCY_REVIEW_MS = 1_500.0
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "eval_regression"
+
+    async def gate(self) -> EvalRegressionGateResult:
+        from app.evals.golden import GoldenEvalRunner
+
+        golden = await GoldenEvalRunner(self.app_state).run()
+        conformance = await self.app_state.conformance.generate()
+        release = await self.app_state.releases.preview("eval-regression-gate")
+        reliability = self.app_state.reliability.report()
+        slo = self.app_state.slo.report()
+        cases = [self._case_record(result) for result in golden.results]
+        blockers = self._blockers(golden, conformance, slo)
+        warnings = self._warnings(golden, release, reliability, slo, cases)
+        readiness = self._readiness(blockers, warnings)
+        score = self._score(golden.score, blockers, warnings)
+        summary = {
+            "gate_id": self.GATE_ID,
+            "local_only": True,
+            "golden_run_id": golden.run_id,
+            "golden_score": golden.score,
+            "golden_failed_cases": golden.failed_cases,
+            "conformance_status": conformance.status,
+            "release_readiness": release.readiness_status,
+            "reliability_readiness": reliability.readiness_status,
+            "slo_release_gate": slo.release_gate["status"],
+            "regression_case_count": len(cases),
+            "blocker_count": len(blockers),
+            "warning_count": len(warnings),
+            "architecture_pattern_count": len(self._architecture_patterns()),
+        }
+        return EvalRegressionGateResult(
+            gate_id=self.GATE_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            score=score,
+            summary=summary,
+            golden_eval=golden,
+            conformance_status=conformance.status,
+            release_readiness=release.readiness_status,
+            reliability_readiness=reliability.readiness_status,
+            slo_release_gate=slo.release_gate["status"],
+            regression_cases=cases,
+            blockers=blockers,
+            warnings=warnings,
+            state_observations=self._state_observations(golden, conformance, release, reliability, slo),
+            bounded_remediation_steps=self._bounded_steps(readiness, blockers, warnings),
+            local_proof_commands=self._local_proof_commands(),
+            architecture_patterns=self._architecture_patterns(),
+            limitations=self._limitations(),
+        )
+
+    async def pack(
+        self,
+        request: EvalRegressionPackRequest | None = None,
+    ) -> EvalRegressionPackResult:
+        request = request or EvalRegressionPackRequest()
+        gate = await self.gate()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": gate.readiness_status,
+            "score": gate.score,
+            "eval_regression_gate": gate.model_dump(mode="json"),
+            "reviewer_checklist": self._reviewer_checklist(gate),
+            "local_proof_commands": gate.local_proof_commands,
+            "limitations": gate.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "eval.regression_pack_exported",
+            "eval_regression_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": gate.readiness_status,
+                "score": gate.score,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "blocker_count": len(gate.blockers),
+                "warning_count": len(gate.warnings),
+            },
+        )
+        return EvalRegressionPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=gate.readiness_status,
+            score=gate.score,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **gate.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _case_record(self, result) -> EvalRegressionCaseRecord:
+        if result.status == "fail":
+            severity = "critical"
+            action = "Block release and inspect the failed golden expectation before promoting skill changes."
+        elif result.latency_ms > self.LATENCY_REVIEW_MS:
+            severity = "medium"
+            action = "Keep functional pass but review latency against reliability and SLO evidence."
+        else:
+            severity = "none"
+            action = "No regression action required for this case."
+        return EvalRegressionCaseRecord(
+            case_id=result.case_id,
+            skill_id=result.skill_id,
+            status=result.status,
+            score=result.score,
+            latency_ms=result.latency_ms,
+            trace_id=result.trace_id,
+            severity=severity,
+            recommended_action=action,
+            failed_expectations=result.failed_expectations,
+        )
+
+    def _blockers(self, golden, conformance: ConformanceReport, slo: SkillSloReport) -> list[str]:
+        blockers = []
+        if golden.failed_cases:
+            blockers.append(f"{golden.failed_cases} golden eval case(s) failed.")
+        if conformance.status != "pass":
+            blockers.append("Conformance report is failing for one or more promoted MCP skills.")
+        if slo.release_gate["status"] == "blocked":
+            blockers.append("Skill SLO release gate is blocked.")
+        return blockers
+
+    def _warnings(
+        self,
+        golden,
+        release: ReleasePreview,
+        reliability: SkillReliabilityReport,
+        slo: SkillSloReport,
+        cases: list[EvalRegressionCaseRecord],
+    ) -> list[str]:
+        warnings = []
+        if golden.score < 1.0:
+            warnings.append(f"Golden eval score is {golden.score}; inspect non-perfect cases.")
+        if release.readiness_status != "ready":
+            warnings.append(f"Release preview is {release.readiness_status}.")
+        if reliability.readiness_status != "ready":
+            warnings.append(f"Reliability report is {reliability.readiness_status}.")
+        if slo.release_gate["status"] != "ready":
+            warnings.append(f"SLO release gate is {slo.release_gate['status']}.")
+        slow_cases = [case.case_id for case in cases if case.severity == "medium"]
+        if slow_cases:
+            warnings.append(f"Latency review required for golden case(s): {', '.join(slow_cases)}.")
+        return sorted(set(warnings))
+
+    def _readiness(self, blockers: list[str], warnings: list[str]) -> SecurityReadinessStatus:
+        if blockers:
+            return "blocked"
+        if warnings:
+            return "needs_review"
+        return "ready"
+
+    def _score(self, golden_score: float, blockers: list[str], warnings: list[str]) -> int:
+        score = round(golden_score * 100)
+        score -= min(45, len(blockers) * 15)
+        score -= min(25, len(warnings) * 5)
+        return max(0, min(100, score))
+
+    def _state_observations(
+        self,
+        golden,
+        conformance: ConformanceReport,
+        release: ReleasePreview,
+        reliability: SkillReliabilityReport,
+        slo: SkillSloReport,
+    ) -> list[JsonDict]:
+        return [
+            {
+                "source": "golden_eval",
+                "status": "pass" if golden.failed_cases == 0 else "fail",
+                "evidence": f"{golden.passed_cases}/{golden.total_cases} cases passed.",
+            },
+            {
+                "source": "conformance",
+                "status": conformance.status,
+                "evidence": f"{conformance.passed_skill_count}/{conformance.promoted_skill_count} promoted skills passed.",
+            },
+            {
+                "source": "release_preview",
+                "status": release.readiness_status,
+                "evidence": f"{len(release.risk_flags)} release risk flag(s).",
+            },
+            {
+                "source": "skill_reliability",
+                "status": reliability.readiness_status,
+                "evidence": f"{reliability.summary['open_circuit_count']} open circuit(s), {reliability.summary['disable_recommendation_count']} disable recommendation(s).",
+            },
+            {
+                "source": "skill_slo",
+                "status": slo.release_gate["status"],
+                "evidence": f"{slo.summary['blocked_release_skill_count']} blocked release skill(s).",
+            },
+        ]
+
+    def _bounded_steps(
+        self,
+        readiness: SecurityReadinessStatus,
+        blockers: list[str],
+        warnings: list[str],
+    ) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "name": "observe_current_state",
+                "status": "complete",
+                "command": "python -m app.evals.run_eval",
+                "verification": "Golden eval output reports summary PASS and zero failed cases.",
+            },
+            {
+                "step": 2,
+                "name": "verify_mcp_contract",
+                "status": "complete" if not blockers else "required",
+                "command": "python -m app.evals.run_conformance",
+                "verification": "Promoted MCP skills pass schema, policy, sample invocation, and output checks.",
+            },
+            {
+                "step": 3,
+                "name": "check_operational_gates",
+                "status": "complete" if readiness == "ready" else "review_required",
+                "command": "python -m app.demo",
+                "verification": "Demo prints reliability, SLO, release, and eval artifact readiness.",
+            },
+            {
+                "step": 4,
+                "name": "export_reviewer_pack",
+                "status": "required" if blockers or warnings else "complete",
+                "command": "Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers",
+                "verification": "Pack writes JSON and Markdown under data/eval_regression/.",
+            },
+        ]
+
+    def _reviewer_checklist(self, gate: EvalRegressionGateResult) -> list[JsonDict]:
+        return [
+            {
+                "item": "Golden eval has no failed cases.",
+                "status": "pass" if gate.golden_eval.failed_cases == 0 else "fail",
+                "proof": f"{gate.golden_eval.passed_cases}/{gate.golden_eval.total_cases} passed.",
+            },
+            {
+                "item": "Conformance still passes for promoted MCP tools.",
+                "status": "pass" if gate.conformance_status == "pass" else "fail",
+                "proof": f"Conformance status is {gate.conformance_status}.",
+            },
+            {
+                "item": "Operational gates have no blocking regression signals.",
+                "status": "pass" if not gate.blockers else "fail",
+                "proof": f"{len(gate.blockers)} blocker(s), {len(gate.warnings)} warning(s).",
+            },
+            {
+                "item": "Bounded remediation loop has explicit verification commands.",
+                "status": "pass",
+                "proof": f"{len(gate.bounded_remediation_steps)} step(s) with commands.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            'rg "evals/regression-gate|evals/regression-pack|Eval Regression|eval_regression" app dashboard docs README.md tests scripts sample_data',
+        ]
+
+    def _architecture_patterns(self) -> list[str]:
+        return [
+            "state observation",
+            "bounded action loop",
+            "step verification",
+            "run transparency",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The gate uses deterministic local/mock golden evals and does not call external providers.",
+            "Fresh-clone comparisons use the current sample golden dataset rather than a remote experiment store.",
+            "Reliability and SLO inputs include deterministic fixtures plus local in-memory invocation history.",
+            "Generated regression artifacts are written under ignored data/eval_regression/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        gate = bundle["eval_regression_gate"]
+        lines = [
+            "# Eval Regression Gate Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Score: `{bundle['score']}`",
+            "",
+            "## Summary",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in gate["summary"].items()],
+            "",
+            "## Regression Cases",
+            "",
+            "| Case | Skill | Status | Score | Latency | Severity | Action |",
+            "| --- | --- | --- | ---: | ---: | --- | --- |",
+            *[
+                f"| `{case['case_id']}` | `{case['skill_id']}` | `{case['status']}` | {case['score']} | {case['latency_ms']}ms | `{case['severity']}` | {case['recommended_action']} |"
+                for case in gate["regression_cases"]
+            ],
+            "",
+            "## State Observations",
+            "",
+            *[
+                f"- `{item['source']}` `{item['status']}` - {item['evidence']}"
+                for item in gate["state_observations"]
+            ],
+            "",
+            "## Bounded Remediation Steps",
+            "",
+            *[
+                f"- {item['step']}. `{item['name']}` `{item['status']}`: `{item['command']}` - {item['verification']}"
+                for item in gate["bounded_remediation_steps"]
+            ],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[
+                f"- `{item['status']}` {item['item']} - {item['proof']}"
+                for item in bundle["reviewer_checklist"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
 
 
 class EvidenceBundleService:
@@ -14245,6 +14610,29 @@ class SmokeMatrixService:
                 "Previews catalog and workflow changes against the local release baseline.",
             ),
             self._endpoint(
+                "eval regression",
+                "GET",
+                "/evals/regression-gate",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/evals/regression-gate -Headers $headers",
+                [],
+                "Combines golden eval, conformance, release, reliability, and SLO signals into a regression gate.",
+            ),
+            self._endpoint(
+                "eval regression",
+                "POST",
+                "/evals/regression-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers",
+                [
+                    "data/eval_regression/eval_regression_pack_latest.json",
+                    "data/eval_regression/eval_regression_pack_latest.md",
+                ],
+                "Writes Eval Regression Gate reviewer artifacts with bounded remediation steps.",
+            ),
+            self._endpoint(
                 "capacity",
                 "POST",
                 "/capacity/forecast",
@@ -14736,6 +15124,11 @@ class SmokeMatrixService:
                 Path("data") / "attestations" / "compliance_attestation_latest",
             ),
             ("Release notes", "POST /releases/export", Path("data") / "releases" / "release_notes_latest"),
+            (
+                "Eval Regression Gate Pack",
+                "POST /evals/regression-pack",
+                Path("data") / "eval_regression" / EvalRegressionGateService.PACK_ID,
+            ),
             ("Capacity plan", "POST /capacity/plan-export", Path("data") / "capacity" / "capacity_plan_latest"),
             (
                 "Dependency report",
@@ -17878,6 +18271,7 @@ class DashboardSmokeService:
             {"id": "runtime_demo", "label": "Runtime Demo", "purpose": "FastAPI, Streamlit, and MCP CLI local runtime proof."},
             {"id": "final_handoff", "label": "Final Handoff", "purpose": "README Consistency audit and final pack."},
             {"id": "api_contract", "label": "API Contract", "purpose": "OpenAPI/MCP contract audit and reviewer collection."},
+            {"id": "eval_regression_gate", "label": "Eval Regression Gate", "purpose": "Golden eval regression gate and bounded remediation."},
         ]
 
     def _endpoint_references(self) -> list[JsonDict]:
@@ -17964,6 +18358,8 @@ class DashboardSmokeService:
             self._endpoint_ref("api_contract_drift_pack", "POST", "/api/contract-drift-pack", "Writes Tool Contract Drift Pack artifacts."),
             self._endpoint_ref("api_contract_remediation_run", "GET", "/api/contract-remediation-run", "Read-only bounded contract remediation run."),
             self._endpoint_ref("api_contract_remediation_pack", "POST", "/api/contract-remediation-pack", "Writes Contract Remediation Run artifacts."),
+            self._endpoint_ref("eval_regression_gate", "GET", "/evals/regression-gate", "Golden eval regression gate and state observations."),
+            self._endpoint_ref("eval_regression_pack", "POST", "/evals/regression-pack", "Writes Eval Regression Gate artifacts."),
         ]
 
     def _endpoint_ref(self, ref_id: str, method: str, path: str, purpose: str) -> JsonDict:
@@ -18015,6 +18411,7 @@ class DashboardSmokeService:
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
             self._artifact_tab("api_contract", "API Contract", "Reviewer Collection", "data/api_contracts/"),
             self._artifact_tab("api_contract_remediation", "API Contract", "Remediation Run", "data/api_contracts/"),
+            self._artifact_tab("eval_regression", "Eval Regression Gate", "Eval Regression Pack", "data/eval_regression/"),
         ]
 
     def _artifact_tab(self, tab_id: str, view: str, tab_label: str, artifact_dir: str) -> JsonDict:
@@ -21362,6 +21759,15 @@ class ArtifactInventoryService:
                 "Promoted skill and workflow-template release diff with conformance, policy, MCP impact, and regression commands.",
             ),
             self._catalog_row(
+                "eval_regression",
+                "Eval Regression Gate Pack",
+                Path("data") / "eval_regression",
+                "POST /evals/regression-pack",
+                "Invoke-RestMethod http://localhost:8000/evals/regression-pack -Method POST -Headers $headers",
+                ["eval_regression_pack_latest.json", "eval_regression_pack_latest.md"],
+                "Golden eval, conformance, release, reliability, and SLO regression gate with state observations and bounded remediation steps.",
+            ),
+            self._catalog_row(
                 "capacity",
                 "Capacity Plan",
                 Path("data") / "capacity",
@@ -23725,6 +24131,7 @@ class AppState:
     agent_society_eval: AgentSocietyEvaluationService = field(init=False)
     governance: GovernanceReportService = field(init=False)
     conformance: ConformanceReportService = field(init=False)
+    eval_regression: EvalRegressionGateService = field(init=False)
     evidence: EvidenceBundleService = field(init=False)
     releases: ReleaseService = field(init=False)
     audit_query: AuditQueryService = field(init=False)
@@ -23793,6 +24200,7 @@ class AppState:
         self.workflows = WorkflowTemplateService(self)
         self.governance = GovernanceReportService(self)
         self.conformance = ConformanceReportService(self)
+        self.eval_regression = EvalRegressionGateService(self)
         self.evidence = EvidenceBundleService(self)
         self.releases = ReleaseService(self)
         self.audit_query = AuditQueryService(self)
