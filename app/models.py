@@ -942,6 +942,74 @@ class ProviderFallbackPackResult(BaseModel):
     summary: JsonDict
 
 
+ProviderFailoverFailureMode = Literal[
+    "provider_unavailable",
+    "missing_credentials",
+    "rate_limited",
+    "budget_exceeded",
+    "policy_rejected",
+]
+ProviderFailoverDecisionValue = Literal["primary_allowed", "fallback_to_mock", "blocked"]
+
+
+class ProviderFailoverScenario(BaseModel):
+    skill_id: str = "summarize_document"
+    requested_provider: str = "openai"
+    failure_mode: ProviderFailoverFailureMode = "provider_unavailable"
+    tenant_id: str = "internal_demo"
+    actor: str = "provider-drill-reviewer"
+
+
+class ProviderFailoverDrillRequest(BaseModel):
+    actor: str = "provider-drill-reviewer"
+    scenarios: list[ProviderFailoverScenario] = Field(default_factory=list)
+    include_recent_traces: bool = True
+
+
+class ProviderFailoverDecision(BaseModel):
+    scenario_id: str
+    skill_id: str
+    requested_provider: str
+    failure_mode: ProviderFailoverFailureMode
+    decision: ProviderFailoverDecisionValue
+    selected_provider: str | None = None
+    fallback_provider: str | None = None
+    reviewer_required: bool = False
+    network_calls_performed: int = 0
+    estimated_cost_delta: float = 0.0
+    reasons: list[str] = Field(default_factory=list)
+    governance_checks: list[JsonDict] = Field(default_factory=list)
+    trace_ids: list[str] = Field(default_factory=list)
+    replay_command: str
+
+
+class ProviderFailoverDrillResult(BaseModel):
+    drill_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    decisions: list[ProviderFailoverDecision] = Field(default_factory=list)
+    provider_readiness: ProviderReadinessReport
+    runbook_steps: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ProviderFailoverPackRequest(BaseModel):
+    actor: str = "provider-drill-reviewer"
+    drill_request: ProviderFailoverDrillRequest | None = None
+
+
+class ProviderFailoverPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class ConfigVariableRecord(BaseModel):
     name: str
     required_for: str

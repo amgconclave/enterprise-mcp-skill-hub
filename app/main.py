@@ -112,6 +112,10 @@ from app.models import (
     PromptGovernanceReport,
     PromptGovernanceTargetResult,
     PromptGovernanceValidationRequest,
+    ProviderFailoverDrillRequest,
+    ProviderFailoverDrillResult,
+    ProviderFailoverPackRequest,
+    ProviderFailoverPackResult,
     ProviderFallbackPackRequest,
     ProviderFallbackPackResult,
     ProviderReadinessReport,
@@ -534,6 +538,28 @@ def provider_fallback_pack(
     _: str = Depends(require_api_key),
 ) -> ProviderFallbackPackResult:
     return state.provider_readiness.fallback_pack(request or ProviderFallbackPackRequest())
+
+
+@app.post("/providers/failover-drill", response_model=ProviderFailoverDrillResult)
+def provider_failover_drill(
+    request: ProviderFailoverDrillRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ProviderFailoverDrillResult:
+    try:
+        return state.provider_failover.drill(request or ProviderFailoverDrillRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/providers/failover-pack", response_model=ProviderFailoverPackResult)
+def provider_failover_pack(
+    request: ProviderFailoverPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ProviderFailoverPackResult:
+    try:
+        return state.provider_failover.pack(request or ProviderFailoverPackRequest())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/config/hygiene", response_model=ConfigHygieneReport)

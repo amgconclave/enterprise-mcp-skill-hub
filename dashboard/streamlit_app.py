@@ -48,6 +48,8 @@ from app.models import (
     PromptGovernancePackRequest,
     PromptGovernanceRemediationRequest,
     PromptGovernanceValidationRequest,
+    ProviderFailoverDrillRequest,
+    ProviderFailoverPackRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
     RepositoryAutomationPackRequest,
@@ -113,6 +115,7 @@ view = st.sidebar.radio(
         "Skill Reliability",
         "Skill SLO",
         "Provider Readiness",
+        "Provider Failover",
         "Config Hygiene",
         "Platform Pack",
         "Agent Collaboration",
@@ -1105,6 +1108,47 @@ elif view == "Provider Readiness":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Provider Failover":
+    st.subheader("Provider Failover")
+    st.caption("Local failover drill for hosted-provider outages, mock fallback, reviewer gates, and cost-safe replay.")
+    drill = state.provider_failover.drill(
+        ProviderFailoverDrillRequest(actor="streamlit-provider-drill-reviewer")
+    )
+    col_ready, col_scenarios, col_fallbacks, col_network = st.columns(4)
+    col_ready.metric("Readiness", drill.readiness_status.upper())
+    col_scenarios.metric("Scenarios", drill.summary["scenario_count"])
+    col_fallbacks.metric("Fallbacks", drill.summary["fallback_decision_count"])
+    col_network.metric("Network calls", drill.summary["network_calls_performed"])
+
+    tab_decisions, tab_runbook, tab_readiness, tab_export, tab_json = st.tabs(
+        ["Decisions", "Runbook", "Provider Readiness", "Failover Pack", "JSON"]
+    )
+    with tab_decisions:
+        st.dataframe(
+            [decision.model_dump(mode="json") for decision in drill.decisions],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json({"patterns": drill.architecture_patterns})
+    with tab_runbook:
+        st.dataframe(drill.runbook_steps, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"command": command} for command in drill.local_proof_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_readiness:
+        st.json(drill.provider_readiness.model_dump(mode="json"))
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/provider_failover/.")
+        actor = st.text_input("Provider failover actor", value="streamlit-provider-drill-reviewer")
+        if st.button("Export Provider Failover Pack", use_container_width=True):
+            export = state.provider_failover.pack(ProviderFailoverPackRequest(actor=actor))
+            st.success("Provider Failover Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(drill.model_dump(mode="json"))
 
 elif view == "Config Hygiene":
     st.subheader("Config Hygiene")

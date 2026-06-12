@@ -135,6 +135,12 @@ from app.models import (
     PromptGovernanceTargetResult,
     PromptGovernanceTargetType,
     PromptGovernanceValidationRequest,
+    ProviderFailoverDecision,
+    ProviderFailoverDrillRequest,
+    ProviderFailoverDrillResult,
+    ProviderFailoverPackRequest,
+    ProviderFailoverPackResult,
+    ProviderFailoverScenario,
     ProviderFallbackPackRequest,
     ProviderFallbackPackResult,
     ProviderReadinessReport,
@@ -14043,6 +14049,29 @@ class SmokeMatrixService:
                 "Writes Provider Readiness and Fallback reviewer artifacts.",
             ),
             self._endpoint(
+                "provider failover",
+                "POST",
+                "/providers/failover-drill",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/providers/failover-drill -Method POST -Headers $headers",
+                [],
+                "Simulates hosted-provider failure scenarios with mock fallback decisions and reviewer gates.",
+            ),
+            self._endpoint(
+                "provider failover",
+                "POST",
+                "/providers/failover-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/providers/failover-pack -Method POST -Headers $headers",
+                [
+                    "data/provider_failover/provider_failover_drill_pack_latest.json",
+                    "data/provider_failover/provider_failover_drill_pack_latest.md",
+                ],
+                "Writes Provider Failover Drill reviewer artifacts.",
+            ),
+            self._endpoint(
                 "platform pack",
                 "GET",
                 "/platform/pack",
@@ -17484,6 +17513,7 @@ class DashboardSmokeService:
             {"id": "skill_reliability", "label": "Skill Reliability", "purpose": "Circuit breaker controls."},
             {"id": "skill_slo", "label": "Skill SLO", "purpose": "Error budget and release gate controls."},
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
+            {"id": "provider_failover", "label": "Provider Failover", "purpose": "Provider outage drill and mock fallback proof."},
             {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
@@ -17543,6 +17573,8 @@ class DashboardSmokeService:
             self._endpoint_ref("slo_pack", "POST", "/slo/pack", "Writes SLO Error Budget artifacts."),
             self._endpoint_ref("provider_readiness", "GET", "/providers/readiness", "Provider readiness and optional hosted-provider checks."),
             self._endpoint_ref("provider_fallback_pack", "POST", "/providers/fallback-pack", "Writes Provider Fallback artifacts."),
+            self._endpoint_ref("provider_failover_drill", "POST", "/providers/failover-drill", "Runs local provider failover drill."),
+            self._endpoint_ref("provider_failover_pack", "POST", "/providers/failover-pack", "Writes Provider Failover Drill artifacts."),
             self._endpoint_ref("config_hygiene", "GET", "/config/hygiene", "Config hygiene and secret rotation posture."),
             self._endpoint_ref("config_hygiene_pack", "POST", "/config/hygiene-pack", "Writes Config Hygiene artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
@@ -17615,6 +17647,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_reliability", "Skill Reliability", "Reliability Pack", "data/reliability_packs/"),
             self._artifact_tab("skill_slo", "Skill SLO", "SLO Pack", "data/slo_packs/"),
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
+            self._artifact_tab("provider_failover", "Provider Failover", "Failover Pack", "data/provider_failover/"),
             self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
@@ -19779,6 +19812,15 @@ class ArtifactInventoryService:
                 "Mock-default provider posture, optional OpenAI/Azure checks, fallback matrix, re-enable gates, and audit-backed reviewer proof.",
             ),
             self._catalog_row(
+                "provider_failover",
+                "Provider Failover Drill Pack",
+                Path("data") / "provider_failover",
+                "POST /providers/failover-pack",
+                "Invoke-RestMethod http://localhost:8000/providers/failover-pack -Method POST -Headers $headers",
+                ["provider_failover_drill_pack_latest.json", "provider_failover_drill_pack_latest.md"],
+                "Local hosted-provider outage drill with mock fallback decisions, reviewer gates, replay commands, cost deltas, and runbook steps.",
+            ),
+            self._catalog_row(
                 "config_hygiene",
                 "Config Hygiene + Secret Rotation Pack",
                 Path("data") / "config_hygiene",
@@ -21146,6 +21188,348 @@ class ProviderReadinessService:
         return "\n".join(lines)
 
 
+class ProviderFailoverDrillService:
+    DRILL_ID = "provider_failover_drill_latest"
+    PACK_ID = "provider_failover_drill_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "provider_failover"
+
+    def drill(
+        self,
+        request: ProviderFailoverDrillRequest | None = None,
+    ) -> ProviderFailoverDrillResult:
+        request = request or ProviderFailoverDrillRequest()
+        readiness = self.app_state.provider_readiness.readiness(actor=request.actor)
+        scenarios = request.scenarios or self._default_scenarios(request.actor)
+        decisions = [
+            self._decision(index, scenario, readiness, request.include_recent_traces)
+            for index, scenario in enumerate(scenarios, start=1)
+        ]
+        blocked_count = sum(1 for decision in decisions if decision.decision == "blocked")
+        fallback_count = sum(1 for decision in decisions if decision.decision == "fallback_to_mock")
+        reviewer_count = sum(1 for decision in decisions if decision.reviewer_required)
+        readiness_status: SecurityReadinessStatus = "ready"
+        if blocked_count:
+            readiness_status = "blocked"
+        elif reviewer_count or readiness.readiness_status != "ready":
+            readiness_status = "needs_review"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "scenario_count": len(scenarios),
+            "fallback_decision_count": fallback_count,
+            "blocked_decision_count": blocked_count,
+            "reviewer_required_count": reviewer_count,
+            "network_calls_performed": sum(decision.network_calls_performed for decision in decisions),
+            "estimated_cost_delta": round(sum(decision.estimated_cost_delta for decision in decisions), 6),
+            "providers_observed": sorted({decision.requested_provider for decision in decisions}),
+        }
+        result = ProviderFailoverDrillResult(
+            drill_id=self.DRILL_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            decisions=decisions,
+            provider_readiness=readiness,
+            runbook_steps=self._runbook_steps(decisions),
+            architecture_patterns=[
+                "provider flexibility",
+                "governance",
+                "agent cost tracking",
+                "run transparency",
+            ],
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "provider_failover.drill_run",
+            "provider_failover_drill",
+            self.DRILL_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": readiness_status,
+                "scenario_count": len(scenarios),
+                "fallback_decision_count": fallback_count,
+                "blocked_decision_count": blocked_count,
+                "network_calls_performed": summary["network_calls_performed"],
+            },
+        )
+        return result
+
+    def pack(
+        self,
+        request: ProviderFailoverPackRequest | None = None,
+    ) -> ProviderFailoverPackResult:
+        request = request or ProviderFailoverPackRequest()
+        drill_request = request.drill_request or ProviderFailoverDrillRequest(actor=request.actor)
+        drill = self.drill(drill_request.model_copy(update={"actor": request.actor}))
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": drill.readiness_status,
+            "provider_failover_drill": drill.model_dump(mode="json"),
+            "reviewer_checklist": self._reviewer_checklist(drill),
+            "audit_events": [
+                event.model_dump(mode="json")
+                for event in self.app_state.audit.events
+                if event.action.startswith("provider_failover.")
+            ],
+            "local_proof_commands": drill.local_proof_commands,
+            "limitations": drill.limitations,
+        }
+        bundle["summary"] = {
+            **drill.summary,
+            "readiness_status": drill.readiness_status,
+            "audit_event_count": len(bundle["audit_events"]),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "provider_failover.pack_exported",
+            "provider_failover_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": drill.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "fallback_decision_count": drill.summary["fallback_decision_count"],
+            },
+        )
+        return ProviderFailoverPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=drill.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=bundle["summary"],
+        )
+
+    def _default_scenarios(self, actor: str) -> list[ProviderFailoverScenario]:
+        promoted = self.app_state.registry.mcp_exposed()
+        skill_ids = [skill.id for skill in promoted[:3]] or ["summarize_document"]
+        providers = ["openai", "azure_openai"]
+        failure_modes = ["missing_credentials", "provider_unavailable", "budget_exceeded"]
+        return [
+            ProviderFailoverScenario(
+                skill_id=skill_id,
+                requested_provider=providers[(index - 1) % len(providers)],
+                failure_mode=failure_modes[(index - 1) % len(failure_modes)],
+                actor=actor,
+            )
+            for index, skill_id in enumerate(skill_ids, start=1)
+        ]
+
+    def _decision(
+        self,
+        index: int,
+        scenario: ProviderFailoverScenario,
+        readiness: ProviderReadinessReport,
+        include_recent_traces: bool,
+    ) -> ProviderFailoverDecision:
+        skill = self.app_state.registry.get(scenario.skill_id)
+        checks = {check["provider"]: check for check in readiness.provider_checks}
+        requested = checks.get(scenario.requested_provider)
+        mock_ready = checks.get("mock", {}).get("status") == "pass"
+        requested_ready = bool(requested and requested.get("status") == "pass")
+        external_requested = scenario.requested_provider != "mock"
+        forced_failure = scenario.failure_mode in {
+            "provider_unavailable",
+            "missing_credentials",
+            "rate_limited",
+            "budget_exceeded",
+        }
+        reasons = [
+            f"Scenario simulates `{scenario.failure_mode}` for `{scenario.requested_provider}` on `{skill.id}`.",
+            "No provider network call is performed; this is a deterministic local failover drill.",
+        ]
+        governance_checks = [
+            {"id": "skill_promoted", "status": "pass" if self.app_state.registry.is_mcp_exposed(skill) else "fail"},
+            {"id": "mock_fallback_available", "status": "pass" if mock_ready else "fail"},
+            {
+                "id": "external_provider_review",
+                "status": "warn" if external_requested else "pass",
+                "provider": scenario.requested_provider,
+            },
+            {"id": "cost_delta_zero", "status": "pass", "estimated_cost_delta": 0.0},
+        ]
+        if external_requested and (forced_failure or not requested_ready) and mock_ready:
+            decision = "fallback_to_mock"
+            selected_provider = "mock"
+            fallback_provider = "mock"
+            reviewer_required = True
+            reasons.append("External provider path falls back to the mock provider until credentials, quota, and approval gates pass.")
+        elif scenario.requested_provider == "mock" and not forced_failure and mock_ready:
+            decision = "primary_allowed"
+            selected_provider = "mock"
+            fallback_provider = None
+            reviewer_required = False
+            reasons.append("Mock provider remains the selected deterministic local provider.")
+        else:
+            decision = "blocked"
+            selected_provider = None
+            fallback_provider = "mock" if mock_ready else None
+            reviewer_required = True
+            reasons.append("No approved fallback route is available for this simulated failure.")
+        return ProviderFailoverDecision(
+            scenario_id=f"provider_failover_{index:02d}",
+            skill_id=skill.id,
+            requested_provider=scenario.requested_provider,
+            failure_mode=scenario.failure_mode,
+            decision=decision,
+            selected_provider=selected_provider,
+            fallback_provider=fallback_provider,
+            reviewer_required=reviewer_required,
+            network_calls_performed=0,
+            estimated_cost_delta=0.0,
+            reasons=reasons,
+            governance_checks=governance_checks,
+            trace_ids=self._trace_ids(skill.id, include_recent_traces),
+            replay_command=(
+                "Invoke-RestMethod http://localhost:8000/providers/failover-drill "
+                "-Method POST -Headers $headers"
+            ),
+        )
+
+    def _trace_ids(self, skill_id: str, include_recent_traces: bool) -> list[str]:
+        trace_ids = [new_trace_id()]
+        if include_recent_traces:
+            trace_ids.extend(
+                invocation.trace_id
+                for invocation in self.app_state.invocation_service.invocations
+                if invocation.skill_id == skill_id
+            )
+        return sorted(set(trace_ids))
+
+    def _runbook_steps(self, decisions: list[ProviderFailoverDecision]) -> list[JsonDict]:
+        return [
+            {
+                "step": 1,
+                "owner": "platform-sre",
+                "action": "Detect provider failure or budget/quota risk from invocation traces.",
+                "status": "covered" if decisions else "needs_scenarios",
+            },
+            {
+                "step": 2,
+                "owner": "provider-reviewer",
+                "action": "Route external-provider failures to mock fallback for local acceptance and replay.",
+                "status": "covered" if any(decision.decision == "fallback_to_mock" for decision in decisions) else "review",
+            },
+            {
+                "step": 3,
+                "owner": "skill-platform-owner",
+                "action": "Rerun eval, conformance, demo, and MCP commands before re-enabling hosted providers.",
+                "status": "required",
+            },
+        ]
+
+    def _reviewer_checklist(self, drill: ProviderFailoverDrillResult) -> list[JsonDict]:
+        return [
+            {
+                "item": "Failover drill stays local and deterministic.",
+                "status": "pass" if drill.summary["network_calls_performed"] == 0 else "fail",
+                "proof": f"{drill.summary['network_calls_performed']} network calls.",
+            },
+            {
+                "item": "External-provider failures have mock fallback evidence.",
+                "status": "pass" if drill.summary["fallback_decision_count"] else "warn",
+                "proof": f"{drill.summary['fallback_decision_count']} fallback decision(s).",
+            },
+            {
+                "item": "Provider re-enable remains human reviewed.",
+                "status": "pass" if drill.summary["reviewer_required_count"] else "warn",
+                "proof": f"{drill.summary['reviewer_required_count']} reviewer gate(s).",
+            },
+            {
+                "item": "Cost impact is visible in the drill summary.",
+                "status": "pass" if "estimated_cost_delta" in drill.summary else "fail",
+                "proof": f"Estimated cost delta: {drill.summary.get('estimated_cost_delta')}.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_eval --validate-only",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server resources",
+            "python -m app.mcp_server prompts",
+            "Invoke-RestMethod http://localhost:8000/providers/failover-drill -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/providers/failover-pack -Method POST -Headers $headers",
+            'rg "providers/failover-drill|providers/failover-pack|Provider Failover|provider_failover" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\provider_failover -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The drill simulates provider failures locally and never calls OpenAI, Azure OpenAI, or a provider health endpoint.",
+            "Fallback decisions use static readiness signals plus promoted skill metadata; production canary traffic should add live telemetry.",
+            "Estimated cost deltas stay zero in mock mode because no hosted tokens are consumed.",
+            "Generated failover artifacts are written under ignored data/provider_failover/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        drill = bundle["provider_failover_drill"]
+        lines = [
+            "# Provider Failover Drill Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Scenarios: `{drill['summary']['scenario_count']}`",
+            f"- Fallback decisions: `{drill['summary']['fallback_decision_count']}`",
+            f"- Network calls: `{drill['summary']['network_calls_performed']}`",
+            "",
+            "## Decisions",
+            "",
+            "| Scenario | Skill | Requested | Decision | Selected | Reviewer |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                (
+                    f"| `{decision['scenario_id']}` | `{decision['skill_id']}` | "
+                    f"`{decision['requested_provider']}` | `{decision['decision']}` | "
+                    f"`{decision.get('selected_provider')}` | `{decision['reviewer_required']}` |"
+                )
+                for decision in drill["decisions"]
+            ],
+            "",
+            "## Runbook",
+            "",
+            *[
+                f"- Step {step['step']} `{step['owner']}`: {step['action']} (`{step['status']}`)"
+                for step in drill["runbook_steps"]
+            ],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[f"- `{item['status']}` {item['item']} - {item['proof']}" for item in bundle["reviewer_checklist"]],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class ConfigHygieneService:
     PACK_ID = "config_hygiene_pack_latest"
 
@@ -21666,6 +22050,7 @@ class AppState:
     invocation_sandbox: InvocationSandboxPolicyService = field(init=False)
     sandbox_exceptions: SandboxExceptionReviewService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
+    provider_failover: ProviderFailoverDrillService = field(init=False)
     config_hygiene: ConfigHygieneService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
@@ -21733,6 +22118,7 @@ class AppState:
         self.invocation_service.sandbox = self.invocation_sandbox
         self.sandbox_exceptions = SandboxExceptionReviewService(self)
         self.provider_readiness = ProviderReadinessService(self)
+        self.provider_failover = ProviderFailoverDrillService(self)
         self.config_hygiene = ConfigHygieneService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)

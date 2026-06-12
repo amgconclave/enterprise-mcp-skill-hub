@@ -31,6 +31,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
 - Skill SLO + Error Budget Pack for per-skill availability SLOs, error budget burn, latency budget, release-gate blockers, reviewer proof commands, and ignored `data/slo_packs/` artifacts.
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
+- Provider Failover Drill Pack for deterministic hosted-provider outage scenarios, mock fallback decisions, reviewer re-enable gates, replay commands, cost deltas, and ignored `data/provider_failover/` artifacts.
 - Config Hygiene + Secret Rotation Pack for `.env.example`, `.gitignore`, provider credential gates, redacted local secret findings, rotation guidance, and ignored `data/config_hygiene/` artifacts.
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
 - Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
@@ -55,7 +56,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Config Hygiene, Platform Pack, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -549,10 +550,15 @@ Validate local/mock default posture and optional hosted provider readiness befor
 $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/providers/readiness -Headers $headers
 Invoke-RestMethod http://localhost:8000/providers/fallback-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/providers/failover-drill -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/providers/failover-pack -Method POST -Headers $headers
 Get-ChildItem -Recurse -File data\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+Get-ChildItem -Recurse -File data\provider_failover -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
 ```
 
 `GET /providers/readiness` performs static local checks for `mock`, `openai`, and `azure_openai` provider posture without network calls or secret-value export. `POST /providers/fallback-pack` writes `provider_fallback_pack_latest.json` and `.md` under ignored `data/provider_packs/` with provider checks, credential-presence signals, fallback routes, re-enable gates, reviewer checklist, audit events, local proof commands, and limitations. The Streamlit dashboard has a `Provider Readiness` view, and `python -m app.demo` prints provider readiness plus the Provider Fallback Pack path.
+
+`POST /providers/failover-drill` simulates hosted-provider outage, credential, quota, and budget scenarios across promoted MCP skills and decides whether to use deterministic mock fallback, require reviewer action, or block. `POST /providers/failover-pack` writes `provider_failover_drill_pack_latest.json` and `.md` under ignored `data/provider_failover/` with decisions, trace IDs, replay commands, runbook steps, reviewer checklist, cost deltas, local proof commands, and limitations. The Streamlit dashboard has a `Provider Failover` view, and `python -m app.demo` prints failover readiness plus the Provider Failover Pack path.
 
 ## Config Hygiene And Secret Rotation
 

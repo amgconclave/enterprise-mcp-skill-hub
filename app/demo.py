@@ -32,6 +32,8 @@ from app.models import (
     PrivacyRetentionPackRequest,
     PromptGovernancePackRequest,
     PromptGovernanceRemediationRequest,
+    ProviderFailoverDrillRequest,
+    ProviderFailoverPackRequest,
     ProviderFallbackPackRequest,
     ReleasePublishPackRequest,
     RepositoryAutomationPackRequest,
@@ -218,6 +220,12 @@ async def main() -> None:
     provider_readiness = state.provider_readiness.readiness(actor="demo-provider-reviewer")
     provider_fallback_pack = state.provider_readiness.fallback_pack(
         ProviderFallbackPackRequest(actor="demo-provider-reviewer")
+    )
+    provider_failover_drill = state.provider_failover.drill(
+        ProviderFailoverDrillRequest(actor="demo-provider-drill-reviewer")
+    )
+    provider_failover_pack = state.provider_failover.pack(
+        ProviderFailoverPackRequest(actor="demo-provider-drill-reviewer")
     )
     config_hygiene_report = state.config_hygiene.report()
     config_hygiene_pack = state.config_hygiene.pack(
@@ -496,6 +504,16 @@ async def main() -> None:
                 "provider_current": provider_readiness.current_provider["name"],
                 "provider fallback pack path": provider_fallback_pack.markdown_path,
                 "provider_fallback_pack_path": provider_fallback_pack.markdown_path,
+                "provider failover readiness": provider_failover_drill.readiness_status,
+                "provider_failover_readiness": provider_failover_drill.readiness_status,
+                "provider failover decisions": provider_failover_drill.summary[
+                    "fallback_decision_count"
+                ],
+                "provider_failover_decisions": provider_failover_drill.summary[
+                    "fallback_decision_count"
+                ],
+                "provider failover pack path": provider_failover_pack.markdown_path,
+                "provider_failover_pack_path": provider_failover_pack.markdown_path,
                 "config hygiene readiness": config_hygiene_report.readiness_status,
                 "config_hygiene_readiness": config_hygiene_report.readiness_status,
                 "config hygiene secret findings": config_hygiene_report.summary["secret_finding_count"],

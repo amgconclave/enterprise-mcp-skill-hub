@@ -70,6 +70,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /slo/pack` - writes the Skill SLO + Error Budget Pack Markdown/JSON under ignored local folder `data/slo_packs/`.
 - `GET /providers/readiness` - returns static local provider readiness for mock, OpenAI, and Azure OpenAI without network calls or credential disclosure.
 - `POST /providers/fallback-pack` - writes the Provider Readiness + Fallback Pack Markdown/JSON under ignored local folder `data/provider_packs/`.
+- `POST /providers/failover-drill` - simulates hosted-provider failure scenarios, mock fallback decisions, reviewer gates, replay commands, and cost deltas without network calls.
+- `POST /providers/failover-pack` - writes the Provider Failover Drill Pack Markdown/JSON under ignored local folder `data/provider_failover/`.
 - `GET /config/hygiene` - returns local configuration hygiene, optional provider credential gates, redacted secret findings, `.gitignore` checks, and rotation guidance without exporting secret values.
 - `POST /config/hygiene-pack` - writes the Config Hygiene + Secret Rotation Pack Markdown/JSON under ignored local folder `data/config_hygiene/`.
 - `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
@@ -540,6 +542,26 @@ Invoke-RestMethod http://localhost:8000/slo/pack `
 The SLO report derives per-skill availability SLOs, error budget burn, latency budget remaining, burn-rate alerts, and release-gate decisions from the local reliability report. Promoted MCP skills with exhausted error budget or latency SLO breach are listed as release blockers; disabled or unexposed skills remain evidence rows without becoming release blockers.
 
 The SLO Pack writes `slo_pack_latest.json` and `.md` under ignored `data/slo_packs/`. It includes blocking skill IDs, burn-rate alerts, reviewer checklist, local proof commands, and limitations. It is deterministic and local/mock by default.
+
+## Provider Failover Drill
+
+```powershell
+Invoke-RestMethod http://localhost:8000/providers/failover-drill `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"provider-drill-reviewer"}'
+
+Invoke-RestMethod http://localhost:8000/providers/failover-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"provider-drill-reviewer"}'
+```
+
+The failover drill uses static provider readiness plus promoted skill metadata to simulate OpenAI/Azure/provider outage, credential, quota, and budget failures. It returns per-scenario decisions, mock fallback selections, reviewer re-enable gates, trace IDs, replay commands, runbook steps, architecture patterns, local proof commands, and limitations. It performs zero provider network calls and keeps all hosted providers optional.
+
+The Provider Failover Drill Pack writes `provider_failover_drill_pack_latest.json` and `.md` under ignored `data/provider_failover/`. It is intended as provider-flexibility operational proof next to the static Provider Readiness + Fallback Pack.
 
 ## Config Hygiene And Secret Rotation
 
