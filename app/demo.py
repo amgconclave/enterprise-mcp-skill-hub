@@ -50,6 +50,7 @@ from app.models import (
     SkillSloPackRequest,
     SupplyChainPackRequest,
     TaskRunTransparencyPackRequest,
+    TenantEntitlementAccessReviewPackRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
     TenantSandboxExportRequest,
@@ -188,6 +189,10 @@ async def main() -> None:
     entitlement_coverage = state.entitlements.coverage()
     entitlement_review_pack = await state.entitlements.export_review_pack(
         TenantEntitlementReviewPackRequest(actor="demo-entitlement-reviewer")
+    )
+    entitlement_access_review = state.entitlements.access_review()
+    entitlement_access_review_pack = await state.entitlements.export_access_review_pack(
+        TenantEntitlementAccessReviewPackRequest(actor="demo-entitlement-access-reviewer")
     )
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
@@ -468,6 +473,16 @@ async def main() -> None:
                 ],
                 "tenant entitlement review pack path": entitlement_review_pack.markdown_path,
                 "tenant_entitlement_review_pack_path": entitlement_review_pack.markdown_path,
+                "tenant entitlement access review": entitlement_access_review.readiness_status,
+                "tenant_entitlement_access_review": entitlement_access_review.readiness_status,
+                "tenant entitlement privileged policies": entitlement_access_review.summary[
+                    "privileged_policy_count"
+                ],
+                "tenant_entitlement_privileged_policies": entitlement_access_review.summary[
+                    "privileged_policy_count"
+                ],
+                "tenant entitlement access review pack path": entitlement_access_review_pack.markdown_path,
+                "tenant_entitlement_access_review_pack_path": entitlement_access_review_pack.markdown_path,
                 "skill marketplace readiness": marketplace_catalog.readiness_status,
                 "skill_marketplace_readiness": marketplace_catalog.readiness_status,
                 "marketplace catalog listings": marketplace_catalog.coverage_summary["listing_count"],

@@ -67,6 +67,7 @@ from app.models import (
     SkillSloPackRequest,
     SupplyChainPackRequest,
     TaskRunTransparencyPackRequest,
+    TenantEntitlementAccessReviewPackRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
@@ -639,13 +640,14 @@ elif view == "Tenant RBAC / Entitlements":
     )
     entitlement = state.entitlements.matrix(entitlement_request)
     coverage = state.entitlements.coverage()
+    access_review = state.entitlements.access_review()
     col_ready, col_allowed, col_denied, col_safe = st.columns(4)
     col_ready.metric("Readiness", entitlement.readiness_status.upper())
     col_allowed.metric("Allowed", entitlement.summary["allowed_skill_count"])
     col_denied.metric("Denied", entitlement.summary["denied_skill_count"])
     col_safe.metric("MCP-safe tools", entitlement.summary["mcp_safe_tool_count"])
-    tab_decisions, tab_policies, tab_mcp, tab_coverage, tab_export, tab_json = st.tabs(
-        ["Decisions", "Policies", "MCP Safe", "Coverage", "Export", "JSON"]
+    tab_decisions, tab_policies, tab_mcp, tab_coverage, tab_access, tab_export, tab_json = st.tabs(
+        ["Decisions", "Policies", "MCP Safe", "Coverage", "Access Review", "Export", "JSON"]
     )
     with tab_decisions:
         st.dataframe(
@@ -721,6 +723,17 @@ elif view == "Tenant RBAC / Entitlements":
         )
         with st.expander("Coverage JSON"):
             st.json(coverage.model_dump(mode="json"))
+    with tab_access:
+        st.caption("Privileged access, wildcard policy, denied-audit, and break-glass drill review.")
+        col_access_ready, col_priv, col_break, col_steps = st.columns(4)
+        col_access_ready.metric("Access review", access_review.readiness_status.upper())
+        col_priv.metric("Privileged policies", access_review.summary["privileged_policy_count"])
+        col_break.metric("Break-glass overrides", access_review.summary["break_glass_override_count"])
+        col_steps.metric("Review steps", access_review.summary["bounded_step_count"])
+        st.dataframe(access_review.privileged_access_rows, use_container_width=True, hide_index=True)
+        st.dataframe(access_review.bounded_steps, use_container_width=True, hide_index=True)
+        with st.expander("Break-glass drill"):
+            st.json(access_review.break_glass_drill)
     with tab_export:
         st.caption("Writes Markdown and JSON under data/entitlement_packs/.")
         if st.button("Export Entitlement Pack", use_container_width=True):
@@ -742,6 +755,14 @@ elif view == "Tenant RBAC / Entitlements":
             )
             st.success("Tenant entitlement coverage review pack exported.")
             st.json(review_export.model_dump(mode="json"))
+        if st.button("Export Access Review Pack", use_container_width=True):
+            access_export = run_async(
+                state.entitlements.export_access_review_pack(
+                    TenantEntitlementAccessReviewPackRequest(actor="streamlit-entitlement-access-reviewer")
+                )
+            )
+            st.success("Tenant entitlement access review pack exported.")
+            st.json(access_export.model_dump(mode="json"))
     with tab_json:
         st.json(entitlement.model_dump(mode="json"))
 

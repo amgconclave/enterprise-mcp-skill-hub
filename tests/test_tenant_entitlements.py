@@ -8,6 +8,8 @@ from app.bootstrap import create_state
 from app.main import app
 from app.models import (
     PolicyInvocationContext,
+    TenantEntitlementAccessReviewPackRequest,
+    TenantEntitlementAccessReviewRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
@@ -139,6 +141,28 @@ def test_entitlement_coverage_flags_wildcard_review_rows() -> None:
     assert any(record.coverage_status == "wildcard_policy" for record in coverage.review_required)
 
 
+def test_entitlement_access_review_flags_privileged_rows_and_safe_break_glass() -> None:
+    state = create_state()
+
+    review = state.entitlements.access_review(
+        TenantEntitlementAccessReviewRequest(actor="pytest-entitlement-access-reviewer", max_steps=4)
+    )
+
+    assert review.review_id == "tenant_entitlement_access_review_latest"
+    assert review.readiness_status == "needs_review"
+    assert review.summary["privileged_policy_count"] >= 1
+    assert review.summary["break_glass_override_count"] == 0
+    assert len(review.bounded_steps) == 4
+    assert any(row["uses_wildcard_policy"] for row in review.privileged_access_rows)
+    assert all(
+        scenario["decision"] == "deny"
+        for scenario in review.break_glass_drill["scenarios"]
+    )
+    assert any("state observation" in pattern for pattern in review.patterns_used)
+    assert any("bounded action loop" in pattern for pattern in review.patterns_used)
+    assert any("step verification" in pattern for pattern in review.patterns_used)
+
+
 def test_entitlement_coverage_api_and_review_pack(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -154,6 +178,25 @@ def test_entitlement_coverage_api_and_review_pack(
     assert coverage.json()["summary"]["review_required_count"] >= 1
     assert pack.status_code == 200
     assert pack.json()["summary"]["wildcard_policy_count"] >= 1
+
+
+def test_entitlement_access_review_api_and_pack(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    review = client.get("/tenants/entitlements/access-review", headers=auth_headers)
+    pack = client.post(
+        "/tenants/entitlements/access-review-pack",
+        headers=auth_headers,
+        json={"actor": "pytest-entitlement-access-reviewer"},
+    )
+
+    assert review.status_code == 200
+    assert review.json()["summary"]["break_glass_override_count"] == 0
+    assert review.json()["break_glass_drill"]["mcp_safe_default"]
+    assert pack.status_code == 200
+    assert pack.json()["pack_id"] == "tenant_entitlement_access_review_latest"
+    assert pack.json()["summary"]["privileged_policy_count"] >= 1
 
 
 @pytest.mark.asyncio
@@ -213,3 +256,35 @@ async def test_entitlement_review_pack_export_writes_local_artifacts(tmp_path) -
     assert export.summary["review_required_count"] >= 1
     assert (tmp_path / "tenant_entitlement_review_pack_latest.json").exists()
     assert (tmp_path / "tenant_entitlement_review_pack_latest.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_entitlement_access_review_pack_export_writes_local_artifacts(tmp_path) -> None:
+    state = create_state()
+    state.entitlements.output_dir = tmp_path
+
+    export = await state.entitlements.export_access_review_pack(
+        TenantEntitlementAccessReviewPackRequest(actor="pytest-entitlement-access-reviewer")
+    )
+
+    assert export.readiness_status == "needs_review"
+    assert export.summary["break_glass_override_count"] == 0
+    assert (tmp_path / "tenant_entitlement_access_review_latest.json").exists()
+    assert (tmp_path / "tenant_entitlement_access_review_latest.md").exists()
+
+
+def test_entitlement_access_review_is_wired_to_dashboard_and_artifact_inventory() -> None:
+    state = create_state()
+
+    smoke = state.ui_verification.dashboard_smoke()
+    inventory = state.artifacts.inventory()
+
+    assert any(endpoint["path"] == "/tenants/entitlements/access-review" for endpoint in smoke.endpoint_references)
+    assert any(
+        endpoint["path"] == "/tenants/entitlements/access-review-pack"
+        for endpoint in smoke.endpoint_references
+    )
+    assert any(
+        item.producer_endpoint == "POST /tenants/entitlements/access-review-pack"
+        for item in inventory.items
+    )

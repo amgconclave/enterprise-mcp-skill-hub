@@ -614,6 +614,39 @@ class TenantEntitlementReviewPackResult(BaseModel):
     summary: JsonDict
 
 
+class TenantEntitlementAccessReviewRequest(BaseModel):
+    actor: str = "entitlement-access-reviewer"
+    max_steps: int = Field(default=5, ge=1, le=10)
+
+
+class TenantEntitlementAccessReviewResult(BaseModel):
+    review_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    observations: JsonDict
+    privileged_access_rows: list[JsonDict] = Field(default_factory=list)
+    break_glass_drill: JsonDict = Field(default_factory=dict)
+    bounded_steps: list[JsonDict] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementAccessReviewPackRequest(BaseModel):
+    actor: str = "entitlement-access-reviewer"
+    max_steps: int = Field(default=5, ge=1, le=10)
+
+
+class TenantEntitlementAccessReviewPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class MarketplaceTenantEligibility(BaseModel):
     scenario_id: str
     tenant: TenantKey

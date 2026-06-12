@@ -51,6 +51,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /tenants/entitlements/evaluate` - evaluates tenant id, user id, scopes, role, environment, sensitivity, and requested skill ids into allowed/denied MCP-safe skill decisions.
 - `POST /tenants/entitlements/pack` - writes `tenant_entitlement_pack_latest.json` and `.md` under ignored local folder `data/entitlement_packs/`.
 - `POST /tenants/entitlements/review-pack` - writes `tenant_entitlement_review_pack_latest.json` and `.md` with entitlement coverage, wildcard-policy review rows, denied audit evidence, and local verification commands.
+- `GET /tenants/entitlements/access-review` - reports privileged entitlement rows, wildcard exposure, denied-audit pressure, break-glass drill outcomes, and bounded reviewer steps.
+- `POST /tenants/entitlements/access-review-pack` - writes `tenant_entitlement_access_review_latest.json` and `.md` with state observation, bounded action-loop steps, local verification commands, and limitations.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 - `GET /marketplace/approvals` - returns the local approval queue, catalog promotion checks, owner signoff requirements, rollout stage policy, local proof commands, and architecture patterns for durable workflows, human-in-the-loop, governance, and tool governance.
@@ -449,6 +451,13 @@ Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"actor":"entitlement-reviewer"}'
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"entitlement-access-reviewer"}'
 ```
 
 The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The coverage report compares promoted MCP tools against exact and wildcard tenant policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. The packs write Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, coverage review rows, reviewer proof, and local-only limitations.

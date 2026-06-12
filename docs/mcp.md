@@ -112,9 +112,11 @@ The capacity forecast reports `mcp_tools_affected`, per-skill demand, top approv
 
 ## Tenant RBAC Entitlement MCP Impact
 
-`POST /tenants/entitlements/evaluate` computes tenant/user/scope decisions for promoted MCP skills and returns `mcp_safe_tool_names`, which is the allowed subset after entitlement checks. `GET /tenants/entitlements/coverage` compares every promoted MCP tool against tenant exact and wildcard entitlement policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. `POST /tenants/entitlements/pack` and `POST /tenants/entitlements/review-pack` write JSON/Markdown under `data/entitlement_packs/` with scenario matrices, denied skill ids, MCP-safe tool names, coverage review rows, reviewer proof, and local-only limitations.
+`POST /tenants/entitlements/evaluate` computes tenant/user/scope decisions for promoted MCP skills and returns `mcp_safe_tool_names`, which is the allowed subset after entitlement checks. `GET /tenants/entitlements/coverage` compares every promoted MCP tool against tenant exact and wildcard entitlement policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. `GET /tenants/entitlements/access-review` adds privileged-policy rows, wildcard exposure, denied-audit pressure, and break-glass drill outcomes. `POST /tenants/entitlements/pack`, `POST /tenants/entitlements/review-pack`, and `POST /tenants/entitlements/access-review-pack` write JSON/Markdown under `data/entitlement_packs/` with scenario matrices, denied skill ids, MCP-safe tool names, coverage review rows, bounded remediation steps, reviewer proof, and local-only limitations.
 
 When callers pass `X-Entitlement-Enforce: true` on `/skills/{skill_id}/invoke` or `/mcp/tools/{tool_name}/call`, the same entitlement gate runs before skill execution. Denied calls are MCP-safe because they return a failed payload instead of executing the tool and record `entitlement.denied` for audit review.
+
+Break-glass scopes are modeled as a review drill, not a runtime bypass. The access review pack proves emergency scopes still deny unless a normal exact entitlement policy grants the skill.
 
 ## Skill Marketplace Tenant Rollout
 

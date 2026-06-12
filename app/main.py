@@ -172,6 +172,10 @@ from app.models import (
     TaskRunObservabilityResult,
     TaskRunTransparencyPackRequest,
     TaskRunTransparencyPackResult,
+    TenantEntitlementAccessReviewPackRequest,
+    TenantEntitlementAccessReviewPackResult,
+    TenantEntitlementAccessReviewRequest,
+    TenantEntitlementAccessReviewResult,
     TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
@@ -385,6 +389,26 @@ async def tenant_entitlement_review_pack(
     _: str = Depends(require_api_key),
 ) -> TenantEntitlementReviewPackResult:
     return await state.entitlements.export_review_pack(request or TenantEntitlementReviewPackRequest())
+
+
+@app.get("/tenants/entitlements/access-review", response_model=TenantEntitlementAccessReviewResult)
+def tenant_entitlement_access_review(
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementAccessReviewResult:
+    return state.entitlements.access_review(TenantEntitlementAccessReviewRequest())
+
+
+@app.post(
+    "/tenants/entitlements/access-review-pack",
+    response_model=TenantEntitlementAccessReviewPackResult,
+)
+async def tenant_entitlement_access_review_pack(
+    request: TenantEntitlementAccessReviewPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementAccessReviewPackResult:
+    return await state.entitlements.export_access_review_pack(
+        request or TenantEntitlementAccessReviewPackRequest()
+    )
 
 
 @app.get("/marketplace/catalog", response_model=MarketplaceCatalogResult)

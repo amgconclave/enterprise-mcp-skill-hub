@@ -446,6 +446,8 @@ Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate `
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/coverage -Headers $headers
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review-pack -Method POST -Headers $headers
 ```
 
 Entitlement enforcement is opt-in on skill and MCP calls. This example is denied because healthcare agents are not entitled to `translate_text` without reviewer scopes:
@@ -465,7 +467,7 @@ Invoke-RestMethod http://localhost:8000/skills/translate_text/invoke `
   -Body '{"input":{"text":"Patient follow-up note","target_language":"Spanish"},"actor":"care-agent"}'
 ```
 
-`POST /tenants/entitlements/evaluate` returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`. `GET /tenants/entitlements/coverage` compares promoted MCP tools against tenant exact and wildcard policies, flags review-required wildcard rows, and includes denied-entitlement audit evidence. Enforced denied invocations return `403`, create failed invocation history rows, and record `entitlement.denied` audit events. `POST /tenants/entitlements/pack` writes `tenant_entitlement_pack_latest.json` and `.md`; `POST /tenants/entitlements/review-pack` writes `tenant_entitlement_review_pack_latest.json` and `.md` under ignored `data/entitlement_packs/`.
+`POST /tenants/entitlements/evaluate` returns per-skill allow/deny decisions, missing scopes, matched policies, denied skill ids, and `mcp_safe_tool_names`. `GET /tenants/entitlements/coverage` compares promoted MCP tools against tenant exact and wildcard policies, flags review-required wildcard rows, and includes denied-entitlement audit evidence. `GET /tenants/entitlements/access-review` adds privileged-policy rows, wildcard exposure, denied-audit pressure, break-glass drill checks, and bounded reviewer steps. Enforced denied invocations return `403`, create failed invocation history rows, and record `entitlement.denied` audit events. `POST /tenants/entitlements/pack` writes `tenant_entitlement_pack_latest.json` and `.md`; `POST /tenants/entitlements/review-pack` writes `tenant_entitlement_review_pack_latest.json` and `.md`; `POST /tenants/entitlements/access-review-pack` writes `tenant_entitlement_access_review_latest.json` and `.md` under ignored `data/entitlement_packs/`. Break-glass scopes are review evidence only and do not bypass normal entitlement enforcement.
 
 ## Skill Marketplace Governance And Tenant Rollout
 

@@ -205,6 +205,10 @@ from app.models import (
     TaskRunTransparencyPackRequest,
     TaskRunTransparencyPackResult,
     TenantCapabilityDecision,
+    TenantEntitlementAccessReviewPackRequest,
+    TenantEntitlementAccessReviewPackResult,
+    TenantEntitlementAccessReviewRequest,
+    TenantEntitlementAccessReviewResult,
     TenantEntitlementCoverageRecord,
     TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
@@ -400,6 +404,7 @@ class SkillRegistry:
 class TenantEntitlementService:
     PACK_ID = "tenant_entitlement_pack_latest"
     REVIEW_PACK_ID = "tenant_entitlement_review_pack_latest"
+    ACCESS_REVIEW_ID = "tenant_entitlement_access_review_latest"
 
     DEFAULT_POLICIES = [
         {
@@ -808,6 +813,106 @@ class TenantEntitlementService:
             summary=coverage.summary,
         )
 
+    def access_review(
+        self,
+        request: TenantEntitlementAccessReviewRequest | None = None,
+    ) -> TenantEntitlementAccessReviewResult:
+        request = request or TenantEntitlementAccessReviewRequest()
+        coverage = self.coverage()
+        privileged_rows = self._privileged_access_rows(coverage)
+        break_glass = self._break_glass_drill()
+        bounded_steps = self._access_review_steps(coverage, privileged_rows, break_glass)[
+            : request.max_steps
+        ]
+        blocking_count = sum(1 for step in bounded_steps if step["status"] == "fail")
+        review_count = sum(1 for step in bounded_steps if step["status"] == "warn")
+        readiness_status: SecurityReadinessStatus = (
+            "blocked" if blocking_count else "needs_review" if review_count or privileged_rows else "ready"
+        )
+        observations = {
+            "tenant_count": coverage.summary["tenant_count"],
+            "promoted_skill_count": coverage.summary["promoted_skill_count"],
+            "wildcard_policy_count": coverage.summary["wildcard_policy_count"],
+            "exact_policy_count": coverage.summary["exact_policy_count"],
+            "missing_policy_count": coverage.summary["missing_policy_count"],
+            "denied_audit_event_count": coverage.summary["denied_audit_event_count"],
+            "break_glass_override_count": break_glass["override_count"],
+            "mcp_safe_default": break_glass["mcp_safe_default"],
+        }
+        return TenantEntitlementAccessReviewResult(
+            review_id=self.ACCESS_REVIEW_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "privileged_policy_count": len(privileged_rows),
+                "bounded_step_count": len(bounded_steps),
+                "blocking_step_count": blocking_count,
+                "review_step_count": review_count,
+                "break_glass_override_count": break_glass["override_count"],
+                "wildcard_policy_count": coverage.summary["wildcard_policy_count"],
+                "denied_audit_event_count": coverage.summary["denied_audit_event_count"],
+            },
+            observations=observations,
+            privileged_access_rows=privileged_rows,
+            break_glass_drill=break_glass,
+            bounded_steps=bounded_steps,
+            verification_commands=self._access_review_verification_commands(),
+            patterns_used=[
+                "state observation: compare promoted MCP skills, policy rows, denied audit evidence, and privileged scopes",
+                "bounded action loop: return a finite reviewer checklist with verification commands and stop conditions",
+                "step verification: each access-review step includes local commands or evidence targets",
+            ],
+            limitations=self._access_review_limitations(),
+        )
+
+    async def export_access_review_pack(
+        self,
+        request: TenantEntitlementAccessReviewPackRequest | None = None,
+    ) -> TenantEntitlementAccessReviewPackResult:
+        request = request or TenantEntitlementAccessReviewPackRequest()
+        review = self.access_review(
+            TenantEntitlementAccessReviewRequest(actor=request.actor, max_steps=request.max_steps)
+        )
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.ACCESS_REVIEW_ID}.json"
+        markdown_path = self.output_dir / f"{self.ACCESS_REVIEW_ID}.md"
+        bundle = {
+            "pack_id": self.ACCESS_REVIEW_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "access_review": review.model_dump(mode="json"),
+            "summary": review.summary,
+            "observations": review.observations,
+            "privileged_access_rows": review.privileged_access_rows,
+            "break_glass_drill": review.break_glass_drill,
+            "bounded_steps": review.bounded_steps,
+            "patterns_used": review.patterns_used,
+            "local_verification_commands": review.verification_commands,
+            "limitations": review.limitations,
+        }
+        json_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._access_review_markdown(bundle), encoding="utf-8")
+        self.audit.record(
+            "entitlement.access_review_pack_exported",
+            "entitlement_pack",
+            self.ACCESS_REVIEW_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": review.readiness_status,
+                "privileged_policy_count": review.summary["privileged_policy_count"],
+                "break_glass_override_count": review.summary["break_glass_override_count"],
+            },
+        )
+        return TenantEntitlementAccessReviewPackResult(
+            pack_id=self.ACCESS_REVIEW_ID,
+            generated_at=utc_now(),
+            readiness_status=review.readiness_status,
+            json_path=str(json_path),
+            markdown_path=str(markdown_path),
+            summary=review.summary,
+        )
+
     def _missing_skill_decision(
         self,
         skill_id: str,
@@ -893,6 +998,174 @@ class TenantEntitlementService:
             counts[(tenant_id, skill_id)] = counts.get((tenant_id, skill_id), 0) + 1
         return counts
 
+    def _privileged_access_rows(self, coverage: TenantEntitlementCoverageResult) -> list[JsonDict]:
+        rows: list[JsonDict] = []
+        coverage_by_key = {(record.tenant_id, record.skill_id): record for record in coverage.records}
+        for policy in self.list_policies():
+            privileged_roles = [
+                role for role in policy.allowed_roles if role in {"admin", "reviewer"}
+            ]
+            sensitive_scopes = [
+                scope
+                for scope in policy.required_scopes
+                if scope.endswith(".review") or scope in {"phi.review", "pii.review", "casework.review"}
+            ]
+            if not privileged_roles and not sensitive_scopes and "confidential" not in policy.allowed_data_sensitivities:
+                continue
+            matched_records = [
+                record
+                for key, record in coverage_by_key.items()
+                if key[0] == policy.tenant_id and (policy.skill_id == "*" or key[1] == policy.skill_id)
+            ]
+            rows.append(
+                {
+                    "tenant_id": policy.tenant_id,
+                    "skill_id": policy.skill_id,
+                    "policy_id": self._policy_id(policy),
+                    "privileged_roles": privileged_roles,
+                    "required_sensitive_scopes": sensitive_scopes,
+                    "allows_confidential": "confidential" in policy.allowed_data_sensitivities,
+                    "uses_wildcard_policy": policy.skill_id == "*",
+                    "covered_mcp_skill_count": len(matched_records),
+                    "denied_audit_count": sum(record.denied_audit_count for record in matched_records),
+                    "reviewer_action": self._privileged_reviewer_action(policy, sensitive_scopes),
+                }
+            )
+        return rows
+
+    def _privileged_reviewer_action(
+        self,
+        policy: TenantSkillEntitlementPolicy,
+        sensitive_scopes: list[str],
+    ) -> str:
+        if policy.skill_id == "*":
+            return "replace wildcard privileged access with exact skill policies before production rollout"
+        if sensitive_scopes:
+            return "verify reviewer-only scopes are mapped to IAM groups before allowing hosted deployment"
+        if "confidential" in policy.allowed_data_sensitivities:
+            return "require owner signoff for confidential data access and replay denied-call evidence"
+        return "confirm privileged role list is still least-privilege"
+
+    def _break_glass_drill(self) -> JsonDict:
+        scenarios = [
+            TenantEntitlementMatrixRequest(
+                tenant_id="healthcare",
+                user_id="break-glass-care-agent",
+                role="agent",
+                user_scopes=["skill.invoke", "tenant.healthcare", "break.glass"],
+                skill_ids=["translate_text"],
+            ),
+            TenantEntitlementMatrixRequest(
+                tenant_id="fintech",
+                user_id="break-glass-risk-agent",
+                role="agent",
+                data_sensitivity="confidential",
+                user_scopes=["skill.invoke", "tenant.fintech", "break.glass"],
+                skill_ids=["extract_entities"],
+            ),
+        ]
+        results = []
+        override_count = 0
+        for scenario in scenarios:
+            matrix = self.matrix(scenario)
+            decision = matrix.decisions[0]
+            if decision.decision == "allow":
+                override_count += 1
+            results.append(
+                {
+                    "tenant_id": scenario.tenant_id,
+                    "user_id": scenario.user_id,
+                    "role": scenario.role,
+                    "skill_id": decision.skill_id,
+                    "decision": decision.decision,
+                    "safe_behavior": "deny_and_require_reviewer_scope"
+                    if decision.decision == "deny"
+                    else "review_policy_before_release",
+                    "reasons": decision.reasons,
+                    "missing_scopes": decision.missing_scopes,
+                }
+            )
+        return {
+            "mcp_safe_default": True,
+            "override_count": override_count,
+            "scenario_count": len(results),
+            "scenarios": results,
+            "reviewer_note": (
+                "Break-glass scopes are intentionally not privileged in local policy; denied tools stay denied "
+                "until exact reviewer scopes and owner signoff are added outside runtime invocation."
+            ),
+        }
+
+    def _access_review_steps(
+        self,
+        coverage: TenantEntitlementCoverageResult,
+        privileged_rows: list[JsonDict],
+        break_glass: JsonDict,
+    ) -> list[JsonDict]:
+        wildcard_count = coverage.summary["wildcard_policy_count"]
+        denied_count = coverage.summary["denied_audit_event_count"]
+        return [
+            {
+                "step": "observe_entitlement_state",
+                "status": "pass" if coverage.summary["promoted_skill_count"] else "fail",
+                "evidence": coverage.summary,
+                "verification": "GET /tenants/entitlements/coverage",
+                "next_action": "Review promoted MCP skills and tenant policy coverage before rollout.",
+            },
+            {
+                "step": "reduce_wildcard_privilege",
+                "status": "warn" if wildcard_count else "pass",
+                "evidence": {"wildcard_policy_count": wildcard_count},
+                "verification": "GET /tenants/entitlements/access-review",
+                "next_action": "Add exact tenant/skill policy rows for wildcard-covered MCP tools.",
+            },
+            {
+                "step": "verify_privileged_scopes",
+                "status": "warn" if privileged_rows else "pass",
+                "evidence": {"privileged_policy_count": len(privileged_rows)},
+                "verification": "GET /tenants/entitlements/policies",
+                "next_action": "Map reviewer scopes such as phi.review and pii.review to IAM groups.",
+            },
+            {
+                "step": "replay_denied_pressure",
+                "status": "warn" if denied_count else "pass",
+                "evidence": {"denied_audit_event_count": denied_count},
+                "verification": "GET /audit/events?action=entitlement.denied",
+                "next_action": "Inspect denied traces before relaxing policy or adding exceptions.",
+            },
+            {
+                "step": "prove_break_glass_is_safe",
+                "status": "fail" if break_glass["override_count"] else "pass",
+                "evidence": {
+                    "break_glass_override_count": break_glass["override_count"],
+                    "scenario_count": break_glass["scenario_count"],
+                },
+                "verification": "POST /tenants/entitlements/evaluate",
+                "next_action": "Keep emergency scopes non-privileged unless an owner-approved policy row exists.",
+            },
+            {
+                "step": "export_reviewer_evidence",
+                "status": "pass",
+                "evidence": {"artifact": f"data/entitlement_packs/{self.ACCESS_REVIEW_ID}.md"},
+                "verification": "POST /tenants/entitlements/access-review-pack",
+                "next_action": "Attach the Markdown/JSON pack to the release review.",
+            },
+        ]
+
+    def _access_review_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_tenant_entitlements.py -q",
+            "python -m app.mcp_server tools",
+            "python -m app.demo",
+        ]
+
+    def _access_review_limitations(self) -> list[str]:
+        return [
+            "Access review uses static local entitlement fixtures instead of a production IAM graph.",
+            "Break-glass scenarios are drills only; runtime invocation still requires normal entitlement allow decisions.",
+            "The review pack is local evidence under ignored data/ and should be regenerated after policy changes.",
+        ]
+
     def _markdown(self, bundle: JsonDict) -> str:
         lines = [
             "# Tenant RBAC And Skill Entitlement Pack",
@@ -973,6 +1246,62 @@ class TenantEntitlementService:
                 "",
                 "## Production Patterns",
                 *[f"- {pattern}" for pattern in bundle["production_patterns"]],
+                "",
+                "## Local Verification",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+            ]
+        )
+        return "\n".join(lines)
+
+    def _access_review_markdown(self, bundle: JsonDict) -> str:
+        review = bundle["access_review"]
+        lines = [
+            "# Tenant Entitlement Access Review Pack",
+            "",
+            f"- Readiness: `{review['readiness_status']}`",
+            f"- Privileged policies: `{bundle['summary']['privileged_policy_count']}`",
+            f"- Wildcard policies: `{bundle['summary']['wildcard_policy_count']}`",
+            f"- Break-glass overrides: `{bundle['summary']['break_glass_override_count']}`",
+            f"- Denied audit events: `{bundle['summary']['denied_audit_event_count']}`",
+            "",
+            "## State Observation",
+        ]
+        lines.extend(f"- `{key}`: `{value}`" for key, value in bundle["observations"].items())
+        lines.extend(["", "## Privileged Access Rows"])
+        for row in bundle["privileged_access_rows"][:20]:
+            lines.append(
+                "- "
+                f"`{row['policy_id']}` roles=`{', '.join(row['privileged_roles']) or 'none'}` "
+                f"scopes=`{', '.join(row['required_sensitive_scopes']) or 'none'}` "
+                f"wildcard=`{row['uses_wildcard_policy']}` action={row['reviewer_action']}"
+            )
+        lines.extend(["", "## Break-Glass Drill"])
+        for scenario in bundle["break_glass_drill"]["scenarios"]:
+            lines.append(
+                "- "
+                f"`{scenario['tenant_id']}` / `{scenario['skill_id']}` "
+                f"decision=`{scenario['decision']}` safe_behavior=`{scenario['safe_behavior']}`"
+            )
+        lines.extend(
+            [
+                "",
+                "## Bounded Review Loop",
+            ]
+        )
+        for step in bundle["bounded_steps"]:
+            lines.append(
+                "- "
+                f"`{step['step']}` status=`{step['status']}` "
+                f"verify=`{step['verification']}` next={step['next_action']}"
+            )
+        lines.extend(
+            [
+                "",
+                "## Patterns Used",
+                *[f"- {pattern}" for pattern in bundle["patterns_used"]],
                 "",
                 "## Local Verification",
                 *[f"- `{command}`" for command in bundle["local_verification_commands"]],
@@ -17608,6 +17937,8 @@ class DashboardSmokeService:
             self._endpoint_ref("sandbox_exception_queue", "GET", "/sandbox/exceptions", "Sandbox exception review queue."),
             self._endpoint_ref("sandbox_exception_submit", "POST", "/sandbox/exceptions", "Submits a denied sandbox request for HITL review."),
             self._endpoint_ref("sandbox_exception_pack", "POST", "/sandbox/exceptions/pack", "Writes Sandbox Exception Review artifacts."),
+            self._endpoint_ref("tenant_entitlement_access_review", "GET", "/tenants/entitlements/access-review", "Privileged entitlement access review and break-glass drill."),
+            self._endpoint_ref("tenant_entitlement_access_review_pack", "POST", "/tenants/entitlements/access-review-pack", "Writes Tenant Entitlement Access Review artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
             self._endpoint_ref(
@@ -20632,6 +20963,22 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/tenants/sandbox-export -Method POST -Headers $headers",
                 ["tenant_policy_sandbox_latest.json", "tenant_policy_sandbox_latest.md"],
                 "Tenant-specific allowed, blocked, and review-required MCP skill/workflow evidence.",
+            ),
+            self._catalog_row(
+                "entitlement_packs",
+                "Tenant RBAC Entitlement Evidence",
+                Path("data") / "entitlement_packs",
+                "POST /tenants/entitlements/access-review-pack",
+                "Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review-pack -Method POST -Headers $headers",
+                [
+                    "tenant_entitlement_pack_latest.json",
+                    "tenant_entitlement_pack_latest.md",
+                    "tenant_entitlement_review_pack_latest.json",
+                    "tenant_entitlement_review_pack_latest.md",
+                    "tenant_entitlement_access_review_latest.json",
+                    "tenant_entitlement_access_review_latest.md",
+                ],
+                "Tenant/user RBAC decisions, coverage drift, privileged access review, break-glass drill, and MCP-safe entitlement proof.",
             ),
             self._catalog_row(
                 "marketplace_packs",

@@ -278,9 +278,11 @@ Tenant entitlement checks demonstrate local RBAC, scope enforcement, MCP-safe to
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/evaluate -Method POST -Headers $headers -ContentType "application/json" -Body '{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","user_scopes":["skill.invoke","tenant.healthcare"]}'
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/coverage -Headers $headers
 Invoke-RestMethod http://localhost:8000/tenants/entitlements/review-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review -Headers $headers
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review-pack -Method POST -Headers $headers
 ```
 
-The coverage report compares promoted MCP tools against tenant exact and wildcard policies, flags wildcard-only rows for review, and includes denied `entitlement.denied` audit evidence when enforced calls have been exercised. Review pack export writes `tenant_entitlement_review_pack_latest.json` and `.md` under ignored `data/entitlement_packs/` with governance/tool-governance proof, local verification commands, and limitations.
+The coverage report compares promoted MCP tools against tenant exact and wildcard policies, flags wildcard-only rows for review, and includes denied `entitlement.denied` audit evidence when enforced calls have been exercised. Access review adds privileged-policy rows, break-glass drill checks, state observation, and a bounded reviewer loop with step verification. Review pack exports write `tenant_entitlement_review_pack_latest.json`/`.md` and `tenant_entitlement_access_review_latest.json`/`.md` under ignored `data/entitlement_packs/` with governance/tool-governance proof, local verification commands, and limitations.
 
 ## Skill Marketplace Rollout Approval Evidence
 
