@@ -214,6 +214,11 @@ async def main() -> None:
             note="Demo marketplace approval workflow.",
         )
     )
+    marketplace_promotion_gate = await state.marketplace.promotion_gate(
+        "summarize_document",
+        "internal_ops_local",
+        "demo-marketplace-reviewer",
+    )
     marketplace_approval_pack = await state.marketplace.approval_pack(
         MarketplaceApprovalPackRequest(actor="demo-marketplace-reviewer")
     )
@@ -508,6 +513,10 @@ async def main() -> None:
                 "skill_marketplace_readiness": marketplace_catalog.readiness_status,
                 "marketplace catalog listings": marketplace_catalog.coverage_summary["listing_count"],
                 "marketplace_catalog_listings": marketplace_catalog.coverage_summary["listing_count"],
+                "marketplace promotion gate": marketplace_promotion_gate.readiness_status,
+                "marketplace_promotion_gate": marketplace_promotion_gate.readiness_status,
+                "marketplace promotion can promote": marketplace_promotion_gate.can_promote,
+                "marketplace_promotion_can_promote": marketplace_promotion_gate.can_promote,
                 "tenant rollout approval pack path": marketplace_pack.markdown_path,
                 "tenant_rollout_approval_pack_path": marketplace_pack.markdown_path,
                 "marketplace approval workflow pack path": marketplace_approval_pack.markdown_path,

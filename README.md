@@ -25,7 +25,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill Incident Drill + Recovery Runbook for deterministic local reliability scenarios covering schema breakage, disabled skill invocation, policy denial spikes, latency/capacity breaches, and workflow dependency failures.
 - Tenant Policy Sandbox + Data Sensitivity Simulator for healthcare, fintech, public sector, and internal demo tenants, returning allowed, blocked, and review-required MCP skills/workflows plus guardrails and exportable evidence.
 - Tenant RBAC + Skill Entitlement Pack for local tenant/user scopes, allowed and denied skill policies, MCP-safe tool subsets, entitlement coverage drift review, enforced denied invocation audit events, dashboard review, and ignored `data/entitlement_packs/` artifacts.
-- Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, approval workflow records, owner signoff, rollout stage gates, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
+- Skill Marketplace Governance + Tenant Rollout Approval Pack for reviewed marketplace listings, tenant eligibility, approval workflow records, owner signoff, promotion gates, rollout stage gates, blocked/review-required rollout decisions, disabled-skill blocks, version comparison notes, MCP exposure state, reviewer checklist, and ignored `data/marketplace_packs/` artifacts.
 - Skill Version Compatibility Pack for SemVer checks, deprecated skill warnings, migration recommendations, schema/hash evidence, MCP exposure state, dashboard review, and ignored `data/compatibility_packs/` artifacts.
 - Skill Usage Analytics + Cost Chargeback Pack for usage by skill, tenant/environment, agent, status, MCP exposure, latency bands, token/cost estimates, budget warnings, anomaly flags, disabled-skill blocked events, reviewer controls, and ignored `data/usage_packs/` artifacts.
 - Skill Reliability + Circuit Breaker Pack for per-skill failures, p95 latency, local circuit breaker state, disable/re-enable recommendations, reviewer proof commands, and ignored `data/reliability_packs/` artifacts.
@@ -483,6 +483,7 @@ $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/rollout-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/approvals -Headers $headers
+Invoke-RestMethod http://localhost:8000/marketplace/promotion-gate/summarize_document -Headers $headers
 Invoke-RestMethod http://localhost:8000/marketplace/approvals/submit `
   -Method POST `
   -Headers $headers `
@@ -494,7 +495,7 @@ Get-ChildItem -Recurse -File data\marketplace_packs -ErrorAction SilentlyContinu
 
 `GET /marketplace/catalog` returns approved/promoted/draft/disabled skill listings with versions, tenant eligibility for internal ops, regulated healthcare, fintech/confidential, and public-sector restricted scenarios, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollout rows, and coverage summary. `POST /marketplace/rollout-pack` writes `rollout_approval_pack_latest.json` and `.md` under ignored `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 
-`GET /marketplace/approvals` returns the local approval queue, catalog promotion checks, rollout stage policy, and architecture patterns for durable workflows, human-in-the-loop, governance, and tool governance. `POST /marketplace/approvals/submit` creates a local approval record for one skill and tenant scenario. `POST /marketplace/approvals/{approval_id}/decision` records owner signoff or rejection. `POST /marketplace/approvals/{approval_id}/stage` advances approved records through tenant canary and general availability. `POST /marketplace/approval-pack` writes `marketplace_approval_workflow_latest.json` and `.md` under ignored `data/marketplace_packs/`. The Streamlit dashboard has a `Skill Marketplace` approval workflow panel, and `python -m app.demo` prints Skill Marketplace readiness plus the Tenant Rollout and Approval Workflow pack paths.
+`GET /marketplace/approvals` returns the local approval queue, catalog promotion checks, rollout stage policy, and architecture patterns for durable workflows, human-in-the-loop, governance, and tool governance. `GET /marketplace/promotion-gate/{skill_id}` replays catalog and approval evidence before registry promotion, including schema readiness, tenant policy, risk, approval record, owner signoff, stage gate, failed/warning checks, and remediation steps. `POST /marketplace/approvals/submit` creates a local approval record for one skill and tenant scenario. `POST /marketplace/approvals/{approval_id}/decision` records owner signoff or rejection. `POST /marketplace/approvals/{approval_id}/stage` advances approved records through tenant canary and general availability. `POST /skills/{skill_id}/promote` enforces this gate by default, with `require_marketplace_approval=false` reserved for local break-glass demos. `POST /marketplace/approval-pack` writes `marketplace_approval_workflow_latest.json` and `.md` under ignored `data/marketplace_packs/`. The Streamlit dashboard has a `Skill Marketplace` approval workflow and promotion gate panel, and `python -m app.demo` prints Skill Marketplace readiness plus the Tenant Rollout and Approval Workflow pack paths.
 
 ## Skill Version Compatibility Pack
 
@@ -934,6 +935,17 @@ New manifests can be registered as draft or validated skills for local review. P
 
 ```powershell
 $headers = @{ "X-API-Key" = "dev-local-token" }
+$approval = Invoke-RestMethod http://localhost:8000/marketplace/approvals/submit `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"skill_id":"draft_support_summary","tenant_scenario_id":"internal_ops_local","actor":"platform-admin","owner":"platform-owner"}'
+Invoke-RestMethod "http://localhost:8000/marketplace/approvals/$($approval.approval_id)/decision" `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-owner","decision":"approve","owner_signoff":true}'
+Invoke-RestMethod http://localhost:8000/marketplace/promotion-gate/draft_support_summary -Headers $headers
 Invoke-RestMethod http://localhost:8000/skills/draft_support_summary/promote `
   -Method POST `
   -Headers $headers `
@@ -941,7 +953,7 @@ Invoke-RestMethod http://localhost:8000/skills/draft_support_summary/promote `
   -Body '{"actor":"platform-admin"}'
 ```
 
-Promotion validates the manifest, sets `status=promoted`, keeps `enabled=true`, exposes the skill as an MCP tool, and records `skill.promoted` in the audit log.
+Promotion validates the manifest, checks the local marketplace promotion gate by default, sets `status=promoted`, keeps `enabled=true`, exposes the skill as an MCP tool, and records `skill.promoted` in the audit log.
 
 ## Evaluation And Policy Lab
 

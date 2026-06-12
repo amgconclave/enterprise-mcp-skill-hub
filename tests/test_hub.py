@@ -91,6 +91,38 @@ def test_manifest_validation_registration_and_custom_invocation(
     assert blocked_mcp_call.status_code == 200
     assert blocked_mcp_call.json()["status"] == "failed"
 
+    blocked_promotion = client.post(
+        "/skills/draft_support_summary/promote",
+        json={"actor": "test-admin"},
+        headers=auth_headers,
+    )
+    assert blocked_promotion.status_code == 422
+    assert "marketplace_approval_record" in blocked_promotion.json()["detail"]["failed_check_ids"]
+
+    approval = client.post(
+        "/marketplace/approvals/submit",
+        json={
+            "skill_id": "draft_support_summary",
+            "tenant_scenario_id": "internal_ops_local",
+            "actor": "test-admin",
+            "owner": "test-owner",
+        },
+        headers=auth_headers,
+    )
+    assert approval.status_code == 200
+    decision = client.post(
+        f"/marketplace/approvals/{approval.json()['approval_id']}/decision",
+        json={"actor": "test-owner", "decision": "approve", "owner_signoff": True},
+        headers=auth_headers,
+    )
+    assert decision.status_code == 200
+    gate = client.get(
+        "/marketplace/promotion-gate/draft_support_summary",
+        headers=auth_headers,
+    )
+    assert gate.status_code == 200
+    assert gate.json()["can_promote"] is True
+
     promoted = client.post(
         "/skills/draft_support_summary/promote",
         json={"actor": "test-admin"},

@@ -67,4 +67,4 @@ Request context contributes `role`, `environment`, `data_sensitivity`, and `requ
 
 ## Promotion
 
-Use `POST /skills/{skill_id}/promote` after review. Promotion validates the registered manifest, marks it `status: promoted`, sets `enabled: true`, exposes it through MCP tool discovery, and records an audit event.
+Use `POST /skills/{skill_id}/promote` after review. Promotion validates the registered manifest, checks `GET /marketplace/promotion-gate/{skill_id}` by default, marks it `status: promoted`, sets `enabled: true`, exposes it through MCP tool discovery, and records an audit event. For a draft or validated skill, submit and approve a marketplace record first so owner signoff is available to the gate.

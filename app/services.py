@@ -106,6 +106,7 @@ from app.models import (
     MarketplaceApprovalRecord,
     MarketplaceApprovalSubmitRequest,
     MarketplaceCatalogResult,
+    MarketplacePromotionGateResult,
     MarketplaceReviewState,
     MarketplaceRiskLevel,
     MarketplaceRolloutPackRequest,
@@ -9672,6 +9673,113 @@ class SkillMarketplaceGovernanceService:
             limitations=self._approval_limitations(),
         )
 
+    async def promotion_gate(
+        self,
+        skill_id: str,
+        tenant_scenario_id: str = "internal_ops_local",
+        actor: str = "marketplace-reviewer",
+    ) -> MarketplacePromotionGateResult:
+        catalog = await self.catalog()
+        listing = self._find_listing(catalog, skill_id)
+        scenario = self._find_scenario(catalog, tenant_scenario_id)
+        tenant_decision = self._find_tenant_decision(listing, tenant_scenario_id)
+        checks = self._promotion_checks_for_listing(listing, tenant_decision)
+        approval_record = self._latest_approval(skill_id, tenant_scenario_id)
+        approval_evidence = self._approval_evidence(approval_record)
+
+        already_promoted = listing.lifecycle_status == "promoted" and listing.enabled
+        approval_required = not already_promoted
+        owner_signed = bool(approval_evidence["owner_signoff_recorded"])
+        approved = approval_evidence["status"] == "approved"
+        stage_ready = approval_evidence["current_stage"] in {
+            "owner_signoff",
+            "tenant_canary",
+            "tenant_general_availability",
+        }
+        checks.extend(
+            [
+                {
+                    "id": "marketplace_approval_record",
+                    "status": "pass" if approved or already_promoted else "fail",
+                    "evidence": (
+                        f"Approval `{approval_evidence['approval_id']}` is approved."
+                        if approved
+                        else "Already promoted; existing MCP exposure is the active approval evidence."
+                        if already_promoted
+                        else "No approved marketplace approval record was found for this skill and tenant scenario."
+                    ),
+                },
+                {
+                    "id": "owner_signoff",
+                    "status": "pass" if owner_signed or already_promoted else "fail",
+                    "evidence": (
+                        "Required owner signoff is recorded."
+                        if owner_signed
+                        else "Already promoted; preserve existing owner evidence in the next approval pack."
+                        if already_promoted
+                        else "Owner signoff is required before promotion."
+                    ),
+                },
+                {
+                    "id": "stage_gate",
+                    "status": "pass" if stage_ready or already_promoted else "fail",
+                    "evidence": (
+                        f"Approval stage is `{approval_evidence['current_stage']}`."
+                        if stage_ready
+                        else "Already promoted; run tenant canary before broad rollout."
+                        if already_promoted
+                        else "Approval must reach owner_signoff before registry promotion."
+                    ),
+                },
+            ]
+        )
+        failed = [check for check in checks if check["status"] == "fail"]
+        warned = [check for check in checks if check["status"] == "warn"]
+        can_promote = not failed and (already_promoted or approved and owner_signed and stage_ready)
+        if failed:
+            readiness: SecurityReadinessStatus = "blocked"
+            decision = "block"
+        elif warned or approval_required:
+            readiness = "needs_review"
+            decision = "allow" if can_promote else "review_required"
+        else:
+            readiness = "ready"
+            decision = "allow"
+
+        return MarketplacePromotionGateResult(
+            generated_at=utc_now(),
+            skill_id=skill_id,
+            tenant_scenario_id=tenant_scenario_id,
+            actor=actor,
+            readiness_status=readiness,
+            can_promote=can_promote,
+            decision=decision,
+            listing_snapshot={
+                "skill_id": listing.skill_id,
+                "name": listing.name,
+                "version": listing.version,
+                "lifecycle_status": listing.lifecycle_status,
+                "listing_status": listing.listing_status,
+                "enabled": listing.enabled,
+                "risk_level": listing.risk_level,
+                "required_review_state": listing.required_review_state,
+                "scenario": scenario,
+                "mcp_exposure_state": listing.mcp_exposure_state,
+            },
+            approval_evidence=approval_evidence,
+            checks=checks,
+            failed_check_ids=[check["id"] for check in failed],
+            warning_check_ids=[check["id"] for check in warned],
+            remediation_steps=self._promotion_gate_remediation(listing, tenant_scenario_id, failed, warned),
+            architecture_patterns=[
+                *self._architecture_patterns(),
+                "step verification: registry promotion is blocked until approval, signoff, and gate checks are observable",
+                "state observation: the gate reads current catalog state and approval records before mutation",
+            ],
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._approval_limitations(),
+        )
+
     async def submit_approval(
         self,
         request: MarketplaceApprovalSubmitRequest | None = None,
@@ -10285,6 +10393,7 @@ class SkillMarketplaceGovernanceService:
         tenant_decision: MarketplaceTenantEligibility,
     ) -> list[JsonDict]:
         mcp_exposed = bool(listing.mcp_exposure_state["mcp_exposed"])
+        mcp_ready = bool(listing.mcp_exposure_state["schema_valid"]) and listing.lifecycle_status != "disabled"
         checks = [
             {
                 "id": "schema_valid",
@@ -10296,12 +10405,14 @@ class SkillMarketplaceGovernanceService:
                 ),
             },
             {
-                "id": "mcp_exposed",
-                "status": "pass" if mcp_exposed else "fail",
+                "id": "mcp_exposure_ready",
+                "status": "pass" if mcp_exposed or mcp_ready else "fail",
                 "evidence": (
                     f"Promoted MCP tool `{listing.skill_id}` is exposed."
                     if mcp_exposed
-                    else "Skill is not currently exposed as an MCP tool."
+                    else "Skill has valid schemas and will be exposed by MCP after approval-backed promotion."
+                    if mcp_ready
+                    else "Skill cannot be exposed as an MCP tool until it is enabled and schema-valid."
                 ),
             },
             {
@@ -10496,6 +10607,112 @@ class SkillMarketplaceGovernanceService:
             raise KeyError(f"Unknown marketplace approval: {approval_id}")
         return self._approvals[approval_id]
 
+    def _latest_approval(
+        self,
+        skill_id: str,
+        tenant_scenario_id: str,
+    ) -> MarketplaceApprovalRecord | None:
+        matches = [
+            record
+            for record in self._approvals.values()
+            if record.skill_id == skill_id and record.tenant_scenario_id == tenant_scenario_id
+        ]
+        if not matches:
+            return None
+        return sorted(matches, key=lambda record: (record.updated_at, record.approval_id))[-1]
+
+    def _approval_evidence(self, record: MarketplaceApprovalRecord | None) -> JsonDict:
+        if record is None:
+            return {
+                "approval_id": None,
+                "status": "missing",
+                "current_stage": "missing",
+                "owner_signoff_recorded": False,
+                "signed_by": [],
+                "trace_id": None,
+                "updated_at": None,
+            }
+        signed_by = [
+            signoff["actor"]
+            for signoff in record.signoffs
+            if signoff.get("status") == "signed"
+        ]
+        return {
+            "approval_id": record.approval_id,
+            "status": record.status,
+            "current_stage": record.current_stage,
+            "owner_signoff_recorded": bool(signed_by),
+            "signed_by": signed_by,
+            "trace_id": record.trace_id,
+            "updated_at": record.updated_at.isoformat(),
+        }
+
+    def _promotion_gate_remediation(
+        self,
+        listing: MarketplaceSkillListing,
+        tenant_scenario_id: str,
+        failed: list[JsonDict],
+        warned: list[JsonDict],
+    ) -> list[JsonDict]:
+        failed_ids = {check["id"] for check in failed}
+        warned_ids = {check["id"] for check in warned}
+        steps: list[JsonDict] = []
+        if "schema_valid" in failed_ids or "mcp_exposure_ready" in failed_ids:
+            steps.append(
+                {
+                    "step": "repair_manifest",
+                    "owner": "skill-owner",
+                    "action": f"Fix `{listing.skill_id}` manifest schemas and ensure the skill is enabled before approval.",
+                    "verification": "python -m app.evals.run_conformance",
+                }
+            )
+        if "tenant_policy" in failed_ids:
+            steps.append(
+                {
+                    "step": "select_allowed_tenant_scenario",
+                    "owner": "tenant-owner",
+                    "action": f"Use an allowed or review-required tenant scenario instead of `{tenant_scenario_id}`.",
+                    "verification": "Invoke-RestMethod http://localhost:8000/marketplace/catalog -Headers $headers",
+                }
+            )
+        if "risk_level" in failed_ids or "tenant_policy" in warned_ids or "risk_level" in warned_ids:
+            steps.append(
+                {
+                    "step": "attach_risk_review",
+                    "owner": "security-reviewer",
+                    "action": "Attach security/tenant review notes before owner signoff.",
+                    "verification": "Invoke-RestMethod http://localhost:8000/marketplace/approvals -Headers $headers",
+                }
+            )
+        if "marketplace_approval_record" in failed_ids:
+            steps.append(
+                {
+                    "step": "submit_marketplace_approval",
+                    "owner": "marketplace-reviewer",
+                    "action": f"Submit an approval request for `{listing.skill_id}` and `{tenant_scenario_id}`.",
+                    "verification": "POST /marketplace/approvals/submit",
+                }
+            )
+        if "owner_signoff" in failed_ids or "stage_gate" in failed_ids:
+            steps.append(
+                {
+                    "step": "record_owner_signoff",
+                    "owner": "platform-owner",
+                    "action": "Approve the marketplace record with owner_signoff=true before promotion.",
+                    "verification": "POST /marketplace/approvals/{approval_id}/decision",
+                }
+            )
+        if not steps:
+            steps.append(
+                {
+                    "step": "promote_skill",
+                    "owner": "platform-owner",
+                    "action": f"Promotion gate is clear for `{listing.skill_id}`.",
+                    "verification": f"POST /skills/{listing.skill_id}/promote",
+                }
+            )
+        return steps
+
     def _architecture_patterns(self) -> list[str]:
         return [
             "durable workflows: approval records capture stage, signoff, trace, checks, and artifact export state",
@@ -10516,7 +10733,7 @@ class SkillMarketplaceGovernanceService:
             "python -m app.mcp_server tools",
             "python -m app.mcp_server resources",
             "python -m app.mcp_server prompts",
-            'rg "marketplace/catalog|marketplace/rollout-pack|marketplace/approvals|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
+            'rg "marketplace/catalog|marketplace/promotion-gate|marketplace/rollout-pack|marketplace/approvals|Skill Marketplace|Tenant Rollout|marketplace_packs|rollout approval" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\marketplace_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
 
@@ -18324,6 +18541,7 @@ class DashboardSmokeService:
             self._endpoint_ref("marketplace_catalog", "GET", "/marketplace/catalog", "Skill Marketplace catalog."),
             self._endpoint_ref("marketplace_rollout_pack", "POST", "/marketplace/rollout-pack", "Writes Tenant Rollout approval pack."),
             self._endpoint_ref("marketplace_approvals", "GET", "/marketplace/approvals", "Skill Marketplace approval queue."),
+            self._endpoint_ref("marketplace_promotion_gate", "GET", "/marketplace/promotion-gate/{skill_id}", "Checks approval evidence before registry promotion."),
             self._endpoint_ref("marketplace_approval_submit", "POST", "/marketplace/approvals/submit", "Submits a tenant rollout approval workflow."),
             self._endpoint_ref("marketplace_approval_decision", "POST", "/marketplace/approvals/{approval_id}/decision", "Records owner signoff or rejection."),
             self._endpoint_ref("marketplace_approval_stage", "POST", "/marketplace/approvals/{approval_id}/stage", "Advances approved tenant rollout stages."),

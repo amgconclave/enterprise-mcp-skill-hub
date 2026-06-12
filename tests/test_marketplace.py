@@ -204,6 +204,63 @@ def test_approval_workflow_blocks_failed_catalog_promotion_checks(tmp_path: Path
     assert queue.summary["failed_catalog_check_count"] >= 1
 
 
+def test_promotion_gate_requires_marketplace_owner_signoff(tmp_path: Path) -> None:
+    state = marketplace_state(tmp_path)
+    state.registry.register(
+        SkillManifest(
+            id="draft_promotion_candidate",
+            name="Draft Promotion Candidate",
+            version="0.1.0",
+            description="Draft skill that must pass marketplace promotion gates.",
+            status="draft",
+            input_schema=schema({"text": {"type": "string"}}, ["text"]),
+            output_schema=schema({"result": {"type": "string"}}, ["result"]),
+        ),
+        actor="pytest",
+    )
+
+    blocked = asyncio.run(
+        state.marketplace.promotion_gate(
+            "draft_promotion_candidate",
+            "internal_ops_local",
+            "pytest-marketplace-reviewer",
+        )
+    )
+    submitted = asyncio.run(
+        state.marketplace.submit_approval(
+            MarketplaceApprovalSubmitRequest(
+                skill_id="draft_promotion_candidate",
+                tenant_scenario_id="internal_ops_local",
+                actor="pytest-marketplace-reviewer",
+                owner="pytest-platform-owner",
+            )
+        )
+    )
+    signed = state.marketplace.decide_approval(
+        submitted.approval_id,
+        MarketplaceApprovalDecisionRequest(
+            actor="pytest-platform-owner",
+            decision="approve",
+            owner_signoff=True,
+        ),
+    )
+    allowed = asyncio.run(
+        state.marketplace.promotion_gate(
+            "draft_promotion_candidate",
+            "internal_ops_local",
+            "pytest-marketplace-reviewer",
+        )
+    )
+
+    assert blocked.can_promote is False
+    assert "marketplace_approval_record" in blocked.failed_check_ids
+    assert submitted.status == "pending"
+    assert signed.current_stage == "owner_signoff"
+    assert allowed.can_promote is True
+    assert allowed.approval_evidence["approval_id"] == submitted.approval_id
+    assert any("state observation" in pattern for pattern in allowed.architecture_patterns)
+
+
 def test_approval_pack_writes_workflow_artifacts(tmp_path: Path) -> None:
     state = marketplace_state(tmp_path)
     asyncio.run(
@@ -270,6 +327,10 @@ def test_marketplace_endpoints_return_catalog_and_pack(tmp_path: Path) -> None:
         headers=HEADERS,
     )
     approvals = client.get("/marketplace/approvals", headers=HEADERS)
+    gate = client.get(
+        "/marketplace/promotion-gate/summarize_document",
+        headers=HEADERS,
+    )
     approval_pack = client.post(
         "/marketplace/approval-pack",
         json={"actor": "pytest-marketplace-reviewer"},
@@ -290,6 +351,9 @@ def test_marketplace_endpoints_return_catalog_and_pack(tmp_path: Path) -> None:
     assert stage.json()["current_stage"] == "tenant_canary"
     assert approvals.status_code == 200
     assert approvals.json()["summary"]["approval_record_count"] == 1
+    assert gate.status_code == 200
+    assert gate.json()["can_promote"] is True
+    assert gate.json()["approval_evidence"]["status"] == "approved"
     assert approval_pack.status_code == 200
     assert approval_pack.json()["pack_id"] == "marketplace_approval_workflow_latest"
     assert Path(approval_pack.json()["json_path"]).exists()

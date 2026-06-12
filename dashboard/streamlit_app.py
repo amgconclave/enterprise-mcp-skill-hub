@@ -846,6 +846,40 @@ elif view == "Skill Marketplace":
             use_container_width=True,
             hide_index=True,
         )
+        gate_col_skill, gate_col_scenario = st.columns(2)
+        with gate_col_skill:
+            gate_skill = st.selectbox(
+                "Promotion gate skill",
+                [listing.skill_id for listing in catalog.listings],
+                key="marketplace_gate_skill",
+            )
+        with gate_col_scenario:
+            gate_scenario = st.selectbox(
+                "Promotion gate tenant",
+                [scenario["id"] for scenario in catalog.tenant_scenarios],
+                key="marketplace_gate_scenario",
+            )
+        gate = run_async(
+            state.marketplace.promotion_gate(
+                gate_skill,
+                gate_scenario,
+                "streamlit-marketplace-reviewer",
+            )
+        )
+        gate_ready, gate_decision, gate_failed, gate_warn = st.columns(4)
+        gate_ready.metric("Promotion gate", gate.readiness_status.upper())
+        gate_decision.metric("Can promote", str(gate.can_promote).upper())
+        gate_failed.metric("Failed checks", len(gate.failed_check_ids))
+        gate_warn.metric("Warnings", len(gate.warning_check_ids))
+        st.dataframe(gate.checks, use_container_width=True, hide_index=True)
+        with st.expander("Promotion gate remediation"):
+            st.json(
+                {
+                    "approval_evidence": gate.approval_evidence,
+                    "remediation_steps": gate.remediation_steps,
+                    "architecture_patterns": gate.architecture_patterns,
+                }
+            )
         col_submit, col_decide, col_stage = st.columns(3)
         with col_submit:
             selected_skill = st.selectbox(

@@ -18,7 +18,7 @@ Only skills that are both `enabled=true` and `status=promoted` are exposed as to
 
 Draft, validated, disabled, or schema-invalid skills do not appear in `list_tools()` and fail if called directly through the MCP adapter. The demo agent selects from `list_tools()`, so it cannot use unpromoted skills.
 
-Promotion is handled through `POST /skills/{skill_id}/promote`, which validates the manifest, marks it promoted/enabled, and records `skill.promoted` in the audit log.
+Promotion is handled through `POST /skills/{skill_id}/promote`, which validates the manifest, checks the marketplace promotion gate by default, marks it promoted/enabled, and records `skill.promoted` in the audit log. `GET /marketplace/promotion-gate/{skill_id}` exposes the pre-mutation evidence: schema readiness, tenant policy result, risk level, approval record, owner signoff, and stage gate.
 
 ## Policy Enforcement
 
@@ -123,6 +123,8 @@ Break-glass scopes are modeled as a review drill, not a runtime bypass. The acce
 `GET /marketplace/catalog` uses the same MCP exposure rules as tool discovery, but it keeps non-exposed draft, approved/validated, and disabled skills visible as governed marketplace listings. Each listing reports version history, Tenant Rollout eligibility for internal ops, regulated healthcare, fintech/confidential, and public-sector restricted scenarios, risk level, required review state, usage signals, MCP exposure state, and version comparison notes.
 
 `POST /marketplace/rollout-pack` writes JSON/Markdown under `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, reviewer checklist, local proof commands, and limitations. Disabled skills cannot roll out or invoke, and they remain hidden from `GET /mcp/tools` until re-enabled and promoted.
+
+`GET /marketplace/promotion-gate/{skill_id}` is the registry mutation guard for draft or validated skills. It reads current catalog state and approval records, then returns `can_promote`, failed/warning check IDs, remediation steps, architecture patterns, and proof commands. `POST /skills/{skill_id}/promote` uses this gate by default so MCP discovery cannot be widened without owner-signoff evidence.
 
 ## Skill Usage Analytics MCP Exposure
 

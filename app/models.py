@@ -730,6 +730,25 @@ class MarketplaceApprovalPackRequest(BaseModel):
     actor: str = "marketplace-reviewer"
 
 
+class MarketplacePromotionGateResult(BaseModel):
+    generated_at: datetime
+    skill_id: str
+    tenant_scenario_id: str
+    actor: str
+    readiness_status: SecurityReadinessStatus
+    can_promote: bool
+    decision: Literal["allow", "review_required", "block"]
+    listing_snapshot: JsonDict
+    approval_evidence: JsonDict
+    checks: list[JsonDict] = Field(default_factory=list)
+    failed_check_ids: list[str] = Field(default_factory=list)
+    warning_check_ids: list[str] = Field(default_factory=list)
+    remediation_steps: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class MarketplaceApprovalRecord(BaseModel):
     approval_id: str
     skill_id: str
@@ -2150,6 +2169,8 @@ class SkillStatusRequest(BaseModel):
 
 class PromoteSkillRequest(BaseModel):
     actor: str = "demo-user"
+    tenant_scenario_id: str = "internal_ops_local"
+    require_marketplace_approval: bool = True
 
 
 class AgentRunRequest(BaseModel):

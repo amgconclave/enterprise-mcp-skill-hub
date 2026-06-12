@@ -94,6 +94,7 @@ from app.models import (
     MarketplaceApprovalRecord,
     MarketplaceApprovalSubmitRequest,
     MarketplaceCatalogResult,
+    MarketplacePromotionGateResult,
     MarketplaceRolloutPackRequest,
     MarketplaceRolloutPackResult,
     MarketplaceStageAdvanceRequest,
@@ -449,6 +450,19 @@ async def marketplace_rollout_pack(
 @app.get("/marketplace/approvals", response_model=MarketplaceApprovalQueueResult)
 async def marketplace_approval_queue(_: str = Depends(require_api_key)) -> MarketplaceApprovalQueueResult:
     return await state.marketplace.approval_queue()
+
+
+@app.get("/marketplace/promotion-gate/{skill_id}", response_model=MarketplacePromotionGateResult)
+async def marketplace_promotion_gate(
+    skill_id: str,
+    tenant_scenario_id: str = "internal_ops_local",
+    actor: str = "marketplace-reviewer",
+    _: str = Depends(require_api_key),
+) -> MarketplacePromotionGateResult:
+    try:
+        return await state.marketplace.promotion_gate(skill_id, tenant_scenario_id, actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/marketplace/approvals/submit", response_model=MarketplaceApprovalRecord)
@@ -973,7 +987,7 @@ def register_skill(request: RegisterSkillRequest, _: str = Depends(require_api_k
 
 
 @app.post("/skills/{skill_id}/promote", response_model=SkillManifest)
-def promote_skill(
+async def promote_skill(
     skill_id: str,
     request: PromoteSkillRequest,
     _: str = Depends(require_api_key),
@@ -986,6 +1000,23 @@ def promote_skill(
     state.audit.record("skill.validated", "skill", skill_id, new_trace_id(), request.actor)
     if not result.valid:
         raise HTTPException(status_code=422, detail=result.errors)
+    if request.require_marketplace_approval:
+        gate = await state.marketplace.promotion_gate(
+            skill_id,
+            request.tenant_scenario_id,
+            request.actor,
+        )
+        if not gate.can_promote:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Marketplace promotion gate blocked skill promotion.",
+                    "failed_check_ids": gate.failed_check_ids,
+                    "warning_check_ids": gate.warning_check_ids,
+                    "remediation_steps": gate.remediation_steps,
+                    "approval_evidence": gate.approval_evidence,
+                },
+            )
     return state.registry.promote(skill_id, request.actor)
 
 

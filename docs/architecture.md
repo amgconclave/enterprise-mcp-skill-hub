@@ -293,7 +293,9 @@ The project keeps governance close to the skill runtime:
 2. `SkillMarketplaceGovernanceService` lists every registered skill, including promoted, approved/validated, draft, and disabled lifecycle states.
 3. The service applies deterministic Tenant Rollout scenarios for internal ops, regulated healthcare, fintech confidential production, and public-sector restricted production.
 4. Each listing returns tenant eligibility, risk level, required review state, usage signals, MCP exposure state, version comparison notes, disabled-skill blocks, and coverage summary.
-5. `POST /marketplace/rollout-pack` writes Markdown and JSON under ignored `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, reviewer checklist, local proof commands, and limitations.
+5. `GET /marketplace/promotion-gate/{skill_id}` observes current catalog state plus approval records before a registry mutation, then returns pass/fail checks, owner-signoff evidence, stage readiness, and remediation steps.
+6. `POST /skills/{skill_id}/promote` uses that gate by default so MCP tool discovery cannot expand without marketplace approval evidence.
+7. `POST /marketplace/rollout-pack` writes Markdown and JSON under ignored `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, reviewer checklist, local proof commands, and limitations.
 
 ## Skill Usage Analytics And Chargeback Flow
 
