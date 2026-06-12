@@ -34,6 +34,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Provider Failover Drill Pack for deterministic hosted-provider outage scenarios, mock fallback decisions, reviewer re-enable gates, replay commands, cost deltas, and ignored `data/provider_failover/` artifacts.
 - Config Hygiene + Secret Rotation Pack for `.env.example`, `.gitignore`, provider credential gates, redacted local secret findings, rotation guidance, and ignored `data/config_hygiene/` artifacts.
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
+- Human Review SLA Pack for workflow review, marketplace approval, and sandbox exception queues with SLA status, escalation owner, recommended action, trace evidence, and ignored `data/review_sla/` artifacts.
 - Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
 - Agent Society Evaluation Pack for role-playing agent coverage, shared memory alignment, governed handoff checks, MCP tool-use evidence, policy-stop evaluation, and ignored `data/agent_society_evals/` artifacts.
 - Worker Scale-Out Runbook and Queue Admission Pack for local worker pools, tenant fair-share admission, sandbox preflight, transparent queued runs, capacity-backed scale recommendations, and ignored `data/worker_runbooks/` artifacts.
@@ -56,7 +57,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -585,6 +586,19 @@ Get-ChildItem -Recurse -File data\platform_packs -ErrorAction SilentlyContinue |
 ```
 
 `GET /platform/pack` rolls up durable workflow templates, human-in-the-loop review state, governance/conformance posture, provider fallback readiness, MCP tool governance, estimated cost/trace signals, and handoff readiness into one platform-team report. `POST /platform/pack/export` writes `governed_skill_platform_pack_latest.json` and `.md` under ignored `data/platform_packs/`. The Streamlit dashboard has a `Platform Pack` view, and `python -m app.demo` prints platform pack readiness plus the artifact path.
+
+## Human Review SLA Pack
+
+Inspect and export one SLA view across local human-review queues:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/reviews/sla -Headers $headers
+Invoke-RestMethod http://localhost:8000/reviews/sla-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\review_sla -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /reviews/sla` normalizes workflow template reviews, marketplace rollout approvals, and sandbox exceptions into SLA rows with owner, status, escalation level, trace evidence, and recommended action. `POST /reviews/sla-pack` writes `human_review_sla_pack_latest.json` and `.md` under ignored `data/review_sla/`. The Streamlit dashboard has a `Review SLA` view, and `python -m app.demo` prints review SLA readiness plus the artifact path.
 
 ## Agent Collaboration Pack
 

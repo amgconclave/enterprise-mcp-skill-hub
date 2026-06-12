@@ -24,6 +24,7 @@ data/provider_packs/
 data/provider_failover/
 data/config_hygiene/
 data/platform_packs/
+data/review_sla/
 data/agent_collaboration/
 data/agent_society_evals/
 data/worker_runbooks/

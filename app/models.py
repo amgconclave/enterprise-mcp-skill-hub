@@ -1380,6 +1380,55 @@ class GovernedSkillPlatformPackExportResult(BaseModel):
     summary: JsonDict
 
 
+class ReviewSlaItem(BaseModel):
+    item_id: str
+    queue: Literal["workflow_review", "marketplace_approval", "sandbox_exception"]
+    subject: str
+    raw_status: str
+    sla_status: Literal["on_track", "due_soon", "breached", "closed"]
+    escalation_level: Literal["none", "watch", "escalate"]
+    owner: str
+    submitted_at: datetime
+    updated_at: datetime
+    age_hours: float
+    sla_hours: float
+    time_remaining_hours: float
+    recommended_action: str
+    evidence_refs: list[JsonDict] = Field(default_factory=list)
+    trace_ids: list[str] = Field(default_factory=list)
+    source_payload: JsonDict = Field(default_factory=dict)
+
+
+class ReviewSlaReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    queue_summaries: list[JsonDict] = Field(default_factory=list)
+    items: list[ReviewSlaItem] = Field(default_factory=list)
+    escalation_policy: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ReviewSlaPackRequest(BaseModel):
+    actor: str = "review-ops-owner"
+    workflow_review_sla_hours: float = Field(default=24.0, ge=0.0)
+    marketplace_approval_sla_hours: float = Field(default=48.0, ge=0.0)
+    sandbox_exception_sla_hours: float = Field(default=8.0, ge=0.0)
+    due_soon_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
+
+
+class ReviewSlaPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class WorkerRunTimelineEvent(BaseModel):
     timestamp: datetime
     status: WorkerRunStatus

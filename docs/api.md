@@ -76,6 +76,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /config/hygiene-pack` - writes the Config Hygiene + Secret Rotation Pack Markdown/JSON under ignored local folder `data/config_hygiene/`.
 - `GET /platform/pack` - returns the Governed Skill Platform Pack report with durable workflow, human review, governance, provider flexibility, tool governance, cost/trace, and handoff evidence.
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
+- `GET /reviews/sla` - returns a Human Review SLA report across workflow reviews, marketplace approvals, and sandbox exceptions with SLA status, escalation level, owner, trace evidence, and recommended actions.
+- `POST /reviews/sla-pack` - writes the Human Review SLA Pack Markdown/JSON under ignored local folder `data/review_sla/`.
 - `POST /agents/collaborate` - runs a governed multi-agent conversation using intake, retrieval, synthesis, action, and governance reviewer roles over MCP tools.
 - `POST /agents/collaboration-pack` - writes the Agent Collaboration Pack Markdown/JSON under ignored local folder `data/agent_collaboration/`.
 - `GET /agents/society-eval` - evaluates role-playing agents, shared memory alignment, MCP tool use, handoff checks, and policy-gate stop behavior.

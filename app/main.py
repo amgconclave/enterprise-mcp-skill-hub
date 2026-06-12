@@ -133,6 +133,9 @@ from app.models import (
     ReviewerQuickstartResult,
     ReviewerWalkthroughPackRequest,
     ReviewerWalkthroughPackResult,
+    ReviewSlaPackRequest,
+    ReviewSlaPackResult,
+    ReviewSlaReport,
     RuntimeDemoPackRequest,
     RuntimeDemoPackResult,
     RuntimeDemoReadinessResult,
@@ -665,6 +668,19 @@ async def export_governed_skill_platform_pack(
     _: str = Depends(require_api_key),
 ) -> GovernedSkillPlatformPackExportResult:
     return await state.platform_pack.export(request or GovernedSkillPlatformPackRequest())
+
+
+@app.get("/reviews/sla", response_model=ReviewSlaReport)
+async def review_sla_report(_: str = Depends(require_api_key)) -> ReviewSlaReport:
+    return await state.review_sla.report()
+
+
+@app.post("/reviews/sla-pack", response_model=ReviewSlaPackResult)
+async def review_sla_pack(
+    request: ReviewSlaPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> ReviewSlaPackResult:
+    return await state.review_sla.pack(request or ReviewSlaPackRequest())
 
 
 @app.get("/workers/runs", response_model=list[WorkerSkillRunRecord])

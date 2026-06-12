@@ -156,6 +156,10 @@ from app.models import (
     ReviewerQuickstartResult,
     ReviewerWalkthroughPackRequest,
     ReviewerWalkthroughPackResult,
+    ReviewSlaItem,
+    ReviewSlaPackRequest,
+    ReviewSlaPackResult,
+    ReviewSlaReport,
     RuntimeDemoPackRequest,
     RuntimeDemoPackResult,
     RuntimeDemoReadinessResult,
@@ -17520,6 +17524,7 @@ class DashboardSmokeService:
             {"id": "provider_failover", "label": "Provider Failover", "purpose": "Provider outage drill and mock fallback proof."},
             {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
+            {"id": "review_sla", "label": "Review SLA", "purpose": "Human-review queue SLA and escalation evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
@@ -17583,6 +17588,8 @@ class DashboardSmokeService:
             self._endpoint_ref("config_hygiene_pack", "POST", "/config/hygiene-pack", "Writes Config Hygiene artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
+            self._endpoint_ref("review_sla", "GET", "/reviews/sla", "Human-review SLA and escalation report."),
+            self._endpoint_ref("review_sla_pack", "POST", "/reviews/sla-pack", "Writes Human Review SLA artifacts."),
             self._endpoint_ref("agent_collaborate", "POST", "/agents/collaborate", "Runs governed multi-agent collaboration over MCP skills."),
             self._endpoint_ref("agent_collaboration_pack", "POST", "/agents/collaboration-pack", "Writes Agent Collaboration Pack artifacts."),
             self._endpoint_ref("agent_society_eval", "GET", "/agents/society-eval", "Evaluates role-playing agents, shared memory, handoffs, tool use, and policy stops."),
@@ -17656,6 +17663,7 @@ class DashboardSmokeService:
             self._artifact_tab("provider_failover", "Provider Failover", "Failover Pack", "data/provider_failover/"),
             self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
+            self._artifact_tab("review_sla", "Review SLA", "SLA Pack", "data/review_sla/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
@@ -19895,6 +19903,423 @@ class GovernedSkillPlatformPackService:
         return "\n".join(lines)
 
 
+class ReviewSlaService:
+    REPORT_ID = "human_review_sla_latest"
+    PACK_ID = "human_review_sla_pack_latest"
+    OPEN_STATUSES = {
+        "workflow_review": {"in_review"},
+        "marketplace_approval": {"pending"},
+        "sandbox_exception": {"pending"},
+    }
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "review_sla"
+
+    async def report(
+        self,
+        request: ReviewSlaPackRequest | None = None,
+    ) -> ReviewSlaReport:
+        request = request or ReviewSlaPackRequest()
+        items = await self._items(request)
+        open_items = [item for item in items if item.sla_status != "closed"]
+        breached = [item for item in open_items if item.sla_status == "breached"]
+        due_soon = [item for item in open_items if item.sla_status == "due_soon"]
+        readiness_status: SecurityReadinessStatus = "ready"
+        if breached:
+            readiness_status = "blocked"
+        elif due_soon or open_items:
+            readiness_status = "needs_review"
+        queue_summaries = self._queue_summaries(items)
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "tracked_item_count": len(items),
+            "open_item_count": len(open_items),
+            "closed_item_count": len(items) - len(open_items),
+            "breached_count": len(breached),
+            "due_soon_count": len(due_soon),
+            "escalation_count": sum(1 for item in open_items if item.escalation_level == "escalate"),
+            "watch_count": sum(1 for item in open_items if item.escalation_level == "watch"),
+            "artifact_directory": str(self.output_dir),
+        }
+        return ReviewSlaReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            queue_summaries=queue_summaries,
+            items=items,
+            escalation_policy=self._escalation_policy(request),
+            architecture_patterns=[
+                "human-in-the-loop",
+                "durable workflows",
+                "governance",
+                "handoffs",
+                "state observation",
+                "step verification",
+            ],
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def pack(
+        self,
+        request: ReviewSlaPackRequest | None = None,
+    ) -> ReviewSlaPackResult:
+        request = request or ReviewSlaPackRequest()
+        report = await self.report(request)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "review_sla": report.model_dump(mode="json"),
+            "queue_summaries": report.queue_summaries,
+            "escalation_policy": report.escalation_policy,
+            "architecture_patterns": report.architecture_patterns,
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "review_sla.pack_exported",
+            "review_sla_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "open_item_count": report.summary["open_item_count"],
+                "breached_count": report.summary["breached_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return ReviewSlaPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    async def _items(self, request: ReviewSlaPackRequest) -> list[ReviewSlaItem]:
+        workflow_items = [
+            self._workflow_item(review, request.workflow_review_sla_hours, request.due_soon_ratio)
+            for review in self.app_state.workflows.reviews()
+        ]
+        marketplace_queue = await self.app_state.marketplace.approval_queue()
+        marketplace_items = [
+            self._marketplace_item(record, request.marketplace_approval_sla_hours, request.due_soon_ratio)
+            for record in marketplace_queue.approval_records
+        ]
+        sandbox_queue = self.app_state.sandbox_exceptions.queue()
+        sandbox_items = [
+            self._sandbox_item(record, request.sandbox_exception_sla_hours, request.due_soon_ratio)
+            for record in sandbox_queue.records
+        ]
+        items = [*workflow_items, *marketplace_items, *sandbox_items]
+        return sorted(items, key=lambda item: (item.sla_status == "closed", item.queue, item.submitted_at))
+
+    def _workflow_item(
+        self,
+        review: WorkflowTemplateReview,
+        sla_hours: float,
+        due_soon_ratio: float,
+    ) -> ReviewSlaItem:
+        sla_status, escalation_level, age_hours, remaining = self._sla_status(
+            "workflow_review",
+            review.status,
+            review.submitted_at,
+            sla_hours,
+            due_soon_ratio,
+        )
+        return ReviewSlaItem(
+            item_id=review.template_id,
+            queue="workflow_review",
+            subject=review.template.name,
+            raw_status=review.status,
+            sla_status=sla_status,
+            escalation_level=escalation_level,
+            owner=review.reviewed_by or review.submitted_by,
+            submitted_at=review.submitted_at,
+            updated_at=review.updated_at,
+            age_hours=age_hours,
+            sla_hours=sla_hours,
+            time_remaining_hours=remaining,
+            recommended_action=self._recommended_action(
+                "workflow_review",
+                sla_status,
+                review.template_id,
+                review.validation.validation_status,
+            ),
+            evidence_refs=[
+                {"kind": "endpoint", "ref": f"POST /workflows/{review.template_id}/approve"},
+                {"kind": "endpoint", "ref": f"POST /workflows/{review.template_id}/reject"},
+                {"kind": "endpoint", "ref": f"POST /workflows/{review.template_id}/review-evidence"},
+            ],
+            trace_ids=self._trace_ids("workflow_template", review.template_id),
+            source_payload=review.model_dump(mode="json"),
+        )
+
+    def _marketplace_item(
+        self,
+        record: MarketplaceApprovalRecord,
+        sla_hours: float,
+        due_soon_ratio: float,
+    ) -> ReviewSlaItem:
+        sla_status, escalation_level, age_hours, remaining = self._sla_status(
+            "marketplace_approval",
+            record.status,
+            record.created_at,
+            sla_hours,
+            due_soon_ratio,
+        )
+        return ReviewSlaItem(
+            item_id=record.approval_id,
+            queue="marketplace_approval",
+            subject=f"{record.skill_id} -> {record.tenant_scenario_id}",
+            raw_status=record.status,
+            sla_status=sla_status,
+            escalation_level=escalation_level,
+            owner=record.owner,
+            submitted_at=record.created_at,
+            updated_at=record.updated_at,
+            age_hours=age_hours,
+            sla_hours=sla_hours,
+            time_remaining_hours=remaining,
+            recommended_action=self._recommended_action(
+                "marketplace_approval",
+                sla_status,
+                record.approval_id,
+                record.current_stage,
+            ),
+            evidence_refs=[
+                {"kind": "endpoint", "ref": f"POST /marketplace/approvals/{record.approval_id}/decision"},
+                {"kind": "endpoint", "ref": f"POST /marketplace/approvals/{record.approval_id}/stage"},
+                {"kind": "endpoint", "ref": "POST /marketplace/approval-pack"},
+            ],
+            trace_ids=[record.trace_id, *self._trace_ids("marketplace_approval", record.approval_id)],
+            source_payload=record.model_dump(mode="json"),
+        )
+
+    def _sandbox_item(
+        self,
+        record: SandboxExceptionRecord,
+        sla_hours: float,
+        due_soon_ratio: float,
+    ) -> ReviewSlaItem:
+        sla_status, escalation_level, age_hours, remaining = self._sla_status(
+            "sandbox_exception",
+            record.status,
+            record.created_at,
+            sla_hours,
+            due_soon_ratio,
+        )
+        return ReviewSlaItem(
+            item_id=record.exception_id,
+            queue="sandbox_exception",
+            subject=f"{record.skill_id}:{record.action_class}",
+            raw_status=record.status,
+            sla_status=sla_status,
+            escalation_level=escalation_level,
+            owner=record.reviewer or record.requested_by,
+            submitted_at=record.created_at,
+            updated_at=record.updated_at,
+            age_hours=age_hours,
+            sla_hours=sla_hours,
+            time_remaining_hours=remaining,
+            recommended_action=self._recommended_action(
+                "sandbox_exception",
+                sla_status,
+                record.exception_id,
+                record.sandbox_decision.decision,
+            ),
+            evidence_refs=[
+                {"kind": "endpoint", "ref": f"POST /sandbox/exceptions/{record.exception_id}/decision"},
+                {"kind": "endpoint", "ref": "POST /sandbox/exceptions/pack"},
+                {"kind": "trace", "ref": record.trace_id},
+            ],
+            trace_ids=[record.trace_id, record.sandbox_decision.trace_id],
+            source_payload=record.model_dump(mode="json"),
+        )
+
+    def _sla_status(
+        self,
+        queue: str,
+        raw_status: str,
+        submitted_at: datetime,
+        sla_hours: float,
+        due_soon_ratio: float,
+    ) -> tuple[str, str, float, float]:
+        age_hours = round((utc_now() - submitted_at).total_seconds() / 3600, 2)
+        remaining = round(sla_hours - age_hours, 2)
+        if raw_status not in self.OPEN_STATUSES[queue]:
+            return "closed", "none", age_hours, remaining
+        if remaining <= 0:
+            return "breached", "escalate", age_hours, remaining
+        due_soon_window = max(sla_hours * due_soon_ratio, 0.25 if sla_hours else 0)
+        if remaining <= due_soon_window:
+            return "due_soon", "watch", age_hours, remaining
+        return "on_track", "none", age_hours, remaining
+
+    def _recommended_action(
+        self,
+        queue: str,
+        sla_status: str,
+        item_id: str,
+        context: str,
+    ) -> str:
+        if sla_status == "closed":
+            return "No action required; retain the decision evidence for audit replay."
+        if queue == "workflow_review":
+            if context == "invalid":
+                return f"Reject or return `{item_id}` to the workflow owner with validation errors."
+            if sla_status == "breached":
+                return f"Escalate `{item_id}` to a workflow reviewer and export review evidence."
+            return f"Review `{item_id}` and approve or reject before it becomes an SLA breach."
+        if queue == "marketplace_approval":
+            if sla_status == "breached":
+                return f"Escalate `{item_id}` to the skill owner for signoff or rejection."
+            return f"Confirm owner signoff and rollout stage for `{item_id}`."
+        if sla_status == "breached":
+            return f"Escalate sandbox exception `{item_id}` to security review; deny by default if scope is broad."
+        return f"Review sandbox exception `{item_id}` and record an independent decision."
+
+    def _queue_summaries(self, items: list[ReviewSlaItem]) -> list[JsonDict]:
+        rows = []
+        for queue in ["workflow_review", "marketplace_approval", "sandbox_exception"]:
+            queue_items = [item for item in items if item.queue == queue]
+            rows.append(
+                {
+                    "queue": queue,
+                    "total": len(queue_items),
+                    "open": sum(1 for item in queue_items if item.sla_status != "closed"),
+                    "breached": sum(1 for item in queue_items if item.sla_status == "breached"),
+                    "due_soon": sum(1 for item in queue_items if item.sla_status == "due_soon"),
+                    "closed": sum(1 for item in queue_items if item.sla_status == "closed"),
+                }
+            )
+        return rows
+
+    def _trace_ids(self, resource_type: str, resource_id: str) -> list[str]:
+        return sorted(
+            {
+                event.trace_id
+                for event in self.app_state.audit.events
+                if event.resource_type == resource_type and event.resource_id == resource_id
+            }
+        )
+
+    def _escalation_policy(self, request: ReviewSlaPackRequest) -> list[JsonDict]:
+        return [
+            {
+                "queue": "workflow_review",
+                "sla_hours": request.workflow_review_sla_hours,
+                "owner": "workflow-reviewer",
+                "breach_action": "Approve, reject, or export review evidence before workflow templates are exposed.",
+            },
+            {
+                "queue": "marketplace_approval",
+                "sla_hours": request.marketplace_approval_sla_hours,
+                "owner": "skill-owner",
+                "breach_action": "Escalate blocked tenant rollout decisions to owner signoff.",
+            },
+            {
+                "queue": "sandbox_exception",
+                "sla_hours": request.sandbox_exception_sla_hours,
+                "owner": "security-reviewer",
+                "breach_action": "Deny broad sandbox exceptions by default and require narrowed scope.",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_conformance",
+            "Invoke-RestMethod http://localhost:8000/reviews/sla -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reviews/sla-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workflows/reviews -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/marketplace/approvals -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers",
+            'rg "reviews/sla|Review SLA|review_sla|human_review_sla" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\review_sla -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "SLA tracking is deterministic and local; it does not send email, Slack, PagerDuty, or ticket updates.",
+            "Queue timestamps use local in-memory or JSON-backed review records, not an immutable production workflow store.",
+            "Escalation guidance is advisory; existing approval and sandbox endpoints still enforce the actual decisions.",
+            "Generated SLA artifacts are written under ignored data/review_sla/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["review_sla"]
+        lines = [
+            "# Human Review SLA Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Open items: `{report['summary']['open_item_count']}`",
+            f"- Breached items: `{report['summary']['breached_count']}`",
+            "",
+            "## Queue Summaries",
+            "",
+            *[
+                f"- `{row['queue']}`: open=`{row['open']}` due_soon=`{row['due_soon']}` breached=`{row['breached']}` closed=`{row['closed']}`"
+                for row in bundle["queue_summaries"]
+            ],
+            "",
+            "## Escalations",
+            "",
+            *self._open_item_lines(report["items"]),
+            "",
+            "## Escalation Policy",
+            "",
+            *[
+                f"- `{policy['queue']}` SLA `{policy['sla_hours']}`h owner `{policy['owner']}`: {policy['breach_action']}"
+                for policy in bundle["escalation_policy"]
+            ],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _open_item_lines(self, items: list[JsonDict]) -> list[str]:
+        lines = [
+            (
+                f"- `{item['queue']}` `{item['item_id']}` `{item['sla_status']}` "
+                f"owner=`{item['owner']}` remaining=`{item['time_remaining_hours']}`h: "
+                f"{item['recommended_action']}"
+            )
+            for item in items
+            if item["sla_status"] != "closed"
+        ]
+        return lines or ["- No open review items."]
+
+
 class ArtifactInventoryService:
     INVENTORY_ID = "artifact_inventory_latest"
     CHECKLIST_ID = "readme_checklist_latest"
@@ -20296,6 +20721,15 @@ class ArtifactInventoryService:
                     "governed_skill_platform_pack_latest.md",
                 ],
                 "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
+            ),
+            self._catalog_row(
+                "review_sla",
+                "Human Review SLA Pack",
+                Path("data") / "review_sla",
+                "POST /reviews/sla-pack",
+                "Invoke-RestMethod http://localhost:8000/reviews/sla-pack -Method POST -Headers $headers",
+                ["human_review_sla_pack_latest.json", "human_review_sla_pack_latest.md"],
+                "Cross-queue HITL SLA evidence for workflow reviews, marketplace approvals, sandbox exceptions, escalations, and reviewer actions.",
             ),
             self._catalog_row(
                 "agent_collaboration",
@@ -22533,6 +22967,7 @@ class AppState:
     runtime_demo: RuntimeDemoService = field(init=False)
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
+    review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
     task_runs: TaskRunObservabilityService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
@@ -22600,6 +23035,7 @@ class AppState:
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
+        self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
         self.task_runs = TaskRunObservabilityService(self)
         self.artifacts = ArtifactInventoryService(self)

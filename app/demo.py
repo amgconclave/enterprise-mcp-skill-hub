@@ -38,6 +38,7 @@ from app.models import (
     ReleasePublishPackRequest,
     RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
+    ReviewSlaPackRequest,
     RuntimeDemoPackRequest,
     SandboxExceptionDecisionRequest,
     SandboxExceptionPackRequest,
@@ -235,6 +236,12 @@ async def main() -> None:
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
         GovernedSkillPlatformPackRequest(actor="demo-platform-owner")
+    )
+    review_sla_report = await state.review_sla.report(
+        ReviewSlaPackRequest(actor="demo-review-ops")
+    )
+    review_sla_pack = await state.review_sla.pack(
+        ReviewSlaPackRequest(actor="demo-review-ops")
     )
     agent_collaboration_run = await state.agent_collaboration.run(
         AgentCollaborationRequest(
@@ -531,6 +538,12 @@ async def main() -> None:
                 "platform_pack_controls": len(platform_pack_report.capability_controls),
                 "platform pack path": platform_pack_export.markdown_path,
                 "platform_pack_path": platform_pack_export.markdown_path,
+                "review sla readiness": review_sla_report.readiness_status,
+                "review_sla_readiness": review_sla_report.readiness_status,
+                "review sla open items": review_sla_report.summary["open_item_count"],
+                "review_sla_open_items": review_sla_report.summary["open_item_count"],
+                "review sla pack path": review_sla_pack.markdown_path,
+                "review_sla_pack_path": review_sla_pack.markdown_path,
                 "agent collaboration readiness": agent_collaboration_run.readiness_status,
                 "agent_collaboration_readiness": agent_collaboration_run.readiness_status,
                 "agent collaboration handoffs": agent_collaboration_run.governance_summary["handoff_count"],

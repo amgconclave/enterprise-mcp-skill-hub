@@ -54,6 +54,7 @@ from app.models import (
     ReleasePublishPackRequest,
     RepositoryAutomationPackRequest,
     ReviewerWalkthroughPackRequest,
+    ReviewSlaPackRequest,
     RuntimeDemoPackRequest,
     SandboxExceptionDecisionRequest,
     SandboxExceptionPackRequest,
@@ -119,6 +120,7 @@ view = st.sidebar.radio(
         "Provider Failover",
         "Config Hygiene",
         "Platform Pack",
+        "Review SLA",
         "Agent Collaboration",
         "Agent Society Evaluation",
         "Worker Scale-Out",
@@ -1224,6 +1226,62 @@ elif view == "Platform Pack":
                 state.platform_pack.export(GovernedSkillPlatformPackRequest(actor=actor))
             )
             st.success("Governed Skill Platform Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
+
+elif view == "Review SLA":
+    st.subheader("Review SLA")
+    st.caption("Human-review queue SLA tracking across workflows, marketplace approvals, and sandbox exceptions.")
+    report = run_async(state.review_sla.report())
+    col_ready, col_open, col_due, col_breached = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_open.metric("Open items", report.summary["open_item_count"])
+    col_due.metric("Due soon", report.summary["due_soon_count"])
+    col_breached.metric("Breached", report.summary["breached_count"])
+
+    tab_items, tab_policy, tab_export, tab_json = st.tabs(["Items", "Policy", "SLA Pack", "JSON"])
+    with tab_items:
+        st.dataframe(
+            [
+                {
+                    "queue": item.queue,
+                    "id": item.item_id,
+                    "status": item.raw_status,
+                    "sla": item.sla_status,
+                    "escalation": item.escalation_level,
+                    "owner": item.owner,
+                    "age_hours": item.age_hours,
+                    "remaining_hours": item.time_remaining_hours,
+                    "action": item.recommended_action,
+                }
+                for item in report.items
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(report.queue_summaries, use_container_width=True, hide_index=True)
+    with tab_policy:
+        st.dataframe(report.escalation_policy, use_container_width=True, hide_index=True)
+        st.json({"patterns": report.architecture_patterns, "limitations": report.limitations})
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/review_sla/.")
+        actor = st.text_input("Review SLA actor", value="streamlit-review-ops")
+        workflow_sla = st.number_input("Workflow review SLA hours", min_value=0.0, value=24.0, step=1.0)
+        marketplace_sla = st.number_input("Marketplace approval SLA hours", min_value=0.0, value=48.0, step=1.0)
+        sandbox_sla = st.number_input("Sandbox exception SLA hours", min_value=0.0, value=8.0, step=1.0)
+        if st.button("Export Review SLA Pack", use_container_width=True):
+            export = run_async(
+                state.review_sla.pack(
+                    ReviewSlaPackRequest(
+                        actor=actor,
+                        workflow_review_sla_hours=float(workflow_sla),
+                        marketplace_approval_sla_hours=float(marketplace_sla),
+                        sandbox_exception_sla_hours=float(sandbox_sla),
+                    )
+                )
+            )
+            st.success("Review SLA Pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
