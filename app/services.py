@@ -225,6 +225,10 @@ from app.models import (
     UsageMetric,
     UsageSummary,
     WorkerPoolStatus,
+    WorkerQueueAdmissionDecision,
+    WorkerQueueAdmissionPackRequest,
+    WorkerQueueAdmissionPackResult,
+    WorkerQueueAdmissionReport,
     WorkerRunbookPackRequest,
     WorkerRunbookPackResult,
     WorkerRunTimelineEvent,
@@ -17586,6 +17590,8 @@ class DashboardSmokeService:
             self._endpoint_ref("worker_runs", "GET", "/workers/runs", "Worker run history and transparent timelines."),
             self._endpoint_ref("worker_run_submit", "POST", "/workers/runs", "Queues and executes a sandboxed local worker run."),
             self._endpoint_ref("worker_scale_plan", "GET", "/workers/scale-plan", "Worker pool scale plan and backlog forecast."),
+            self._endpoint_ref("worker_queue_admission", "GET", "/workers/queue-admission", "Worker queue admission, tenant fairness, and backpressure report."),
+            self._endpoint_ref("worker_queue_pack", "POST", "/workers/queue-pack", "Writes Worker Queue Admission artifacts."),
             self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
             self._endpoint_ref("run_ledger", "GET", "/runs/ledger", "Unified task-run observability ledger."),
             self._endpoint_ref("run_transparency_pack", "POST", "/runs/transparency-pack", "Writes Task Run Transparency artifacts."),
@@ -17653,6 +17659,7 @@ class DashboardSmokeService:
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
+            self._artifact_tab("worker_queue_admission", "Worker Scale-Out", "Queue Admission Pack", "data/worker_runbooks/"),
             self._artifact_tab("run_transparency", "Run Transparency", "Transparency Pack", "data/run_transparency/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
@@ -17733,6 +17740,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
@@ -17762,7 +17771,7 @@ class DashboardSmokeService:
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
             'rg "config/hygiene|Config Hygiene|config_hygiene|secret rotation" app dashboard docs README.md tests scripts sample_data',
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
-            'rg "workers/scale-plan|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
+            'rg "workers/scale-plan|workers/queue-admission|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "runs/ledger|runs/transparency-pack|Run Transparency|run_transparency" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/exceptions|Sandbox Exceptions|sandbox_exceptions|sandbox exception" app dashboard docs README.md tests scripts sample_data',
@@ -17982,7 +17991,9 @@ class DashboardSmokeService:
 
 class WorkerScaleOutService:
     PACK_ID = "worker_scaleout_runbook_latest"
+    QUEUE_PACK_ID = "worker_queue_admission_latest"
     PLAN_ID = "worker_scale_plan_latest"
+    QUEUE_REPORT_ID = "worker_queue_admission_latest"
 
     POOLS: dict[str, JsonDict] = {
         "local_mock_general": {
@@ -18023,22 +18034,45 @@ class WorkerScaleOutService:
         },
     }
 
+    TENANT_FAIRNESS: dict[str, JsonDict] = {
+        "healthcare": {"share": 0.30, "max_queued_per_pool": 2, "priority_boost": 2},
+        "fintech": {"share": 0.30, "max_queued_per_pool": 2, "priority_boost": 1},
+        "public_sector": {"share": 0.20, "max_queued_per_pool": 1, "priority_boost": 1},
+        "internal_demo": {"share": 0.20, "max_queued_per_pool": 3, "priority_boost": 0},
+    }
+
+    ADMISSION_BLOCKED_ACTIONS = {"external_network", "process_spawn", "secret_access", "repo_mutation"}
+
     def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
         self.app_state = app_state
         self.output_dir = output_dir or Path("data") / "worker_runbooks"
         self.runs: list[WorkerSkillRunRecord] = []
+        self.admission_decisions: list[WorkerQueueAdmissionDecision] = []
 
     async def submit_run(self, request: WorkerSkillRunRequest | None = None) -> WorkerSkillRunRecord:
         request = request or WorkerSkillRunRequest()
         skill = self.app_state.registry.get(request.skill_id)
         trace_id = new_trace_id()
         created_at = utc_now()
+        queue_decision = self._admission_decision(request, trace_id)
+        self.admission_decisions.append(queue_decision)
         timeline = [
             self._event(
                 "queued",
                 "queued",
                 f"Run queued for skill `{request.skill_id}` on pool `{request.worker_pool}`.",
-                {"priority": request.priority},
+                {"priority": request.priority, "tenant": request.tenant},
+            ),
+            self._event(
+                "queued" if queue_decision.decision != "reject" else "failed",
+                "queue_admission",
+                f"Queue admission decision: `{queue_decision.decision}`.",
+                {
+                    "decision_id": queue_decision.decision_id,
+                    "matched_rules": queue_decision.matched_rules,
+                    "queue_position": queue_decision.queue_position,
+                    "estimated_wait_ms": queue_decision.estimated_wait_ms,
+                },
             )
         ]
         run = WorkerSkillRunRecord(
@@ -18052,6 +18086,7 @@ class WorkerScaleOutService:
             priority=request.priority,
             input=request.input,
             trace_id=trace_id,
+            queue_decision=queue_decision,
             timeline=timeline,
             transparency=self._transparency_base(request),
         )
@@ -18064,10 +18099,60 @@ class WorkerScaleOutService:
             request.actor,
             {
                 "skill_id": request.skill_id,
+                "tenant": request.tenant,
                 "worker_pool": request.worker_pool,
                 "priority": request.priority,
+                "queue_decision": queue_decision.decision,
             },
         )
+
+        if queue_decision.decision == "reject":
+            updated = run.model_copy(
+                update={
+                    "status": "failed",
+                    "updated_at": utc_now(),
+                    "error": "Worker queue admission rejected run",
+                    "transparency": self._transparency(run),
+                }
+            )
+            self._replace_run(updated)
+            self.app_state.audit.record(
+                "worker_run.rejected",
+                "worker_run",
+                updated.run_id,
+                trace_id,
+                request.actor,
+                {
+                    "skill_id": skill.id,
+                    "tenant": request.tenant,
+                    "matched_rules": queue_decision.matched_rules,
+                    "reasons": queue_decision.reasons,
+                },
+            )
+            return updated
+
+        if queue_decision.decision == "queue":
+            updated = run.model_copy(
+                update={
+                    "updated_at": utc_now(),
+                    "transparency": self._transparency(run),
+                }
+            )
+            self._replace_run(updated)
+            self.app_state.audit.record(
+                "worker_run.deferred",
+                "worker_run",
+                updated.run_id,
+                trace_id,
+                request.actor,
+                {
+                    "skill_id": skill.id,
+                    "tenant": request.tenant,
+                    "queue_position": queue_decision.queue_position,
+                    "estimated_wait_ms": queue_decision.estimated_wait_ms,
+                },
+            )
+            return updated
 
         policy_context = self._policy_context(request, skill.id)
         sandbox_decision = None
@@ -18184,6 +18269,46 @@ class WorkerScaleOutService:
     def list_runs(self) -> list[WorkerSkillRunRecord]:
         return sorted(self.runs, key=lambda run: run.created_at, reverse=True)
 
+    def queue_admission_report(self) -> WorkerQueueAdmissionReport:
+        pool_status = self._pool_queue_status()
+        tenant_fairness = self._tenant_fairness_rows()
+        recent_decisions = sorted(
+            self.admission_decisions,
+            key=lambda decision: decision.generated_at,
+            reverse=True,
+        )[:20]
+        recommendations = self._queue_recommendations(pool_status, tenant_fairness)
+        reject_count = sum(1 for decision in self.admission_decisions if decision.decision == "reject")
+        queued_count = sum(1 for decision in self.admission_decisions if decision.decision == "queue")
+        readiness_status: SecurityReadinessStatus = "ready"
+        if queued_count or any(item["severity"] == "medium" for item in recommendations):
+            readiness_status = "needs_review"
+        if reject_count:
+            readiness_status = "blocked"
+        return WorkerQueueAdmissionReport(
+            report_id=self.QUEUE_REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "local_only": True,
+                "mock_provider": self.app_state.provider.name == "mock",
+                "decision_count": len(self.admission_decisions),
+                "admitted_count": sum(1 for decision in self.admission_decisions if decision.decision == "admit"),
+                "queued_count": queued_count,
+                "rejected_count": reject_count,
+                "pool_count": len(pool_status),
+                "tenant_count": len(tenant_fairness),
+                "artifact_directory": str(self.output_dir),
+            },
+            admission_policy=self._admission_policy(),
+            pool_queue_status=pool_status,
+            tenant_fairness=tenant_fairness,
+            recent_decisions=recent_decisions,
+            recommendations=recommendations,
+            local_proof_commands=self._queue_local_proof_commands(),
+            limitations=self._queue_limitations(),
+        )
+
     async def scale_plan(self) -> WorkerScalePlanResult:
         capacity = await self.app_state.capacity.forecast()
         pools = self._pool_status(capacity.per_skill)
@@ -18207,6 +18332,11 @@ class WorkerScaleOutService:
             "recommendation_count": len(recommendations),
             "mcp_tool_count": len(self.app_state.mcp.list_tools()),
             "sandbox_enforced_run_count": sum(1 for run in self.runs if run.sandbox_decision is not None),
+            "admission_decision_count": len(self.admission_decisions),
+            "admission_queued_count": sum(1 for decision in self.admission_decisions if decision.decision == "queue"),
+            "admission_rejected_count": sum(
+                1 for decision in self.admission_decisions if decision.decision == "reject"
+            ),
             "artifact_directory": str(self.output_dir),
         }
         return WorkerScalePlanResult(
@@ -18243,6 +18373,7 @@ class WorkerScaleOutService:
             ],
             "local_proof_commands": plan.local_proof_commands,
             "limitations": plan.limitations,
+            "queue_admission": self.queue_admission_report().model_dump(mode="json"),
         }
         self.output_dir.mkdir(parents=True, exist_ok=True)
         json_path = self.output_dir / f"{self.PACK_ID}.json"
@@ -18275,6 +18406,59 @@ class WorkerScaleOutService:
             },
         )
 
+    def queue_admission_pack(
+        self,
+        request: WorkerQueueAdmissionPackRequest | None = None,
+    ) -> WorkerQueueAdmissionPackResult:
+        request = request or WorkerQueueAdmissionPackRequest()
+        report = self.queue_admission_report()
+        bundle = {
+            "pack_id": self.QUEUE_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "queue_admission": report.model_dump(mode="json"),
+            "architecture_patterns": [
+                "worker scale-out",
+                "state observation",
+                "bounded action loop",
+                "step verification",
+                "task sandbox",
+            ],
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.QUEUE_PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.QUEUE_PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._queue_markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "worker_queue.admission_pack_exported",
+            "worker_queue_admission_pack",
+            self.QUEUE_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "decision_count": report.summary["decision_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return WorkerQueueAdmissionPackResult(
+            pack_id=self.QUEUE_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
     def _policy_context(self, request: WorkerSkillRunRequest, skill_id: str) -> PolicyInvocationContext:
         base = request.policy_context or PolicyInvocationContext()
         return base.model_copy(
@@ -18302,6 +18486,79 @@ class WorkerScaleOutService:
 
     def _replace_run(self, run: WorkerSkillRunRecord) -> None:
         self.runs = [run if existing.run_id == run.run_id else existing for existing in self.runs]
+
+    def _admission_decision(
+        self,
+        request: WorkerSkillRunRequest,
+        trace_id: str,
+    ) -> WorkerQueueAdmissionDecision:
+        policy_context = request.policy_context or PolicyInvocationContext()
+        pool = self.POOLS[request.worker_pool]
+        tenant_policy = self.TENANT_FAIRNESS[request.tenant]
+        queued_in_pool = sum(1 for run in self.runs if run.worker_pool == request.worker_pool and run.status == "queued")
+        active_in_pool = sum(1 for run in self.runs if run.worker_pool == request.worker_pool and run.status == "running")
+        tenant_queued = sum(
+            1
+            for run in self.runs
+            if run.worker_pool == request.worker_pool
+            and run.status == "queued"
+            and run.queue_decision is not None
+            and run.queue_decision.tenant == request.tenant
+        )
+        reasons: list[str] = []
+        matched_rules: list[str] = []
+        decision = "admit"
+        queue_position: int | None = None
+        action_class = policy_context.action_class
+        if action_class in self.ADMISSION_BLOCKED_ACTIONS:
+            decision = "reject"
+            matched_rules.append("blocked_action_class_at_admission")
+            reasons.append(f"Action class `{action_class}` must not enter the worker queue.")
+        elif active_in_pool >= int(pool["max_concurrency"]):
+            decision = "queue" if request.allow_queue else "reject"
+            matched_rules.append("pool_concurrency_saturated")
+            reasons.append(f"Pool `{request.worker_pool}` is at max concurrency.")
+        elif tenant_queued >= int(tenant_policy["max_queued_per_pool"]):
+            decision = "queue" if request.allow_queue else "reject"
+            matched_rules.append("tenant_fair_share_limit")
+            reasons.append(f"Tenant `{request.tenant}` reached its queued-run fair-share limit for this pool.")
+        elif queued_in_pool >= int(pool["max_concurrency"]) * 2 and request.priority < 7:
+            decision = "queue" if request.allow_queue else "reject"
+            matched_rules.append("priority_backpressure")
+            reasons.append("Lower-priority work waits when the pool backlog is already above two concurrency windows.")
+        else:
+            matched_rules.append("pool_capacity_available")
+            reasons.append("Pool capacity and tenant fair-share policy allow immediate local dispatch.")
+
+        if decision == "queue":
+            queue_position = queued_in_pool + 1
+        estimated_wait_ms = 0 if decision == "admit" else max(1, queue_position or queued_in_pool + 1) * 750
+        return WorkerQueueAdmissionDecision(
+            decision_id=new_id("wad"),
+            generated_at=utc_now(),
+            decision=decision,
+            tenant=request.tenant,
+            skill_id=request.skill_id,
+            worker_pool=request.worker_pool,
+            priority=request.priority,
+            queue_position=queue_position,
+            estimated_wait_ms=estimated_wait_ms,
+            fairness_share={
+                "tenant_share": tenant_policy["share"],
+                "priority_boost": tenant_policy["priority_boost"],
+                "max_queued_per_pool": tenant_policy["max_queued_per_pool"],
+                "tenant_queued_in_pool": tenant_queued,
+            },
+            pool_pressure={
+                "queued_in_pool": queued_in_pool,
+                "active_in_pool": active_in_pool,
+                "max_concurrency": pool["max_concurrency"],
+                "worker_count": pool["worker_count"],
+            },
+            matched_rules=matched_rules,
+            reasons=reasons,
+            trace_id=trace_id,
+        )
 
     def _pool_for_skill(self, skill_id: str) -> str:
         if skill_id == "search_knowledge_base":
@@ -18360,6 +18617,102 @@ class WorkerScaleOutService:
             )
         return sorted(rows, key=lambda row: (-row["forecasted_invocations"], row["skill_id"]))
 
+    def _admission_policy(self) -> JsonDict:
+        return {
+            "dispatch_mode": "synchronous_local_simulation_with_admission_gate",
+            "blocked_action_classes": sorted(self.ADMISSION_BLOCKED_ACTIONS),
+            "tenant_fairness": self.TENANT_FAIRNESS,
+            "pool_backpressure_rule": "Queue lower-priority work when queued runs exceed two concurrency windows.",
+            "queue_artifacts": str(self.output_dir),
+        }
+
+    def _pool_queue_status(self) -> list[JsonDict]:
+        rows = []
+        for pool_id, config in self.POOLS.items():
+            queued = [run for run in self.runs if run.worker_pool == pool_id and run.status == "queued"]
+            active = [run for run in self.runs if run.worker_pool == pool_id and run.status == "running"]
+            rows.append(
+                {
+                    "pool_id": pool_id,
+                    "display_name": config["display_name"],
+                    "worker_count": config["worker_count"],
+                    "max_concurrency": config["max_concurrency"],
+                    "active_runs": len(active),
+                    "queued_runs": len(queued),
+                    "queued_by_tenant": dict(
+                        sorted(
+                            {
+                                tenant: sum(
+                                    1
+                                    for run in queued
+                                    if run.queue_decision is not None and run.queue_decision.tenant == tenant
+                                )
+                                for tenant in self.TENANT_FAIRNESS
+                            }.items()
+                        )
+                    ),
+                    "pressure": "high" if len(queued) >= int(config["max_concurrency"]) * 2 else "normal",
+                }
+            )
+        return rows
+
+    def _tenant_fairness_rows(self) -> list[JsonDict]:
+        rows = []
+        for tenant, policy in self.TENANT_FAIRNESS.items():
+            decisions = [
+                decision for decision in self.admission_decisions if decision.tenant == tenant
+            ]
+            rows.append(
+                {
+                    "tenant": tenant,
+                    "target_share": policy["share"],
+                    "priority_boost": policy["priority_boost"],
+                    "max_queued_per_pool": policy["max_queued_per_pool"],
+                    "decision_count": len(decisions),
+                    "admitted": sum(1 for decision in decisions if decision.decision == "admit"),
+                    "queued": sum(1 for decision in decisions if decision.decision == "queue"),
+                    "rejected": sum(1 for decision in decisions if decision.decision == "reject"),
+                }
+            )
+        return rows
+
+    def _queue_recommendations(
+        self,
+        pool_status: list[JsonDict],
+        tenant_fairness: list[JsonDict],
+    ) -> list[JsonDict]:
+        recommendations = []
+        for pool in pool_status:
+            if pool["pressure"] == "high":
+                recommendations.append(
+                    {
+                        "severity": "medium",
+                        "target": pool["pool_id"],
+                        "action": "Keep admission queue enabled and add local workers before broad rollout.",
+                        "reason": f"{pool['queued_runs']} queued run(s) against concurrency {pool['max_concurrency']}.",
+                    }
+                )
+        for tenant in tenant_fairness:
+            if tenant["rejected"]:
+                recommendations.append(
+                    {
+                        "severity": "high",
+                        "target": tenant["tenant"],
+                        "action": "Review rejected tenant work before changing fair-share limits.",
+                        "reason": f"{tenant['rejected']} rejected admission decision(s).",
+                    }
+                )
+        if not recommendations:
+            recommendations.append(
+                {
+                    "severity": "low",
+                    "target": "worker_queue",
+                    "action": "Keep current queue admission limits and review decisions in runbook artifacts.",
+                    "reason": "No current pool pressure or rejected tenant work.",
+                }
+            )
+        return recommendations
+
     def _recommendations(
         self,
         pools: list[WorkerPoolStatus],
@@ -18402,8 +18755,11 @@ class WorkerScaleOutService:
         return {
             "patterns_used": ["worker scale-out", "run transparency", "task sandbox", "typed contracts"],
             "queue_policy": {
+                "tenant": request.tenant,
                 "priority": request.priority,
                 "pool": request.worker_pool,
+                "allow_queue": request.allow_queue,
+                "max_queue_wait_ms": request.max_queue_wait_ms,
                 "dispatch_mode": "synchronous_local_simulation",
             },
             "external_services": "none",
@@ -18421,6 +18777,8 @@ class WorkerScaleOutService:
             {
                 "timeline_stage_count": len(run.timeline),
                 "audit_actions": ["worker_run.queued", f"worker_run.{run.status}"],
+                "queue_decision": run.queue_decision.decision if run.queue_decision else "not_evaluated",
+                "queue_decision_id": run.queue_decision.decision_id if run.queue_decision else None,
                 "invocation_id": invocation_id,
                 "invocation_trace_id": invocation_trace_id,
                 "sandbox_decision": sandbox_decision.decision if sandbox_decision else "not_enforced",
@@ -18437,16 +18795,37 @@ class WorkerScaleOutService:
             "python -m app.demo",
             "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/runs -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
-            'rg "workers/scale-plan|Worker Scale-Out|worker_runbooks|worker scale-out" app dashboard docs README.md tests',
+            'rg "workers/scale-plan|workers/queue-admission|Worker Scale-Out|worker_runbooks|worker scale-out" app dashboard docs README.md tests',
+        ]
+
+    def _queue_local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_worker_scaleout.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
+            'rg "workers/queue-admission|Queue Admission|worker_queue_admission" app dashboard docs README.md tests',
         ]
 
     def _limitations(self) -> list[str]:
         return [
             "Worker execution is a deterministic local simulation; it does not start background processes or remote workers.",
             "Scale recommendations combine local capacity forecasts and in-memory run history rather than live queue telemetry.",
+            "Queue admission decisions are in-memory local state; production deployments should persist them with the durable run ledger.",
             "Sandbox preflight enforces payload and action-class policy before local/mock invocation, but production isolation should use OS/container-level sandboxes.",
             "Generated worker runbook artifacts are written under ignored data/worker_runbooks/.",
+        ]
+
+    def _queue_limitations(self) -> list[str]:
+        return [
+            "Queue admission is deterministic local policy over in-memory run history, not a distributed scheduler.",
+            "Tenant fairness rules are illustrative defaults for portfolio review and should be connected to production entitlements before deployment.",
+            "Rejected admissions do not execute skills or call external providers.",
+            "Generated queue admission artifacts are written under ignored data/worker_runbooks/.",
         ]
 
     def _markdown(self, bundle: JsonDict) -> str:
@@ -18491,6 +18870,66 @@ class WorkerScaleOutService:
             *[
                 f"- `{run['run_id']}` `{run['status']}` skill=`{run['skill_id']}` pool=`{run['worker_pool']}` trace=`{run['trace_id']}`"
                 for run in plan["recent_runs"]
+            ],
+            "",
+            "## Queue Admission",
+            "",
+            f"- Decisions: `{bundle['queue_admission']['summary']['decision_count']}`",
+            f"- Queued: `{bundle['queue_admission']['summary']['queued_count']}`",
+            f"- Rejected: `{bundle['queue_admission']['summary']['rejected_count']}`",
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _queue_markdown(self, bundle: JsonDict) -> str:
+        report = bundle["queue_admission"]
+        lines = [
+            "# Worker Queue Admission Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Decisions: `{report['summary']['decision_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Pool Queue Status",
+            "",
+            *[
+                f"- `{pool['pool_id']}` active=`{pool['active_runs']}` queued=`{pool['queued_runs']}` pressure=`{pool['pressure']}`"
+                for pool in report["pool_queue_status"]
+            ],
+            "",
+            "## Tenant Fairness",
+            "",
+            *[
+                f"- `{tenant['tenant']}` share=`{tenant['target_share']}` admitted=`{tenant['admitted']}` queued=`{tenant['queued']}` rejected=`{tenant['rejected']}`"
+                for tenant in report["tenant_fairness"]
+            ],
+            "",
+            "## Recent Decisions",
+            "",
+            *[
+                f"- `{decision['decision']}` tenant=`{decision['tenant']}` skill=`{decision['skill_id']}` pool=`{decision['worker_pool']}` rules=`{', '.join(decision['matched_rules'])}`"
+                for decision in report["recent_decisions"]
+            ],
+            "",
+            "## Recommendations",
+            "",
+            *[
+                f"- `{item['severity']}` {item['target']}: {item['action']} {item['reason']}"
+                for item in report["recommendations"]
             ],
             "",
             "## Local Proof Commands",
@@ -19038,6 +19477,7 @@ class GovernedSkillPlatformPackService:
         tools = self.app_state.mcp.list_tools()
         resources = self.app_state.mcp.list_resources()
         prompts = self.app_state.mcp.list_prompts()
+        queue_admission = self.app_state.worker_scaleout.queue_admission_report()
         capability_controls = self._capability_controls(
             governance,
             conformance,
@@ -19045,6 +19485,7 @@ class GovernedSkillPlatformPackService:
             usage,
             reliability,
             slo,
+            queue_admission,
             len(workflows),
             len(reviews),
             len(tools),
@@ -19070,6 +19511,8 @@ class GovernedSkillPlatformPackService:
             "provider_count": provider.summary["provider_count"],
             "usage_estimated_cost": usage.summary["estimated_cost"],
             "traceable_invocation_count": usage.summary["total_invocations"],
+            "worker_queue_decision_count": queue_admission.summary["decision_count"],
+            "worker_queue_rejected_count": queue_admission.summary["rejected_count"],
             "control_count": len(capability_controls),
             "ready_control_count": sum(1 for item in capability_controls if item["status"] == "pass"),
             "needs_review_control_count": sum(1 for item in capability_controls if item["status"] == "warn"),
@@ -19155,6 +19598,7 @@ class GovernedSkillPlatformPackService:
         usage: UsageAnalyticsResult,
         reliability: SkillReliabilityReport,
         slo: SkillSloReport,
+        queue_admission: WorkerQueueAdmissionReport,
         workflow_count: int,
         review_count: int,
         tool_count: int,
@@ -19222,6 +19666,13 @@ class GovernedSkillPlatformPackService:
                 "pass" if slo.release_gate["status"] == "pass" else "warn",
                 f"SLO release gate status is {slo.release_gate['status']}.",
                 ["governance", "observability"],
+            ),
+            self._control(
+                "worker_queue_admission",
+                "Worker queue admission",
+                "pass" if queue_admission.summary["rejected_count"] == 0 else "warn",
+                f"{queue_admission.summary['decision_count']} admission decision(s), {queue_admission.summary['queued_count']} queued, {queue_admission.summary['rejected_count']} rejected.",
+                ["worker scale-out", "state observation", "bounded action loop", "step verification"],
             ),
         ]
 
@@ -19346,6 +19797,10 @@ class GovernedSkillPlatformPackService:
             "agent cost tracking",
             "tool registry",
             "handoffs",
+            "worker scale-out",
+            "state observation",
+            "bounded action loop",
+            "step verification",
         ]
 
     def _local_proof_commands(self) -> list[str]:
@@ -19362,7 +19817,8 @@ class GovernedSkillPlatformPackService:
             "python -m app.mcp_server prompts",
             "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
-            'rg "platform/pack|Governed Skill Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
+            "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
+            'rg "platform/pack|workers/queue-admission|Governed Skill Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
         ]
 
@@ -19865,8 +20321,20 @@ class ArtifactInventoryService:
                 Path("data") / "worker_runbooks",
                 "POST /workers/runbook-pack",
                 "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
-                ["worker_scaleout_runbook_latest.json", "worker_scaleout_runbook_latest.md"],
-                "Worker-pool scale plan, sandbox preflight evidence, transparent run timelines, and local/mock worker limitations.",
+                [
+                    "worker_scaleout_runbook_latest.json",
+                    "worker_scaleout_runbook_latest.md",
+                ],
+                "Worker-pool scale plan, queue admission summary, sandbox preflight evidence, transparent run timelines, and local/mock worker limitations.",
+            ),
+            self._catalog_row(
+                "worker_queue_admission",
+                "Worker Queue Admission Pack",
+                Path("data") / "worker_runbooks",
+                "POST /workers/queue-pack",
+                "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
+                ["worker_queue_admission_latest.json", "worker_queue_admission_latest.md"],
+                "Tenant fair-share admission, pool backpressure, queued/rejected decision evidence, and local worker admission limitations.",
             ),
             self._catalog_row(
                 "run_transparency",

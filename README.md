@@ -36,7 +36,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
 - Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
 - Agent Society Evaluation Pack for role-playing agent coverage, shared memory alignment, governed handoff checks, MCP tool-use evidence, policy-stop evaluation, and ignored `data/agent_society_evals/` artifacts.
-- Worker Scale-Out Runbook for local worker pools, sandbox preflight, transparent queued runs, capacity-backed scale recommendations, and ignored `data/worker_runbooks/` artifacts.
+- Worker Scale-Out Runbook and Queue Admission Pack for local worker pools, tenant fair-share admission, sandbox preflight, transparent queued runs, capacity-backed scale recommendations, and ignored `data/worker_runbooks/` artifacts.
 - Task Run Transparency Pack for a unified local ledger across skill invocations, worker runs, sandbox decisions, exception reviews, and audit-only events with state observation, bounded verification steps, replay commands, and ignored `data/run_transparency/` artifacts.
 - Invocation Sandbox Policy Pack for mock tool payload limits, blocked action classes, risk labels, FastAPI/MCP endpoint policy, enforced denied invocations, and ignored `data/sandbox_policies/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, remediation action-loop plans, audit events, and ignored `data/prompt_governance/` artifacts.
@@ -623,7 +623,9 @@ Simulate local worker-pool dispatch before platform teams expose reusable skills
 ```powershell
 $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers
-Invoke-RestMethod http://localhost:8000/workers/runs -Method POST -Headers $headers -ContentType "application/json" -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"worker_pool":"retrieval_heavy","actor":"platform-sre","enforce_sandbox":true}'
+Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers
+Invoke-RestMethod http://localhost:8000/workers/runs -Method POST -Headers $headers -ContentType "application/json" -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"tenant":"healthcare","worker_pool":"retrieval_heavy","actor":"platform-sre","enforce_sandbox":true}'
+Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers
 Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers
@@ -631,7 +633,9 @@ Get-ChildItem -Recurse -File data\worker_runbooks -ErrorAction SilentlyContinue 
 Get-ChildItem -Recurse -File data\run_transparency -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
 ```
 
-`POST /workers/runs` creates a typed local worker run with queued, sandbox preflight, dispatch, and invocation-completion timeline events. Sandbox-denied runs stop before skill execution; allowed runs execute through the normal local/mock invocation path and link the worker run to invocation ids, trace ids, audit events, metrics, and structured output.
+`POST /workers/runs` creates a typed local worker run with queued, queue-admission, sandbox preflight, dispatch, and invocation-completion timeline events. Sandbox-denied runs stop before skill execution; admission-rejected runs stop before sandbox and skill execution; allowed runs execute through the normal local/mock invocation path and link the worker run to invocation ids, trace ids, audit events, metrics, and structured output.
+
+`GET /workers/queue-admission` returns tenant fair-share policy, pool pressure, recent admit/queue/reject decisions, and bounded local recommendations. `POST /workers/queue-pack` writes `worker_queue_admission_latest.json` and `.md` under ignored `data/worker_runbooks/`.
 
 `GET /workers/scale-plan` returns worker pool status, forecast-backed backlog by skill, recommendations, recent transparent runs, proof commands, and limitations. `POST /workers/runbook-pack` writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. The Streamlit dashboard has a `Worker Scale-Out` view, and `python -m app.demo` prints worker scale-out readiness plus the runbook path.
 

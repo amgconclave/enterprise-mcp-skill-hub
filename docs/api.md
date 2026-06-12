@@ -83,6 +83,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /workers/runs` - returns local worker run history with transparent timelines, sandbox decisions, invocation ids, trace ids, and structured outputs.
 - `POST /workers/runs` - queues and executes one deterministic local/mock skill run through a worker pool with optional sandbox preflight.
 - `GET /workers/scale-plan` - returns worker pool status, forecast-backed backlog by skill, scale recommendations, recent run history, and local proof commands.
+- `GET /workers/queue-admission` - returns worker queue admission policy, tenant fair-share rows, pool backpressure, and recent admit/queue/reject decisions.
+- `POST /workers/queue-pack` - writes the Worker Queue Admission Pack Markdown/JSON under ignored local folder `data/worker_runbooks/`.
 - `POST /workers/runbook-pack` - writes the Worker Scale-Out Runbook Markdown/JSON under ignored local folder `data/worker_runbooks/`.
 - `GET /runs/ledger` - returns a unified local task-run observability ledger across skill invocations, worker runs, sandbox decisions, sandbox exceptions, and audit-only events with trace ids, checkpoints, replay commands, risk flags, state observations, bounded action-loop steps, and verification commands.
 - `POST /runs/transparency-pack` - writes the Task Run Transparency Pack Markdown/JSON under ignored local folder `data/run_transparency/`.
@@ -765,11 +767,17 @@ Get-ChildItem -Recurse -File data\agent_society_evals -ErrorAction SilentlyConti
 ```powershell
 $headers = @{ "X-API-Key" = "dev-local-token" }
 Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers
+Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers
 Invoke-RestMethod http://localhost:8000/workers/runs `
   -Method POST `
   -Headers $headers `
   -ContentType "application/json" `
-  -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"worker_pool":"retrieval_heavy","actor":"platform-sre","enforce_sandbox":true}'
+  -Body '{"skill_id":"search_knowledge_base","input":{"query":"AI governance policy","limit":2},"tenant":"healthcare","worker_pool":"retrieval_heavy","actor":"platform-sre","enforce_sandbox":true}'
+Invoke-RestMethod http://localhost:8000/workers/queue-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-sre"}'
 Invoke-RestMethod http://localhost:8000/workers/runbook-pack `
   -Method POST `
   -Headers $headers `
@@ -777,9 +785,9 @@ Invoke-RestMethod http://localhost:8000/workers/runbook-pack `
   -Body '{"actor":"platform-sre"}'
 ```
 
-Worker execution is local and deterministic. A worker run records queued, sandbox preflight, dispatch, and invocation completion timeline events, attaches sandbox decision evidence when enforced, and links to the normal invocation/audit trace. The scale plan combines local capacity forecasts with in-memory worker run history to recommend hold or scale-out actions per pool.
+Worker execution is local and deterministic. A worker run records queued, queue admission, sandbox preflight, dispatch, and invocation completion timeline events, attaches sandbox decision evidence when enforced, and links to the normal invocation/audit trace. The queue admission report shows tenant fair-share policy, pool pressure, recent admit/queue/reject decisions, and bounded local recommendations before dispatch. The scale plan combines local capacity forecasts with in-memory worker run history to recommend hold or scale-out actions per pool.
 
-The Worker Scale-Out Runbook writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. It demonstrates worker scale-out, run transparency, task sandbox, typed contracts, and structured outputs without requiring remote workers or external providers.
+The Worker Scale-Out Runbook writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. The Queue Admission Pack writes `worker_queue_admission_latest.json` and `.md` in the same ignored folder. Together they demonstrate worker scale-out, run transparency, state observation, bounded action loops, step verification, task sandbox, typed contracts, and structured outputs without requiring remote workers or external providers.
 
 ## API Smoke Matrix And Launch Checklist
 

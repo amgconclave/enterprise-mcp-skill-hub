@@ -189,6 +189,9 @@ from app.models import (
     UsageSummary,
     ValidateSkillRequest,
     ValidationResult,
+    WorkerQueueAdmissionPackRequest,
+    WorkerQueueAdmissionPackResult,
+    WorkerQueueAdmissionReport,
     WorkerRunbookPackRequest,
     WorkerRunbookPackResult,
     WorkerScalePlanResult,
@@ -683,6 +686,19 @@ async def submit_worker_run(
 @app.get("/workers/scale-plan", response_model=WorkerScalePlanResult)
 async def worker_scale_plan(_: str = Depends(require_api_key)) -> WorkerScalePlanResult:
     return await state.worker_scaleout.scale_plan()
+
+
+@app.get("/workers/queue-admission", response_model=WorkerQueueAdmissionReport)
+def worker_queue_admission(_: str = Depends(require_api_key)) -> WorkerQueueAdmissionReport:
+    return state.worker_scaleout.queue_admission_report()
+
+
+@app.post("/workers/queue-pack", response_model=WorkerQueueAdmissionPackResult)
+def worker_queue_pack(
+    request: WorkerQueueAdmissionPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> WorkerQueueAdmissionPackResult:
+    return state.worker_scaleout.queue_admission_pack(request or WorkerQueueAdmissionPackRequest())
 
 
 @app.post("/workers/runbook-pack", response_model=WorkerRunbookPackResult)

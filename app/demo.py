@@ -54,6 +54,7 @@ from app.models import (
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
+    WorkerQueueAdmissionPackRequest,
     WorkerRunbookPackRequest,
     WorkerSkillRunRequest,
     WorkflowSimulationRequest,
@@ -263,6 +264,10 @@ async def main() -> None:
         )
     )
     worker_scale_plan = await state.worker_scaleout.scale_plan()
+    worker_queue_admission = state.worker_scaleout.queue_admission_report()
+    worker_queue_pack = state.worker_scaleout.queue_admission_pack(
+        WorkerQueueAdmissionPackRequest(actor="demo-platform-sre")
+    )
     worker_runbook = await state.worker_scaleout.runbook_pack(
         WorkerRunbookPackRequest(actor="demo-platform-sre")
     )
@@ -544,6 +549,12 @@ async def main() -> None:
                 "worker_run_status": worker_run.status,
                 "worker run timeline stages": len(worker_run.timeline),
                 "worker_run_timeline_stages": len(worker_run.timeline),
+                "worker queue admission readiness": worker_queue_admission.readiness_status,
+                "worker_queue_admission_readiness": worker_queue_admission.readiness_status,
+                "worker queue decisions": worker_queue_admission.summary["decision_count"],
+                "worker_queue_decisions": worker_queue_admission.summary["decision_count"],
+                "worker queue pack path": worker_queue_pack.markdown_path,
+                "worker_queue_pack_path": worker_queue_pack.markdown_path,
                 "worker runbook path": worker_runbook.markdown_path,
                 "worker_runbook_path": worker_runbook.markdown_path,
                 "task run ledger readiness": task_run_ledger.readiness_status,

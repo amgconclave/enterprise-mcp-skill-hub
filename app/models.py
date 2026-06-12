@@ -84,6 +84,7 @@ PrivacyRetentionSourceType = Literal[
 ]
 WorkerRunStatus = Literal["queued", "running", "succeeded", "failed"]
 WorkerPoolKey = Literal["local_mock_general", "retrieval_heavy", "governance_review"]
+WorkerQueueDecisionValue = Literal["admit", "queue", "reject"]
 AgentCollaborationTurnStatus = Literal["succeeded", "failed", "skipped"]
 AgentCollaborationRole = Literal[
     "intake_agent",
@@ -1391,10 +1392,30 @@ class WorkerSkillRunRequest(BaseModel):
     skill_id: str = "search_knowledge_base"
     input: JsonDict = Field(default_factory=lambda: {"query": "AI governance policy", "limit": 2})
     actor: str = "platform-worker"
+    tenant: TenantKey = "internal_demo"
     worker_pool: WorkerPoolKey = "local_mock_general"
     priority: int = Field(default=5, ge=1, le=10)
     policy_context: PolicyInvocationContext | None = None
     enforce_sandbox: bool = True
+    allow_queue: bool = True
+    max_queue_wait_ms: int = Field(default=30_000, ge=0, le=300_000)
+
+
+class WorkerQueueAdmissionDecision(BaseModel):
+    decision_id: str
+    generated_at: datetime
+    decision: WorkerQueueDecisionValue
+    tenant: TenantKey
+    skill_id: str
+    worker_pool: WorkerPoolKey
+    priority: int
+    queue_position: int | None = None
+    estimated_wait_ms: int = 0
+    fairness_share: JsonDict = Field(default_factory=dict)
+    pool_pressure: JsonDict = Field(default_factory=dict)
+    matched_rules: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    trace_id: str
 
 
 class WorkerSkillRunRecord(BaseModel):
@@ -1411,6 +1432,7 @@ class WorkerSkillRunRecord(BaseModel):
     invocation_id: str | None = None
     output: JsonDict | None = None
     error: str | None = None
+    queue_decision: WorkerQueueAdmissionDecision | None = None
     sandbox_decision: InvocationSandboxDecision | None = None
     timeline: list[WorkerRunTimelineEvent] = Field(default_factory=list)
     transparency: JsonDict = Field(default_factory=dict)
@@ -1439,6 +1461,33 @@ class WorkerScalePlanResult(BaseModel):
     recent_runs: list[WorkerSkillRunRecord] = Field(default_factory=list)
     local_proof_commands: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+
+
+class WorkerQueueAdmissionReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    admission_policy: JsonDict
+    pool_queue_status: list[JsonDict] = Field(default_factory=list)
+    tenant_fairness: list[JsonDict] = Field(default_factory=list)
+    recent_decisions: list[WorkerQueueAdmissionDecision] = Field(default_factory=list)
+    recommendations: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class WorkerQueueAdmissionPackRequest(BaseModel):
+    actor: str = "platform-sre"
+
+
+class WorkerQueueAdmissionPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
 
 
 class WorkerRunbookPackRequest(BaseModel):

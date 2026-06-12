@@ -73,6 +73,7 @@ from app.models import (
     TenantSandboxExportRequest,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
+    WorkerQueueAdmissionPackRequest,
     WorkerRunbookPackRequest,
     WorkerSkillRunRequest,
     WorkflowSimulationRequest,
@@ -1329,15 +1330,31 @@ elif view == "Worker Scale-Out":
     st.subheader("Worker Scale-Out")
     st.caption("Local worker-pool run transparency, sandbox preflight, and scale planning for governed MCP skills.")
     plan = run_async(state.worker_scaleout.scale_plan())
+    queue_report = state.worker_scaleout.queue_admission_report()
     col_ready, col_workers, col_runs, col_recommendations = st.columns(4)
     col_ready.metric("Readiness", plan.readiness_status.upper())
     col_workers.metric("Workers", plan.summary["total_worker_count"])
     col_runs.metric("Runs", plan.summary["run_count"])
     col_recommendations.metric("Recommendations", plan.summary["recommendation_count"])
 
-    tab_pools, tab_submit, tab_runs, tab_export, tab_json = st.tabs(
-        ["Pools", "Submit Run", "Run Timeline", "Runbook", "JSON"]
+    tab_queue, tab_pools, tab_submit, tab_runs, tab_export, tab_json = st.tabs(
+        ["Queue Admission", "Pools", "Submit Run", "Run Timeline", "Runbook", "JSON"]
     )
+    with tab_queue:
+        st.dataframe(queue_report.pool_queue_status, use_container_width=True, hide_index=True)
+        st.dataframe(queue_report.tenant_fairness, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [decision.model_dump(mode="json") for decision in queue_report.recent_decisions],
+            use_container_width=True,
+            hide_index=True,
+        )
+        queue_actor = st.text_input("Queue pack actor", value="streamlit-platform-sre")
+        if st.button("Export Queue Admission Pack", use_container_width=True):
+            export = state.worker_scaleout.queue_admission_pack(
+                WorkerQueueAdmissionPackRequest(actor=queue_actor)
+            )
+            st.success("Queue Admission Pack exported.")
+            st.json(export.model_dump(mode="json"))
     with tab_pools:
         st.dataframe(
             [pool.model_dump(mode="json") for pool in plan.pools],
@@ -1356,7 +1373,12 @@ elif view == "Worker Scale-Out":
             "Worker pool",
             ["local_mock_general", "retrieval_heavy", "governance_review"],
         )
+        tenant = st.selectbox(
+            "Tenant",
+            ["internal_demo", "healthcare", "fintech", "public_sector"],
+        )
         priority = st.slider("Priority", min_value=1, max_value=10, value=5)
+        allow_queue = st.checkbox("Allow queue deferral", value=True)
         enforce_sandbox = st.checkbox("Enforce sandbox preflight", value=True)
         payload_text = st.text_area(
             "Input JSON",
@@ -1371,8 +1393,10 @@ elif view == "Worker Scale-Out":
                         skill_id=selected_skill,
                         input=json.loads(payload_text),
                         actor="streamlit-worker-operator",
+                        tenant=tenant,
                         worker_pool=worker_pool,
                         priority=priority,
+                        allow_queue=allow_queue,
                         enforce_sandbox=enforce_sandbox,
                     )
                 )
@@ -1386,6 +1410,8 @@ elif view == "Worker Scale-Out":
                     "run_id": run.run_id,
                     "status": run.status,
                     "skill_id": run.skill_id,
+                    "tenant": run.queue_decision.tenant if run.queue_decision else None,
+                    "admission": run.queue_decision.decision if run.queue_decision else None,
                     "pool": run.worker_pool,
                     "trace_id": run.trace_id,
                     "invocation_id": run.invocation_id,
