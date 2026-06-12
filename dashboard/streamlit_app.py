@@ -63,6 +63,7 @@ from app.models import (
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
+    TaskRunTransparencyPackRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
@@ -117,6 +118,7 @@ view = st.sidebar.radio(
         "Agent Collaboration",
         "Agent Society Evaluation",
         "Worker Scale-Out",
+        "Run Transparency",
         "Prompt Governance",
         "Privacy Retention",
         "Enterprise Readiness",
@@ -1363,6 +1365,52 @@ elif view == "Worker Scale-Out":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(plan.model_dump(mode="json"))
+
+elif view == "Run Transparency":
+    st.subheader("Run Transparency")
+    st.caption("Unified local task-run ledger across invocations, worker runs, sandbox decisions, exceptions, and audit events.")
+    ledger = state.task_runs.ledger()
+    col_ready, col_entries, col_traces, col_risks = st.columns(4)
+    col_ready.metric("Readiness", ledger.readiness_status.upper())
+    col_entries.metric("Entries", ledger.summary["ledger_entry_count"])
+    col_traces.metric("Trace IDs", ledger.summary["trace_id_count"])
+    col_risks.metric("Risk flags", ledger.summary["risk_flag_count"])
+
+    tab_ledger, tab_loop, tab_export, tab_json = st.tabs(
+        ["Ledger", "Action Loop", "Transparency Pack", "JSON"]
+    )
+    with tab_ledger:
+        st.dataframe(
+            [
+                {
+                    "run_id": entry.run_id,
+                    "type": entry.run_type,
+                    "status": entry.status,
+                    "actor": entry.actor,
+                    "skill": entry.skill_id,
+                    "trace_id": entry.trace_id,
+                    "checkpoints": entry.checkpoint_count,
+                    "risk_flags": ", ".join(entry.risk_flags),
+                }
+                for entry in ledger.ledger
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if ledger.ledger:
+            st.json(ledger.ledger[0].model_dump(mode="json"))
+    with tab_loop:
+        st.dataframe(ledger.bounded_action_loop, use_container_width=True, hide_index=True)
+        st.json({"observations": ledger.observations, "patterns_used": ledger.patterns_used})
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/run_transparency/.")
+        actor = st.text_input("Run transparency actor", value="streamlit-run-transparency-reviewer")
+        if st.button("Export Run Transparency Pack", use_container_width=True):
+            export = state.task_runs.transparency_pack(TaskRunTransparencyPackRequest(actor=actor))
+            st.success("Run Transparency Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(ledger.model_dump(mode="json"))
 
 elif view == "Prompt Governance":
     st.subheader("Prompt Governance")

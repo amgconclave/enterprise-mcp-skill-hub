@@ -82,6 +82,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /workers/runs` - queues and executes one deterministic local/mock skill run through a worker pool with optional sandbox preflight.
 - `GET /workers/scale-plan` - returns worker pool status, forecast-backed backlog by skill, scale recommendations, recent run history, and local proof commands.
 - `POST /workers/runbook-pack` - writes the Worker Scale-Out Runbook Markdown/JSON under ignored local folder `data/worker_runbooks/`.
+- `GET /runs/ledger` - returns a unified local task-run observability ledger across skill invocations, worker runs, sandbox decisions, sandbox exceptions, and audit-only events with trace ids, checkpoints, replay commands, risk flags, state observations, bounded action-loop steps, and verification commands.
+- `POST /runs/transparency-pack` - writes the Task Run Transparency Pack Markdown/JSON under ignored local folder `data/run_transparency/`.
 - `GET /supply-chain/report` - returns a local direct-dependency SBOM with manifest hashes, license policy decisions, pinning signals, optional provider dependency gates, approval requirements, and limitations.
 - `POST /supply-chain/pack` - writes the Supply Chain SBOM + License Governance Pack Markdown/JSON under ignored local folder `data/supply_chain/`.
 - `GET /prompt-governance/report` - scans MCP prompts/resources and deterministic red-team content for prompt-injection, endpoint abuse, secret exfiltration, and approval-required findings.

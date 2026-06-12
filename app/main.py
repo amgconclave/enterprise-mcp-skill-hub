@@ -162,6 +162,9 @@ from app.models import (
     SupplyChainPackRequest,
     SupplyChainPackResult,
     SupplyChainReport,
+    TaskRunObservabilityResult,
+    TaskRunTransparencyPackRequest,
+    TaskRunTransparencyPackResult,
     TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
@@ -662,6 +665,19 @@ async def worker_runbook_pack(
     _: str = Depends(require_api_key),
 ) -> WorkerRunbookPackResult:
     return await state.worker_scaleout.runbook_pack(request or WorkerRunbookPackRequest())
+
+
+@app.get("/runs/ledger", response_model=TaskRunObservabilityResult)
+def task_run_ledger(_: str = Depends(require_api_key)) -> TaskRunObservabilityResult:
+    return state.task_runs.ledger()
+
+
+@app.post("/runs/transparency-pack", response_model=TaskRunTransparencyPackResult)
+def task_run_transparency_pack(
+    request: TaskRunTransparencyPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TaskRunTransparencyPackResult:
+    return state.task_runs.transparency_pack(request or TaskRunTransparencyPackRequest())
 
 
 @app.get("/reviewer/quickstart", response_model=ReviewerQuickstartResult)

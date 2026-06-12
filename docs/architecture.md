@@ -33,6 +33,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `ConfigHygieneService` checks `.env.example`, `.gitignore`, current provider mode, optional hosted-provider credential presence, and redacted suspicious secret findings; it writes Config Hygiene + Secret Rotation artifacts under ignored `data/config_hygiene/`.
 - `GovernedSkillPlatformPackService` aggregates durable workflows, human-in-the-loop review, governance/conformance, provider fallback, tool governance, cost/trace signals, and handoff readiness into a platform-owner report and writes artifacts under `data/platform_packs/`.
 - `WorkerScaleOutService` simulates local worker pools for governed skill execution, performs sandbox preflight before dispatch, records transparent run timelines, derives scale recommendations from capacity forecasts and run history, and writes Worker Scale-Out Runbook artifacts under `data/worker_runbooks/`.
+- `TaskRunObservabilityService` normalizes invocation history, worker timelines, sandbox decisions, sandbox exception reviews, and audit-only events into a unified local task-run ledger with state observation, bounded action-loop steps, replay commands, and ignored `data/run_transparency/` artifacts.
 - `PrivacyRetentionService` scans invocation inputs, invocation outputs, audit metadata, and ad hoc JSON payloads for local PII-like patterns, returns redacted previews and retention actions, and writes Privacy Retention artifacts under `data/privacy_packs/`.
 - `EnterpriseReadinessService` aggregates governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into an executive scorecard and portfolio demo pack under `data/portfolio_demo/`.
 - `PortfolioEvidenceService` maps recruiter JD skills to concrete implementation proof across MCP tools/resources/prompts, FastAPI APIs, manifests, governance, audit, evals, release, capacity, tenant, incident, readiness, smoke, and launch checklist surfaces, then writes an Interview Pack under `data/portfolio_packs/`.
@@ -95,6 +96,14 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 5. Allowed runs dispatch through `SkillInvocationService` using the local/mock provider and record the invocation id, invocation trace id, output, latency, metrics, and audit evidence.
 6. `GET /workers/scale-plan` combines recent worker runs with capacity forecasts to show pool status, backlog by skill, and scale recommendations.
 7. `POST /workers/runbook-pack` writes JSON/Markdown evidence for worker scale-out, run transparency, task sandbox, typed contracts, and structured outputs under `data/worker_runbooks/`.
+
+## Task Run Transparency Flow
+
+1. Existing local services continue to own invocations, worker runs, sandbox decisions, exception reviews, and audit events.
+2. `GET /runs/ledger` observes those records and projects them into one typed ledger with trace ids, checkpoints, actors, risk flags, governance links, and replay commands.
+3. The ledger exposes a bounded reviewer loop: observe state, verify trace coverage, review failed or denied runs, replay representative invocations, and export the pack.
+4. `POST /runs/transparency-pack` writes JSON/Markdown evidence under ignored `data/run_transparency/`.
+5. No hosted tracing backend, browser automation, queue, GitHub API, Azure, or OpenAI service is required.
 
 ## Workflow Composition Flow
 

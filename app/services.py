@@ -190,6 +190,10 @@ from app.models import (
     SupplyChainPackRequest,
     SupplyChainPackResult,
     SupplyChainReport,
+    TaskRunLedgerEntry,
+    TaskRunObservabilityResult,
+    TaskRunTransparencyPackRequest,
+    TaskRunTransparencyPackResult,
     TenantCapabilityDecision,
     TenantEntitlementCoverageRecord,
     TenantEntitlementCoverageResult,
@@ -17485,6 +17489,7 @@ class DashboardSmokeService:
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
+            {"id": "run_transparency", "label": "Run Transparency", "purpose": "Unified task-run ledger, state observation, and replay guidance."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "sandbox_exceptions", "label": "Sandbox Exceptions", "purpose": "Human review queue for sandbox-denied tool requests."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
@@ -17550,6 +17555,8 @@ class DashboardSmokeService:
             self._endpoint_ref("worker_run_submit", "POST", "/workers/runs", "Queues and executes a sandboxed local worker run."),
             self._endpoint_ref("worker_scale_plan", "GET", "/workers/scale-plan", "Worker pool scale plan and backlog forecast."),
             self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
+            self._endpoint_ref("run_ledger", "GET", "/runs/ledger", "Unified task-run observability ledger."),
+            self._endpoint_ref("run_transparency_pack", "POST", "/runs/transparency-pack", "Writes Task Run Transparency artifacts."),
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
             self._endpoint_ref("sandbox_evaluate", "POST", "/sandbox/evaluate", "Dry-run sandbox decision for an invocation."),
             self._endpoint_ref("sandbox_policy_pack", "POST", "/sandbox/policy-pack", "Writes Invocation Sandbox Policy artifacts."),
@@ -17613,6 +17620,7 @@ class DashboardSmokeService:
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
+            self._artifact_tab("run_transparency", "Run Transparency", "Transparency Pack", "data/run_transparency/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
@@ -17693,6 +17701,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/policy-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers",
@@ -17720,6 +17730,7 @@ class DashboardSmokeService:
             'rg "config/hygiene|Config Hygiene|config_hygiene|secret rotation" app dashboard docs README.md tests scripts sample_data',
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "workers/scale-plan|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
+            'rg "runs/ledger|runs/transparency-pack|Run Transparency|run_transparency" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/policy|sandbox/evaluate|Invocation Sandbox|sandbox_policies|X-Sandbox-Enforce" app dashboard docs README.md tests scripts sample_data',
             'rg "sandbox/exceptions|Sandbox Exceptions|sandbox_exceptions|sandbox exception" app dashboard docs README.md tests scripts sample_data',
             'rg "supply-chain|supply_chain|Supply Chain|SBOM" app dashboard docs README.md tests scripts sample_data',
@@ -17736,6 +17747,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\config_hygiene -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\run_transparency -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_policies -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\sandbox_exceptions -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\supply_chain -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -18451,6 +18463,520 @@ class WorkerScaleOutService:
             "## Local Proof Commands",
             "",
             *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
+class TaskRunObservabilityService:
+    LEDGER_ID = "task_run_observability_latest"
+    PACK_ID = "task_run_transparency_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "run_transparency"
+
+    def ledger(self) -> TaskRunObservabilityResult:
+        entries = self._ledger_entries()
+        observations = self._observations(entries)
+        risk_count = sum(1 for entry in entries if entry.risk_flags)
+        failed_count = sum(1 for entry in entries if entry.status in {"failed", "deny", "denied"})
+        readiness_status: SecurityReadinessStatus = "ready"
+        if failed_count or risk_count:
+            readiness_status = "needs_review"
+        if not self._gitignore_ok():
+            readiness_status = "blocked"
+        return TaskRunObservabilityResult(
+            ledger_id=self.LEDGER_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "local_only": True,
+                "mock_provider": self.app_state.provider.name == "mock",
+                "ledger_entry_count": len(entries),
+                "failed_entry_count": failed_count,
+                "risk_flag_count": risk_count,
+                "trace_id_count": observations["trace_id_count"],
+                "checkpoint_count": sum(entry.checkpoint_count for entry in entries),
+                "artifact_directory": str(self.output_dir),
+            },
+            observations=observations,
+            ledger=entries,
+            bounded_action_loop=self._bounded_action_loop(entries, observations),
+            verification_commands=self._verification_commands(),
+            patterns_used=[
+                "run transparency",
+                "state observation",
+                "bounded action loop",
+                "step verification",
+                "task sandbox",
+            ],
+            limitations=self._limitations(),
+        )
+
+    def transparency_pack(
+        self,
+        request: TaskRunTransparencyPackRequest | None = None,
+    ) -> TaskRunTransparencyPackResult:
+        request = request or TaskRunTransparencyPackRequest()
+        ledger = self.ledger()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": ledger.readiness_status,
+            "task_run_ledger": ledger.model_dump(mode="json"),
+            "architecture_patterns": ledger.patterns_used,
+            "observations": ledger.observations,
+            "bounded_action_loop": ledger.bounded_action_loop,
+            "verification_commands": ledger.verification_commands,
+            "limitations": ledger.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "runs.transparency_pack_exported",
+            "task_run_transparency_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": ledger.readiness_status,
+                "ledger_entry_count": ledger.summary["ledger_entry_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return TaskRunTransparencyPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=ledger.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **ledger.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _ledger_entries(self) -> list[TaskRunLedgerEntry]:
+        entries: list[TaskRunLedgerEntry] = []
+        seen_trace_ids: set[str] = set()
+        for invocation in self.app_state.invocation_service.invocations:
+            seen_trace_ids.add(invocation.trace_id)
+            entries.append(self._invocation_entry(invocation))
+        for run in self.app_state.worker_scaleout.list_runs():
+            seen_trace_ids.add(run.trace_id)
+            entries.append(self._worker_entry(run))
+        for decision in self.app_state.invocation_sandbox.decisions:
+            seen_trace_ids.add(decision.trace_id)
+            entries.append(self._sandbox_decision_entry(decision))
+        for record in self.app_state.sandbox_exceptions.records:
+            seen_trace_ids.add(record.trace_id)
+            entries.append(self._sandbox_exception_entry(record))
+        for event in self.app_state.audit.events:
+            if event.trace_id in seen_trace_ids:
+                continue
+            if event.action.startswith(
+                (
+                    "skill.",
+                    "worker_run.",
+                    "sandbox.",
+                    "workflow_template.",
+                    "agent.",
+                    "platform.",
+                    "api.",
+                )
+            ):
+                entries.append(self._audit_event_entry(event))
+        return sorted(entries, key=lambda entry: entry.created_at, reverse=True)
+
+    def _invocation_entry(self, invocation: SkillInvocation) -> TaskRunLedgerEntry:
+        events = self._events_for_trace(invocation.trace_id)
+        risk_flags = []
+        if invocation.status == "failed":
+            risk_flags.append("failed_invocation")
+        if invocation.policy_decision and invocation.policy_decision.decision == "deny":
+            risk_flags.append("policy_denied")
+        if invocation.entitlement_decision and invocation.entitlement_decision.decision == "deny":
+            risk_flags.append("entitlement_denied")
+        if invocation.sandbox_decision and invocation.sandbox_decision.decision == "deny":
+            risk_flags.append("sandbox_denied")
+        return TaskRunLedgerEntry(
+            run_id=invocation.id,
+            run_type="skill_invocation",
+            source="SkillInvocationService",
+            status=invocation.status,
+            actor=self._actor_for_trace(invocation.trace_id),
+            resource_type="skill",
+            resource_id=invocation.skill_id,
+            skill_id=invocation.skill_id,
+            trace_id=invocation.trace_id,
+            created_at=invocation.created_at,
+            updated_at=invocation.created_at,
+            checkpoint_count=max(1, len(events)),
+            timeline=self._event_timeline(events) or [
+                self._timeline_row(invocation.created_at, invocation.status, "invocation_recorded", {})
+            ],
+            risk_flags=risk_flags,
+            governance_links={
+                "audit_event_count": len(events),
+                "policy_decision": invocation.policy_decision.decision if invocation.policy_decision else "not_enforced",
+                "sandbox_decision": invocation.sandbox_decision.decision if invocation.sandbox_decision else "not_enforced",
+                "reliability_endpoint": "GET /reliability/skills",
+                "usage_endpoint": "GET /usage/analytics",
+            },
+            replay_commands=[
+                f"Invoke-RestMethod http://localhost:8000/invocations/{invocation.id}/replay -Method POST -Headers $headers"
+            ],
+            summary={
+                "version": invocation.version,
+                "latency_ms": invocation.latency_ms,
+                "estimated_cost": invocation.token_usage.estimated_cost,
+                "error": invocation.error,
+            },
+        )
+
+    def _worker_entry(self, run: WorkerSkillRunRecord) -> TaskRunLedgerEntry:
+        risk_flags = ["worker_run_failed"] if run.status == "failed" else []
+        if run.sandbox_decision and run.sandbox_decision.decision == "deny":
+            risk_flags.append("sandbox_denied_before_dispatch")
+        body = json.dumps(
+            {
+                "skill_id": run.skill_id,
+                "input": run.input,
+                "worker_pool": run.worker_pool,
+                "actor": "run-ledger-reviewer",
+                "enforce_sandbox": True,
+            }
+        )
+        return TaskRunLedgerEntry(
+            run_id=run.run_id,
+            run_type="worker_run",
+            source="WorkerScaleOutService",
+            status=run.status,
+            actor=run.actor,
+            resource_type="worker_run",
+            resource_id=run.run_id,
+            skill_id=run.skill_id,
+            trace_id=run.trace_id,
+            created_at=run.created_at,
+            updated_at=run.updated_at,
+            checkpoint_count=len(run.timeline),
+            timeline=[event.model_dump(mode="json") for event in run.timeline],
+            risk_flags=risk_flags,
+            governance_links={
+                "worker_pool": run.worker_pool,
+                "invocation_id": run.invocation_id,
+                "sandbox_decision": run.sandbox_decision.decision if run.sandbox_decision else "not_enforced",
+                "scale_plan_endpoint": "GET /workers/scale-plan",
+            },
+            replay_commands=[
+                f"Invoke-RestMethod http://localhost:8000/workers/runs -Method POST -Headers $headers -ContentType \"application/json\" -Body '{body}'"
+            ],
+            summary={
+                "priority": run.priority,
+                "error": run.error,
+                "timeline_stages": [event.stage for event in run.timeline],
+            },
+        )
+
+    def _sandbox_decision_entry(self, decision: InvocationSandboxDecision) -> TaskRunLedgerEntry:
+        risk_flags = []
+        if decision.decision == "deny":
+            risk_flags.append("sandbox_denied")
+        if decision.risk_label in {"high", "critical"}:
+            risk_flags.append(f"{decision.risk_label}_sandbox_risk")
+        return TaskRunLedgerEntry(
+            run_id=f"sandbox-{decision.trace_id}",
+            run_type="sandbox_decision",
+            source="InvocationSandboxPolicyService",
+            status=decision.decision,
+            actor=decision.actor,
+            resource_type="sandbox_policy",
+            resource_id=decision.skill_id,
+            skill_id=decision.skill_id,
+            trace_id=decision.trace_id,
+            created_at=decision.generated_at,
+            updated_at=decision.generated_at,
+            checkpoint_count=1,
+            timeline=[
+                self._timeline_row(
+                    decision.generated_at,
+                    decision.decision,
+                    "sandbox_evaluated",
+                    {"matched_rules": decision.matched_rules, "risk_label": decision.risk_label},
+                )
+            ],
+            risk_flags=risk_flags,
+            governance_links={
+                "endpoint": decision.endpoint,
+                "action_class": decision.action_class,
+                "policy_endpoint": "GET /sandbox/policy",
+                "exception_endpoint": "POST /sandbox/exceptions",
+            },
+            replay_commands=[
+                "Invoke-RestMethod http://localhost:8000/sandbox/evaluate -Method POST -Headers $headers"
+            ],
+            summary={
+                "risk_label": decision.risk_label,
+                "observed": decision.observed,
+                "matched_rules": decision.matched_rules,
+            },
+        )
+
+    def _sandbox_exception_entry(self, record: SandboxExceptionRecord) -> TaskRunLedgerEntry:
+        risk_flags = []
+        if record.status in {"pending", "denied"}:
+            risk_flags.append(f"sandbox_exception_{record.status}")
+        return TaskRunLedgerEntry(
+            run_id=record.exception_id,
+            run_type="sandbox_exception",
+            source="SandboxExceptionReviewService",
+            status=record.status,
+            actor=record.requested_by,
+            resource_type="sandbox_exception",
+            resource_id=record.exception_id,
+            skill_id=record.skill_id,
+            trace_id=record.trace_id,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            checkpoint_count=2 if record.reviewer else 1,
+            timeline=[
+                self._timeline_row(record.created_at, "pending", "exception_submitted", {}),
+                self._timeline_row(
+                    record.updated_at,
+                    record.status,
+                    "review_decision" if record.reviewer else "awaiting_review",
+                    {"reviewer": record.reviewer, "notes": record.reviewer_notes},
+                ),
+            ],
+            risk_flags=risk_flags,
+            governance_links={
+                "action_class": record.action_class,
+                "sandbox_decision": record.sandbox_decision.decision,
+                "queue_endpoint": "GET /sandbox/exceptions",
+                "decision_endpoint": "POST /sandbox/exceptions/{exception_id}/decision",
+            },
+            replay_commands=[
+                "Invoke-RestMethod http://localhost:8000/sandbox/exceptions -Headers $headers"
+            ],
+            summary={
+                "business_justification": record.business_justification,
+                "approval_conditions": record.approval_conditions,
+            },
+        )
+
+    def _audit_event_entry(self, event: AuditEvent) -> TaskRunLedgerEntry:
+        status = str(event.metadata.get("status") or event.metadata.get("decision") or "recorded")
+        return TaskRunLedgerEntry(
+            run_id=event.id,
+            run_type="audit_event",
+            source="AuditService",
+            status=status,
+            actor=event.actor,
+            resource_type=event.resource_type,
+            resource_id=event.resource_id,
+            skill_id=event.resource_id if event.resource_type == "skill" else None,
+            trace_id=event.trace_id,
+            created_at=event.created_at,
+            updated_at=event.created_at,
+            checkpoint_count=1,
+            timeline=[self._timeline_row(event.created_at, status, event.action, event.metadata)],
+            risk_flags=[],
+            governance_links={"audit_action": event.action, "audit_endpoint": "GET /audit/events"},
+            replay_commands=["Invoke-RestMethod http://localhost:8000/audit/events -Headers $headers"],
+            summary={"metadata": event.metadata},
+        )
+
+    def _observations(self, entries: list[TaskRunLedgerEntry]) -> JsonDict:
+        by_type: dict[str, int] = defaultdict(int)
+        by_status: dict[str, int] = defaultdict(int)
+        trace_ids: set[str] = set()
+        missing_replay = []
+        for entry in entries:
+            by_type[entry.run_type] += 1
+            by_status[entry.status] += 1
+            trace_ids.add(entry.trace_id)
+            if not entry.replay_commands:
+                missing_replay.append(entry.run_id)
+        return {
+            "observed_at": utc_now().isoformat(),
+            "ledger_entry_count": len(entries),
+            "trace_id_count": len(trace_ids),
+            "counts_by_type": dict(sorted(by_type.items())),
+            "counts_by_status": dict(sorted(by_status.items())),
+            "sandbox_decision_count": len(self.app_state.invocation_sandbox.decisions),
+            "worker_run_count": len(self.app_state.worker_scaleout.runs),
+            "invocation_count": len(self.app_state.invocation_service.invocations),
+            "audit_event_count": len(self.app_state.audit.events),
+            "missing_replay_command_count": len(missing_replay),
+            "missing_replay_command_ids": missing_replay[:10],
+        }
+
+    def _bounded_action_loop(
+        self,
+        entries: list[TaskRunLedgerEntry],
+        observations: JsonDict,
+    ) -> list[JsonDict]:
+        return [
+            self._step(
+                1,
+                "observe_run_state",
+                "state observation",
+                "pass" if observations["ledger_entry_count"] >= 1 else "warn",
+                f"Observed {observations['ledger_entry_count']} local run ledger entries.",
+                "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
+            ),
+            self._step(
+                2,
+                "verify_trace_coverage",
+                "run transparency",
+                "pass" if observations["trace_id_count"] >= 1 else "warn",
+                f"Observed {observations['trace_id_count']} unique trace id(s).",
+                "Invoke-RestMethod http://localhost:8000/audit/events -Headers $headers",
+            ),
+            self._step(
+                3,
+                "review_failed_or_denied_runs",
+                "task sandbox",
+                "pass" if not any(entry.risk_flags for entry in entries) else "warn",
+                f"Risk-bearing entries: {sum(1 for entry in entries if entry.risk_flags)}.",
+                "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
+            ),
+            self._step(
+                4,
+                "replay_representative_invocation",
+                "step verification",
+                "pass" if any(entry.run_type == "skill_invocation" for entry in entries) else "warn",
+                "Use the per-entry replay command for deterministic invocation verification.",
+                "Invoke-RestMethod http://localhost:8000/invocations/{invocation_id}/replay -Method POST -Headers $headers",
+            ),
+            self._step(
+                5,
+                "export_reviewer_pack",
+                "bounded action loop",
+                "pass",
+                "Write the local Markdown/JSON pack after observations are reviewed.",
+                "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
+            ),
+        ]
+
+    def _step(
+        self,
+        index: int,
+        step_id: str,
+        pattern: str,
+        status: str,
+        observation: str,
+        verification_command: str,
+    ) -> JsonDict:
+        return {
+            "step": index,
+            "id": step_id,
+            "pattern": pattern,
+            "status": status,
+            "observation": observation,
+            "verification_command": verification_command,
+            "stop_condition": "Stop and open a reviewer ticket if this step is warn or fail.",
+        }
+
+    def _events_for_trace(self, trace_id: str) -> list[AuditEvent]:
+        return [event for event in self.app_state.audit.events if event.trace_id == trace_id]
+
+    def _actor_for_trace(self, trace_id: str) -> str:
+        events = self._events_for_trace(trace_id)
+        return events[0].actor if events else "unknown"
+
+    def _event_timeline(self, events: list[AuditEvent]) -> list[JsonDict]:
+        return [
+            self._timeline_row(event.created_at, str(event.metadata.get("status", "recorded")), event.action, event.metadata)
+            for event in sorted(events, key=lambda item: item.created_at)
+        ]
+
+    def _timeline_row(
+        self,
+        timestamp: datetime,
+        status: str,
+        stage: str,
+        metadata: JsonDict,
+    ) -> JsonDict:
+        return {
+            "timestamp": timestamp.isoformat(),
+            "status": status,
+            "stage": stage,
+            "metadata": metadata,
+        }
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_run_observability.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
+            'rg "runs/ledger|Run Transparency|run_transparency|task run" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\run_transparency -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The ledger is built from in-memory local services and generated artifacts; it is not a distributed tracing backend.",
+            "No browser, GitHub, Azure, OpenAI, queue, or background worker network calls are made.",
+            "Replay commands are deterministic local reviewer commands, not automatic incident remediation.",
+            "Generated run-transparency artifacts are written under ignored data/run_transparency/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/run_transparency/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        ledger = bundle["task_run_ledger"]
+        lines = [
+            "# Task Run Transparency Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Ledger entries: `{ledger['summary']['ledger_entry_count']}`",
+            f"- Risk flags: `{ledger['summary']['risk_flag_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Observations",
+            "",
+            *[f"- `{key}`: `{value}`" for key, value in bundle["observations"].items() if key != "missing_replay_command_ids"],
+            "",
+            "## Bounded Action Loop",
+            "",
+            *[
+                f"- Step {step['step']} `{step['status']}` {step['id']}: {step['observation']} Verify with `{step['verification_command']}`"
+                for step in bundle["bounded_action_loop"]
+            ],
+            "",
+            "## Ledger",
+            "",
+            *[
+                f"- `{entry['run_id']}` `{entry['run_type']}` `{entry['status']}` trace=`{entry['trace_id']}` risk=`{', '.join(entry['risk_flags']) or 'none'}`"
+                for entry in ledger["ledger"][:30]
+            ],
+            "",
+            "## Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["verification_commands"]],
             "",
             "## Limitations",
             "",
@@ -19299,6 +19825,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
                 ["worker_scaleout_runbook_latest.json", "worker_scaleout_runbook_latest.md"],
                 "Worker-pool scale plan, sandbox preflight evidence, transparent run timelines, and local/mock worker limitations.",
+            ),
+            self._catalog_row(
+                "run_transparency",
+                "Task Run Transparency Pack",
+                Path("data") / "run_transparency",
+                "POST /runs/transparency-pack",
+                "Invoke-RestMethod http://localhost:8000/runs/transparency-pack -Method POST -Headers $headers",
+                ["task_run_transparency_pack_latest.json", "task_run_transparency_pack_latest.md"],
+                "Unified task-run ledger across invocations, worker runs, sandbox decisions, exceptions, audit evidence, replay commands, and bounded verification steps.",
             ),
             self._catalog_row(
                 "sandbox_policies",
@@ -21146,6 +21681,7 @@ class AppState:
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
+    task_runs: TaskRunObservabilityService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
     api_contracts: ApiContractService = field(init=False)
     git_readiness: GitReadinessService = field(init=False)
@@ -21211,6 +21747,7 @@ class AppState:
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
+        self.task_runs = TaskRunObservabilityService(self)
         self.artifacts = ArtifactInventoryService(self)
         self.final_handoff = FinalHandoffService(self)
         self.api_contracts = ApiContractService(self)

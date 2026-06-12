@@ -105,6 +105,8 @@ class ApiContractService:
         ("POST", "/workers/runs"),
         ("GET", "/workers/scale-plan"),
         ("POST", "/workers/runbook-pack"),
+        ("GET", "/runs/ledger"),
+        ("POST", "/runs/transparency-pack"),
     ]
 
     DEMO_FLOW_ENDPOINTS = [
@@ -161,6 +163,8 @@ class ApiContractService:
         ("POST", "/workers/runs"),
         ("GET", "/workers/scale-plan"),
         ("POST", "/workers/runbook-pack"),
+        ("GET", "/runs/ledger"),
+        ("POST", "/runs/transparency-pack"),
     ]
 
     def __init__(
@@ -1595,6 +1599,8 @@ class ApiContractService:
             "/workers/runs": "state.worker_scaleout.submit_run",
             "/workers/scale-plan": "state.worker_scaleout.scale_plan",
             "/workers/runbook-pack": "state.worker_scaleout.runbook_pack",
+            "/runs/ledger": "state.task_runs.ledger",
+            "/runs/transparency-pack": "state.task_runs.transparency_pack",
         }
         return hints.get(path, path)
 

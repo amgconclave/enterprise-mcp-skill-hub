@@ -26,6 +26,7 @@ data/platform_packs/
 data/agent_collaboration/
 data/agent_society_evals/
 data/worker_runbooks/
+data/run_transparency/
 data/sandbox_policies/
 data/sandbox_exceptions/
 data/prompt_governance/

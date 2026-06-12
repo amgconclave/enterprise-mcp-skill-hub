@@ -1481,6 +1481,58 @@ class ApiContractRemediationPackResult(BaseModel):
     summary: JsonDict
 
 
+class TaskRunLedgerEntry(BaseModel):
+    run_id: str
+    run_type: Literal[
+        "skill_invocation",
+        "worker_run",
+        "sandbox_decision",
+        "sandbox_exception",
+        "audit_event",
+    ]
+    source: str
+    status: str
+    actor: str
+    resource_type: str
+    resource_id: str
+    skill_id: str | None = None
+    trace_id: str
+    created_at: datetime
+    updated_at: datetime
+    checkpoint_count: int
+    timeline: list[JsonDict] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    governance_links: JsonDict = Field(default_factory=dict)
+    replay_commands: list[str] = Field(default_factory=list)
+    summary: JsonDict = Field(default_factory=dict)
+
+
+class TaskRunObservabilityResult(BaseModel):
+    ledger_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    observations: JsonDict
+    ledger: list[TaskRunLedgerEntry] = Field(default_factory=list)
+    bounded_action_loop: list[JsonDict] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class TaskRunTransparencyPackRequest(BaseModel):
+    actor: str = "run-transparency-reviewer"
+
+
+class TaskRunTransparencyPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class FinalAuditCheck(BaseModel):
     id: str
     category: str

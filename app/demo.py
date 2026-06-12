@@ -46,6 +46,7 @@ from app.models import (
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
+    TaskRunTransparencyPackRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
     TenantSandboxExportRequest,
@@ -256,6 +257,10 @@ async def main() -> None:
     worker_scale_plan = await state.worker_scaleout.scale_plan()
     worker_runbook = await state.worker_scaleout.runbook_pack(
         WorkerRunbookPackRequest(actor="demo-platform-sre")
+    )
+    task_run_ledger = state.task_runs.ledger()
+    task_run_transparency_pack = state.task_runs.transparency_pack(
+        TaskRunTransparencyPackRequest(actor="demo-run-transparency-reviewer")
     )
     invocation_sandbox_report = state.invocation_sandbox.report()
     invocation_sandbox_pack = state.invocation_sandbox.pack(
@@ -523,6 +528,12 @@ async def main() -> None:
                 "worker_run_timeline_stages": len(worker_run.timeline),
                 "worker runbook path": worker_runbook.markdown_path,
                 "worker_runbook_path": worker_runbook.markdown_path,
+                "task run ledger readiness": task_run_ledger.readiness_status,
+                "task_run_ledger_readiness": task_run_ledger.readiness_status,
+                "task run ledger entries": task_run_ledger.summary["ledger_entry_count"],
+                "task_run_ledger_entries": task_run_ledger.summary["ledger_entry_count"],
+                "task run transparency pack path": task_run_transparency_pack.markdown_path,
+                "task_run_transparency_pack_path": task_run_transparency_pack.markdown_path,
                 "invocation sandbox readiness": invocation_sandbox_report.readiness_status,
                 "invocation_sandbox_readiness": invocation_sandbox_report.readiness_status,
                 "invocation sandbox denied decisions": invocation_sandbox_report.summary[
