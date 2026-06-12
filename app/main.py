@@ -99,6 +99,9 @@ from app.models import (
     MarketplaceStageAdvanceRequest,
     McpToolDefinition,
     PolicyInvocationContext,
+    PolicyReplayDriftReport,
+    PolicyReplayPackRequest,
+    PolicyReplayPackResult,
     PolicySimulationRequest,
     PolicySimulationResult,
     PortfolioEvidenceIndexResult,
@@ -283,6 +286,19 @@ def simulate_policy(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return state.policy.simulate(manifest, request)
+
+
+@app.get("/policy/replay-drift", response_model=PolicyReplayDriftReport)
+def policy_replay_drift(_: str = Depends(require_api_key)) -> PolicyReplayDriftReport:
+    return state.policy_replay.report(actor="api-policy-replay-reviewer")
+
+
+@app.post("/policy/replay-pack", response_model=PolicyReplayPackResult)
+def policy_replay_pack(
+    request: PolicyReplayPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> PolicyReplayPackResult:
+    return state.policy_replay.pack(request or PolicyReplayPackRequest())
 
 
 @app.get("/sandbox/policy", response_model=InvocationSandboxReport)

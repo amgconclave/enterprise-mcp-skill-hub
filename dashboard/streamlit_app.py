@@ -43,6 +43,7 @@ from app.models import (
     MarketplaceRolloutPackRequest,
     MarketplaceStageAdvanceRequest,
     PolicyInvocationContext,
+    PolicyReplayPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
     PrivacyRedactionRequest,
@@ -128,6 +129,7 @@ view = st.sidebar.radio(
         "Agent Society Evaluation",
         "Worker Scale-Out",
         "Run Transparency",
+        "Policy Replay",
         "Audit Integrity",
         "Prompt Governance",
         "Privacy Retention",
@@ -1564,6 +1566,53 @@ elif view == "Run Transparency":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(ledger.model_dump(mode="json"))
+
+elif view == "Policy Replay":
+    st.subheader("Policy Replay")
+    st.caption("Replay historical and baseline policy decisions against current governance rules.")
+    report = state.policy_replay.report(actor="streamlit-policy-replay")
+    col_ready, col_records, col_drift, col_queue = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_records.metric("Records", report.summary["record_count"])
+    col_drift.metric("Drift", report.summary["drift_count"])
+    col_queue.metric("Review Queue", report.summary["approval_queue_count"])
+
+    tab_records, tab_queue, tab_steps, tab_export, tab_json = st.tabs(
+        ["Replay Records", "Approval Queue", "Review Steps", "Policy Replay Pack", "JSON"]
+    )
+    with tab_records:
+        st.dataframe(
+            [
+                {
+                    "record_id": record.record_id,
+                    "source": record.source_type,
+                    "skill": record.skill_id,
+                    "original": record.original_decision,
+                    "replay": record.replay_decision,
+                    "status": record.status,
+                    "reviewer_action": record.reviewer_action,
+                }
+                for record in report.records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if report.records:
+            st.json(report.records[0].model_dump(mode="json"))
+    with tab_queue:
+        st.dataframe(report.approval_queue, use_container_width=True, hide_index=True)
+    with tab_steps:
+        st.dataframe(report.bounded_review_steps, use_container_width=True, hide_index=True)
+        st.json({"state_observations": report.state_observations, "patterns": report.architecture_patterns})
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/policy_replay/.")
+        actor = st.text_input("Policy replay actor", value="streamlit-policy-reviewer")
+        if st.button("Export Policy Replay Pack", use_container_width=True):
+            export = state.policy_replay.pack(PolicyReplayPackRequest(actor=actor))
+            st.success("Policy Replay Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Audit Integrity":
     st.subheader("Audit Integrity")

@@ -40,6 +40,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Agent Society Evaluation Pack for role-playing agent coverage, shared memory alignment, governed handoff checks, MCP tool-use evidence, policy-stop evaluation, and ignored `data/agent_society_evals/` artifacts.
 - Worker Scale-Out Runbook and Queue Admission Pack for local worker pools, tenant fair-share admission, sandbox preflight, transparent queued runs, capacity-backed scale recommendations, and ignored `data/worker_runbooks/` artifacts.
 - Task Run Transparency Pack for a unified local ledger across skill invocations, worker runs, sandbox decisions, exception reviews, and audit-only events with state observation, bounded verification steps, replay commands, and ignored `data/run_transparency/` artifacts.
+- Policy Replay Drift Pack for replaying historical and baseline policy decisions against current rules, surfacing drift or missing evidence, HITL approval queue rows, bounded review steps, audit events, and ignored `data/policy_replay/` artifacts.
 - Audit Integrity Pack for deterministic local hash-chain verification across audit events and skill invocations, with root hash, gap checks, replay commands, dashboard review, and ignored `data/audit_integrity/` artifacts.
 - Invocation Sandbox Policy Pack for mock tool payload limits, blocked action classes, risk labels, FastAPI/MCP endpoint policy, enforced denied invocations, and ignored `data/sandbox_policies/` artifacts.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, remediation action-loop plans, audit events, and ignored `data/prompt_governance/` artifacts.
@@ -59,7 +60,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Policy Replay, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -125,6 +126,8 @@ Invoke-RestMethod http://localhost:8000/agents/collaborate -Method POST -Headers
 Invoke-RestMethod http://localhost:8000/agents/collaboration-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/agents/society-eval -Headers $headers
 Invoke-RestMethod http://localhost:8000/agents/society-eval-pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers
+Invoke-RestMethod http://localhost:8000/policy/replay-pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/prompt-governance/report -Headers $headers
 Invoke-RestMethod http://localhost:8000/prompt-governance/pack -Method POST -Headers $headers
 Invoke-RestMethod http://localhost:8000/privacy/retention-report -Headers $headers
@@ -658,6 +661,19 @@ Get-ChildItem -Recurse -File data\run_transparency -ErrorAction SilentlyContinue
 `GET /workers/scale-plan` returns worker pool status, forecast-backed backlog by skill, recommendations, recent transparent runs, proof commands, and limitations. `POST /workers/runbook-pack` writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. The Streamlit dashboard has a `Worker Scale-Out` view, and `python -m app.demo` prints worker scale-out readiness plus the runbook path.
 
 `GET /runs/ledger` returns a unified task-run observability ledger across skill invocations, worker runs, sandbox decisions, exception reviews, and audit-only events. It includes trace ids, checkpoints, risk flags, governance links, replay commands, state observations, bounded action-loop steps, and verification commands. `POST /runs/transparency-pack` writes `task_run_transparency_pack_latest.json` and `.md` under ignored `data/run_transparency/`. The Streamlit dashboard has a `Run Transparency` view, and `python -m app.demo` prints task-run ledger readiness, entry count, and artifact path.
+
+## Policy Replay Drift Pack
+
+Replay policy decisions before releasing changed skills, roles, or governance rules:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers
+Invoke-RestMethod http://localhost:8000/policy/replay-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\policy_replay -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /policy/replay-drift` replays policy-bearing historical invocations plus deterministic baseline allow/deny scenarios against the current local policy engine. `POST /policy/replay-pack` writes `policy_replay_pack_latest.json` and `.md` under ignored `data/policy_replay/` with drift rows, missing-evidence rows, HITL approval queue items, state observations, bounded review steps, proof commands, and limitations. The Streamlit dashboard has a `Policy Replay` view, and `python -m app.demo` prints policy replay readiness, drift count, and pack path.
 
 ## Invocation Sandbox Policy Pack
 

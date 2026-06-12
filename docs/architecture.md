@@ -36,6 +36,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `ReviewSlaService` normalizes workflow reviews, marketplace approvals, and sandbox exceptions into one human-review SLA queue with escalation policy, owner actions, trace evidence, and artifacts under `data/review_sla/`.
 - `WorkerScaleOutService` simulates local worker pools for governed skill execution, performs sandbox preflight before dispatch, records transparent run timelines, derives scale recommendations from capacity forecasts and run history, and writes Worker Scale-Out Runbook artifacts under `data/worker_runbooks/`.
 - `TaskRunObservabilityService` normalizes invocation history, worker timelines, sandbox decisions, sandbox exception reviews, and audit-only events into a unified local task-run ledger with state observation, bounded action-loop steps, replay commands, and ignored `data/run_transparency/` artifacts.
+- `PolicyReplayDriftService` replays historical policy-bearing invocations and deterministic baseline decisions against current rules, then writes HITL review evidence under ignored `data/policy_replay/`.
 - `AuditIntegrityService` projects audit events and skill invocations into a deterministic SHA-256 hash chain with root hash, gap detection, replay commands, and reviewer artifacts under ignored `data/audit_integrity/`.
 - `PrivacyRetentionService` scans invocation inputs, invocation outputs, audit metadata, and ad hoc JSON payloads for local PII-like patterns, returns redacted previews and retention actions, and writes Privacy Retention artifacts under `data/privacy_packs/`.
 - `EnterpriseReadinessService` aggregates governance, conformance, release, audit/attestation, capacity, dependency blast radius, incident drill, tenant sandbox, and demo agent behavior into an executive scorecard and portfolio demo pack under `data/portfolio_demo/`.
@@ -107,6 +108,15 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 3. The ledger exposes a bounded reviewer loop: observe state, verify trace coverage, review failed or denied runs, replay representative invocations, and export the pack.
 4. `POST /runs/transparency-pack` writes JSON/Markdown evidence under ignored `data/run_transparency/`.
 5. No hosted tracing backend, browser automation, queue, GitHub API, Azure, or OpenAI service is required.
+
+## Policy Replay Flow
+
+1. A reviewer calls `GET /policy/replay-drift`.
+2. `PolicyReplayDriftService` reads current invocation history and selects rows that carried `policy_context`.
+3. For rows with stored `policy_decision`, it re-simulates the current `PolicyService` decision and compares original versus replayed allow/deny behavior.
+4. For rows with policy context but missing enforced decision evidence, it routes a `needs_evidence` item to the approval queue.
+5. Fresh clones also run deterministic baseline allow/deny scenarios so reviewers can verify policy guardrails before traffic exists.
+6. `POST /policy/replay-pack` writes JSON/Markdown evidence under ignored `data/policy_replay/` with drift rows, approval queue, state observations, bounded review steps, and local proof commands.
 
 ## Workflow Composition Flow
 

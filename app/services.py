@@ -116,6 +116,10 @@ from app.models import (
     MarketplaceTenantEligibility,
     McpToolDefinition,
     PolicyInvocationContext,
+    PolicyReplayDriftReport,
+    PolicyReplayPackRequest,
+    PolicyReplayPackResult,
+    PolicyReplayRecord,
     PolicySimulationRequest,
     PolicySimulationResult,
     PortfolioEvidenceIndexResult,
@@ -14847,6 +14851,29 @@ class SmokeMatrixService:
                 "Writes Supply Chain SBOM + License Governance reviewer artifacts.",
             ),
             self._endpoint(
+                "policy replay",
+                "GET",
+                "/policy/replay-drift",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers",
+                [],
+                "Replays historical and baseline policy decisions against the current local policy engine.",
+            ),
+            self._endpoint(
+                "policy replay",
+                "POST",
+                "/policy/replay-pack",
+                True,
+                200,
+                "Invoke-RestMethod http://localhost:8000/policy/replay-pack -Method POST -Headers $headers",
+                [
+                    "data/policy_replay/policy_replay_pack_latest.json",
+                    "data/policy_replay/policy_replay_pack_latest.md",
+                ],
+                "Writes Policy Replay Drift reviewer artifacts with HITL approval queue and bounded review steps.",
+            ),
+            self._endpoint(
                 "prompt governance",
                 "GET",
                 "/prompt-governance/report",
@@ -18255,6 +18282,7 @@ class DashboardSmokeService:
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
             {"id": "run_transparency", "label": "Run Transparency", "purpose": "Unified task-run ledger, state observation, and replay guidance."},
+            {"id": "policy_replay", "label": "Policy Replay", "purpose": "Policy decision drift replay and HITL review evidence."},
             {"id": "audit_integrity", "label": "Audit Integrity", "purpose": "Hash-chain verification for local audit evidence."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "sandbox_exceptions", "label": "Sandbox Exceptions", "purpose": "Human review queue for sandbox-denied tool requests."},
@@ -18330,6 +18358,8 @@ class DashboardSmokeService:
             self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
             self._endpoint_ref("run_ledger", "GET", "/runs/ledger", "Unified task-run observability ledger."),
             self._endpoint_ref("run_transparency_pack", "POST", "/runs/transparency-pack", "Writes Task Run Transparency artifacts."),
+            self._endpoint_ref("policy_replay_drift", "GET", "/policy/replay-drift", "Policy decision replay drift report."),
+            self._endpoint_ref("policy_replay_pack", "POST", "/policy/replay-pack", "Writes Policy Replay Drift Pack artifacts."),
             self._endpoint_ref("audit_integrity", "GET", "/audit/integrity", "Local audit and invocation hash-chain report."),
             self._endpoint_ref("audit_integrity_pack", "POST", "/audit/integrity-pack", "Writes Audit Integrity artifacts."),
             self._endpoint_ref("sandbox_policy", "GET", "/sandbox/policy", "Invocation sandbox report and risk labels."),
@@ -18403,6 +18433,7 @@ class DashboardSmokeService:
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("worker_queue_admission", "Worker Scale-Out", "Queue Admission Pack", "data/worker_runbooks/"),
             self._artifact_tab("run_transparency", "Run Transparency", "Transparency Pack", "data/run_transparency/"),
+            self._artifact_tab("policy_replay", "Policy Replay", "Policy Replay Pack", "data/policy_replay/"),
             self._artifact_tab("audit_integrity", "Audit Integrity", "Integrity Pack", "data/audit_integrity/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
@@ -19689,6 +19720,420 @@ class WorkerScaleOutService:
             *[f"- {note}" for note in bundle["limitations"]],
             "",
         ]
+        return "\n".join(lines)
+
+
+class PolicyReplayDriftService:
+    REPORT_ID = "policy_replay_drift_latest"
+    PACK_ID = "policy_replay_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "policy_replay"
+
+    def report(self, actor: str = "policy-replay-reviewer") -> PolicyReplayDriftReport:
+        historical_records = self._historical_records()
+        baseline_records = self._baseline_records()
+        records = historical_records + baseline_records
+        drift_records = [record for record in records if record.status == "drift"]
+        needs_evidence = [record for record in records if record.status == "needs_evidence"]
+        approval_queue = self._approval_queue(drift_records, needs_evidence)
+        readiness_status: SecurityReadinessStatus = "ready"
+        if drift_records or needs_evidence:
+            readiness_status = "needs_review"
+        if not self._gitignore_ok():
+            readiness_status = "blocked"
+        report = PolicyReplayDriftReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "local_only": True,
+                "mock_provider": self.app_state.provider.name == "mock",
+                "record_count": len(records),
+                "historical_record_count": len(historical_records),
+                "baseline_scenario_count": len(baseline_records),
+                "drift_count": len(drift_records),
+                "needs_evidence_count": len(needs_evidence),
+                "approval_queue_count": len(approval_queue),
+                "artifact_directory": str(self.output_dir),
+            },
+            records=records,
+            drift_records=drift_records,
+            approval_queue=approval_queue,
+            state_observations=self._state_observations(records),
+            bounded_review_steps=self._bounded_review_steps(drift_records, needs_evidence),
+            architecture_patterns=[
+                "durable workflows",
+                "human-in-the-loop",
+                "governance",
+                "state observation",
+                "step verification",
+            ],
+            local_proof_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "policy_replay.report_generated",
+            "policy_replay",
+            self.REPORT_ID,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": report.readiness_status,
+                "record_count": report.summary["record_count"],
+                "drift_count": report.summary["drift_count"],
+                "needs_evidence_count": report.summary["needs_evidence_count"],
+            },
+        )
+        return report
+
+    def pack(self, request: PolicyReplayPackRequest | None = None) -> PolicyReplayPackResult:
+        request = request or PolicyReplayPackRequest()
+        report = self.report(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "policy_replay_report": report.model_dump(mode="json"),
+            "approval_queue": report.approval_queue,
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "audit_events": [
+                event.model_dump(mode="json")
+                for event in self.app_state.audit.events
+                if event.action.startswith("policy") or event.action.startswith("policy_replay.")
+            ],
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "policy_replay.pack_exported",
+            "policy_replay_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "record_count": report.summary["record_count"],
+                "drift_count": report.summary["drift_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return PolicyReplayPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _historical_records(self) -> list[PolicyReplayRecord]:
+        records = []
+        for invocation in self.app_state.invocation_service.invocations:
+            if not invocation.policy_context:
+                continue
+            try:
+                manifest = self.app_state.registry.get(invocation.skill_id)
+            except KeyError:
+                continue
+            replay = self.app_state.policy.simulate(manifest, invocation.policy_context)
+            if invocation.policy_decision:
+                original_decision = invocation.policy_decision.decision
+                original_rules = invocation.policy_decision.matched_rules
+                same_decision = original_decision == replay.decision
+                status = "stable" if same_decision else "drift"
+                reviewer_action = (
+                    "Retain policy evidence for audit replay."
+                    if same_decision
+                    else "Route to policy reviewer before promoting or invoking this skill."
+                )
+            else:
+                original_decision = "not_recorded"
+                original_rules = []
+                same_decision = False
+                status = "needs_evidence"
+                reviewer_action = "Regenerate the invocation with policy_context.enforce=true before relying on it."
+            records.append(
+                PolicyReplayRecord(
+                    record_id=f"historical-{invocation.id}",
+                    source_type="historical_invocation",
+                    skill_id=invocation.skill_id,
+                    version=invocation.version,
+                    policy_context=invocation.policy_context,
+                    original_decision=original_decision,
+                    replay_decision=replay.decision,
+                    same_decision=same_decision,
+                    status=status,
+                    original_rules=original_rules,
+                    replay_rules=replay.matched_rules,
+                    reviewer_action=reviewer_action,
+                    replay_command=(
+                        "Invoke-RestMethod "
+                        f"http://localhost:8000/invocations/{invocation.id}/replay "
+                        "-Method POST -Headers $headers"
+                    ),
+                    invocation_id=invocation.id,
+                    trace_id=invocation.trace_id,
+                )
+            )
+        return records
+
+    def _baseline_records(self) -> list[PolicyReplayRecord]:
+        scenarios = [
+            (
+                "baseline-agent-internal-allow",
+                "summarize_document",
+                "allow",
+                PolicyInvocationContext(role="agent", data_sensitivity="internal", enforce=True),
+            ),
+            (
+                "baseline-viewer-confidential-deny",
+                "summarize_document",
+                "deny",
+                PolicyInvocationContext(role="viewer", data_sensitivity="confidential", enforce=True),
+            ),
+            (
+                "baseline-viewer-agent-tool-deny",
+                "classify_request",
+                "deny",
+                PolicyInvocationContext(role="viewer", data_sensitivity="public", enforce=True),
+            ),
+        ]
+        records = []
+        for scenario_id, skill_id, expected_decision, context in scenarios:
+            try:
+                manifest = self.app_state.registry.get(skill_id)
+            except KeyError:
+                continue
+            replay = self.app_state.policy.simulate(manifest, context)
+            same_decision = expected_decision == replay.decision
+            records.append(
+                PolicyReplayRecord(
+                    record_id=scenario_id,
+                    source_type="baseline_scenario",
+                    skill_id=skill_id,
+                    version=manifest.version,
+                    policy_context=context,
+                    original_decision=expected_decision,
+                    replay_decision=replay.decision,
+                    same_decision=same_decision,
+                    status="stable" if same_decision else "drift",
+                    original_rules=["baseline_expected_policy_decision"],
+                    replay_rules=replay.matched_rules,
+                    reviewer_action=(
+                        "Baseline guardrail is stable."
+                        if same_decision
+                        else "Review changed policy behavior against tenant and MCP exposure expectations."
+                    ),
+                    replay_command=(
+                        "Invoke-RestMethod http://localhost:8000/policy/simulate "
+                        "-Method POST -Headers $headers -ContentType \"application/json\" "
+                        f"-Body '{{\"skill_id\":\"{skill_id}\",\"role\":\"{context.role}\","
+                        f"\"environment\":\"{context.environment}\","
+                        f"\"data_sensitivity\":\"{context.data_sensitivity}\","
+                        f"\"requested_action\":\"{context.requested_action}\"}}'"
+                    ),
+                )
+            )
+        return records
+
+    def _approval_queue(
+        self,
+        drift_records: list[PolicyReplayRecord],
+        needs_evidence: list[PolicyReplayRecord],
+    ) -> list[JsonDict]:
+        queue = []
+        for record in drift_records:
+            queue.append(
+                {
+                    "queue_id": f"policy-drift-{record.record_id}",
+                    "status": "review_required",
+                    "owner_role": "policy_owner",
+                    "skill_id": record.skill_id,
+                    "reason": f"Decision changed from {record.original_decision} to {record.replay_decision}.",
+                    "approval_gate": "policy_owner_signoff_before_release",
+                    "replay_command": record.replay_command,
+                }
+            )
+        for record in needs_evidence:
+            queue.append(
+                {
+                    "queue_id": f"policy-evidence-{record.record_id}",
+                    "status": "evidence_required",
+                    "owner_role": "platform_reviewer",
+                    "skill_id": record.skill_id,
+                    "reason": "Historical invocation had policy context but no recorded policy decision.",
+                    "approval_gate": "replay_or_reinvoke_with_enforced_policy",
+                    "replay_command": record.replay_command,
+                }
+            )
+        return queue
+
+    def _state_observations(self, records: list[PolicyReplayRecord]) -> list[JsonDict]:
+        decisions = defaultdict(int)
+        for record in records:
+            decisions[record.replay_decision] += 1
+        policy_audit_count = sum(1 for event in self.app_state.audit.events if event.action.startswith("policy"))
+        return [
+            {
+                "id": "historical_policy_coverage",
+                "status": "observed",
+                "value": sum(1 for record in records if record.source_type == "historical_invocation"),
+                "detail": "Historical invocations with policy context are replayed when present.",
+            },
+            {
+                "id": "baseline_guardrails",
+                "status": "observed",
+                "value": sum(1 for record in records if record.source_type == "baseline_scenario"),
+                "detail": "Fresh-clone allow/deny policy expectations are replayed without external services.",
+            },
+            {
+                "id": "current_decision_distribution",
+                "status": "observed",
+                "value": dict(sorted(decisions.items())),
+                "detail": "Current policy engine decision distribution across replay records.",
+            },
+            {
+                "id": "policy_audit_events",
+                "status": "observed",
+                "value": policy_audit_count,
+                "detail": "Local audit events tied to policy denials and replay exports.",
+            },
+        ]
+
+    def _bounded_review_steps(
+        self,
+        drift_records: list[PolicyReplayRecord],
+        needs_evidence: list[PolicyReplayRecord],
+    ) -> list[JsonDict]:
+        return [
+            {
+                "step": "observe_policy_state",
+                "status": "complete",
+                "pattern": "state observation",
+                "verification": "GET /policy/replay-drift",
+            },
+            {
+                "step": "replay_decisions",
+                "status": "complete",
+                "pattern": "durable workflows",
+                "verification": "POST /policy/replay-pack",
+            },
+            {
+                "step": "route_drift_to_reviewer",
+                "status": "required" if drift_records or needs_evidence else "not_required",
+                "pattern": "human-in-the-loop",
+                "verification": "Open data/policy_replay/policy_replay_pack_latest.md",
+            },
+            {
+                "step": "release_gate",
+                "status": "blocked" if drift_records else "clear",
+                "pattern": "governance",
+                "verification": "python -m app.evals.run_conformance",
+            },
+        ]
+
+    def _reviewer_checklist(self, report: PolicyReplayDriftReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Review every drift row before release.",
+                "status": "required" if report.drift_records else "pass",
+                "proof": f"{len(report.drift_records)} drift rows found.",
+            },
+            {
+                "item": "Confirm policy-bearing historical invocations record decisions.",
+                "status": "required" if report.summary["needs_evidence_count"] else "pass",
+                "proof": f"{report.summary['needs_evidence_count']} rows need evidence.",
+            },
+            {
+                "item": "Regenerate the pack after policy, entitlement, or lifecycle changes.",
+                "status": "required",
+                "proof": "POST /policy/replay-pack",
+            },
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/policy/replay-pack -Method POST -Headers $headers",
+            "python -m pytest tests/test_policy_replay.py -q",
+            "python -m app.evals.run_conformance",
+            "Get-ChildItem -Recurse -File data\\policy_replay -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Policy replay is deterministic and local; it does not query external IAM, SIEM, or policy-as-code systems.",
+            "Fresh-clone baseline scenarios are guardrail fixtures, not production access-control policy.",
+            "Historical drift depth depends on local invocation history retained in the current process.",
+            "Generated policy replay artifacts are written under ignored data/policy_replay/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        if not gitignore.exists():
+            return False
+        return "data/policy_replay/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["policy_replay_report"]
+        lines = [
+            "# Policy Replay Drift Pack",
+            "",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Records: `{report['summary']['record_count']}`",
+            f"- Drift records: `{report['summary']['drift_count']}`",
+            f"- Approval queue: `{report['summary']['approval_queue_count']}`",
+            "",
+            "## Decision Replay",
+        ]
+        for record in report["records"]:
+            lines.append(
+                f"- `{record['record_id']}` `{record['skill_id']}` "
+                f"{record['original_decision']} -> `{record['replay_decision']}` "
+                f"status=`{record['status']}`"
+            )
+        lines.extend(["", "## Approval Queue"])
+        if bundle["approval_queue"]:
+            for item in bundle["approval_queue"]:
+                lines.append(
+                    f"- `{item['queue_id']}` `{item['status']}` owner=`{item['owner_role']}`: {item['reason']}"
+                )
+        else:
+            lines.append("- No policy replay approvals required.")
+        lines.extend(["", "## Bounded Review Steps"])
+        for step in report["bounded_review_steps"]:
+            lines.append(
+                f"- `{step['step']}` status=`{step['status']}` pattern=`{step['pattern']}`"
+            )
+        lines.extend(
+            [
+                "",
+                "## Reviewer Checklist",
+                *[
+                    f"- `{item['status']}` {item['item']}: {item['proof']}"
+                    for item in bundle["reviewer_checklist"]
+                ],
+                "",
+                "## Local Proof Commands",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+            ]
+        )
         return "\n".join(lines)
 
 
@@ -21966,6 +22411,15 @@ class ArtifactInventoryService:
                 "Unified task-run ledger across invocations, worker runs, sandbox decisions, exceptions, audit evidence, replay commands, and bounded verification steps.",
             ),
             self._catalog_row(
+                "policy_replay",
+                "Policy Replay Drift Pack",
+                Path("data") / "policy_replay",
+                "POST /policy/replay-pack",
+                "Invoke-RestMethod http://localhost:8000/policy/replay-pack -Method POST -Headers $headers",
+                ["policy_replay_pack_latest.json", "policy_replay_pack_latest.md"],
+                "Durable policy decision replay, drift detection, HITL approval queue, state observations, and local governance proof.",
+            ),
+            self._catalog_row(
                 "audit_integrity",
                 "Audit Integrity Pack",
                 Path("data") / "audit_integrity",
@@ -24165,6 +24619,7 @@ class AppState:
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
     review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
+    policy_replay: PolicyReplayDriftService = field(init=False)
     task_runs: TaskRunObservabilityService = field(init=False)
     audit_integrity: AuditIntegrityService = field(init=False)
     final_handoff: FinalHandoffService = field(init=False)
@@ -24235,6 +24690,7 @@ class AppState:
         self.platform_pack = GovernedSkillPlatformPackService(self)
         self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
+        self.policy_replay = PolicyReplayDriftService(self)
         self.task_runs = TaskRunObservabilityService(self)
         self.audit_integrity = AuditIntegrityService(self)
         self.artifacts = ArtifactInventoryService(self)

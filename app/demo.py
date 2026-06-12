@@ -29,6 +29,7 @@ from app.models import (
     MarketplaceApprovalPackRequest,
     MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
+    PolicyReplayPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
     PrivacyRetentionPackRequest,
@@ -292,6 +293,10 @@ async def main() -> None:
     task_run_ledger = state.task_runs.ledger()
     task_run_transparency_pack = state.task_runs.transparency_pack(
         TaskRunTransparencyPackRequest(actor="demo-run-transparency-reviewer")
+    )
+    policy_replay_report = state.policy_replay.report(actor="demo-policy-replay-reviewer")
+    policy_replay_pack = state.policy_replay.pack(
+        PolicyReplayPackRequest(actor="demo-policy-replay-reviewer")
     )
     audit_integrity = state.audit_integrity.report()
     audit_integrity_pack = state.audit_integrity.pack(
@@ -607,6 +612,12 @@ async def main() -> None:
                 "task_run_ledger_entries": task_run_ledger.summary["ledger_entry_count"],
                 "task run transparency pack path": task_run_transparency_pack.markdown_path,
                 "task_run_transparency_pack_path": task_run_transparency_pack.markdown_path,
+                "policy replay readiness": policy_replay_report.readiness_status,
+                "policy_replay_readiness": policy_replay_report.readiness_status,
+                "policy replay drift count": policy_replay_report.summary["drift_count"],
+                "policy_replay_drift_count": policy_replay_report.summary["drift_count"],
+                "policy replay pack path": policy_replay_pack.markdown_path,
+                "policy_replay_pack_path": policy_replay_pack.markdown_path,
                 "audit integrity readiness": audit_integrity.readiness_status,
                 "audit_integrity_readiness": audit_integrity.readiness_status,
                 "audit integrity records": audit_integrity.summary["record_count"],

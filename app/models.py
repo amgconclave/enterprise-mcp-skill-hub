@@ -2197,6 +2197,52 @@ class PolicySimulationResult(BaseModel):
     matched_rules: list[str]
 
 
+class PolicyReplayRecord(BaseModel):
+    record_id: str
+    source_type: Literal["historical_invocation", "baseline_scenario"]
+    skill_id: str
+    version: str
+    policy_context: PolicyInvocationContext
+    original_decision: str
+    replay_decision: PolicyDecisionValue
+    same_decision: bool
+    status: Literal["stable", "drift", "needs_evidence"]
+    original_rules: list[str] = Field(default_factory=list)
+    replay_rules: list[str] = Field(default_factory=list)
+    reviewer_action: str
+    replay_command: str
+    invocation_id: str | None = None
+    trace_id: str | None = None
+
+
+class PolicyReplayDriftReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[PolicyReplayRecord]
+    drift_records: list[PolicyReplayRecord] = Field(default_factory=list)
+    approval_queue: list[JsonDict] = Field(default_factory=list)
+    state_observations: list[JsonDict] = Field(default_factory=list)
+    bounded_review_steps: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class PolicyReplayPackRequest(BaseModel):
+    actor: str = "policy-replay-reviewer"
+
+
+class PolicyReplayPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class InvocationSandboxLimits(BaseModel):
     max_payload_bytes: int = 4096
     max_string_chars: int = 3000

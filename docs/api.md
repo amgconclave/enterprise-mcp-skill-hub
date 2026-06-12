@@ -10,6 +10,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /skills/register` - registers a valid `SkillManifest`; if no lifecycle status is supplied, it is stored as `validated`.
 - `POST /skills/validate` - validates a raw manifest payload without registration.
 - `POST /policy/simulate` - returns an allow/deny decision, reasons, and matched rules for role, environment, data sensitivity, skill tags/provider, and requested action.
+- `GET /policy/replay-drift` - replays historical and baseline policy decisions against current local policy rules and reports drift, missing evidence, HITL queue rows, and bounded review steps.
+- `POST /policy/replay-pack` - writes the Policy Replay Drift Pack Markdown/JSON under ignored local folder `data/policy_replay/`.
 - `GET /sandbox/policy` - returns mock tool sandbox limits, blocked action classes, endpoint policy, per-skill risk labels, sandbox decisions, audit evidence, and verification commands.
 - `POST /sandbox/evaluate` - dry-runs a skill input against sandbox limits and action-class policy without executing the skill.
 - `POST /sandbox/policy-pack` - writes `invocation_sandbox_policy_pack_latest.json` and `.md` under ignored local folder `data/sandbox_policies/`.
@@ -202,6 +204,15 @@ Tenant/user entitlements can also be enforced by including `X-Entitlement-Enforc
 Invocation sandbox checks can also be enforced by including `X-Sandbox-Enforce: true`, `X-Action-Class`, and `X-Sandbox-Endpoint`, or by setting `policy_context.enforce_sandbox=true`. Sandbox-denied calls return `403`, create failed invocation rows, and record `sandbox.denied` audit events before schema validation or handler execution.
 
 Denied invocations are still stored in local invocation history. Replaying one through `POST /invocations/{invocation_id}/replay` evaluates the same enforced policy context and returns a failed replay with `same_output=true` when the denial is unchanged.
+
+Policy replay drift turns those per-invocation checks into a release-review surface:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers
+Invoke-RestMethod http://localhost:8000/policy/replay-pack -Headers $headers -Method POST
+```
+
+`GET /policy/replay-drift` compares stored policy-bearing invocations plus deterministic fresh-clone baseline scenarios against current policy rules. `POST /policy/replay-pack` writes `policy_replay_pack_latest.json` and `.md` under ignored `data/policy_replay/` with drift rows, missing-evidence rows, HITL approval queue items, state observations, bounded review steps, local proof commands, and limitations.
 
 ## Invocation Sandbox
 
