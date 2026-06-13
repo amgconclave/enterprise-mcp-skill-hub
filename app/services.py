@@ -275,6 +275,11 @@ from app.models import (
     WorkerQueueAdmissionReport,
     WorkerRunbookPackRequest,
     WorkerRunbookPackResult,
+    WorkerRunReplayComparison,
+    WorkerRunReplayPackRequest,
+    WorkerRunReplayPackResult,
+    WorkerRunReplayReport,
+    WorkerRunReplayRequest,
     WorkerRunTimelineEvent,
     WorkerScalePlanResult,
     WorkerSkillRunRecord,
@@ -16623,6 +16628,7 @@ class CiDoctorService:
         "data/tenant_sandboxes/",
         "data/usage_packs/",
         "data/provider_packs/",
+        "data/worker_replays/",
         "data/sandbox_policies/",
         "data/sandbox_exceptions/",
         "data/portfolio_demo/",
@@ -18876,6 +18882,7 @@ class DashboardSmokeService:
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
             {"id": "worker_scaleout", "label": "Worker Scale-Out", "purpose": "Worker-pool run transparency and scale planning."},
+            {"id": "worker_replay", "label": "Worker Replay", "purpose": "Deterministic worker checkpoint replay and drift review."},
             {"id": "run_transparency", "label": "Run Transparency", "purpose": "Unified task-run ledger, state observation, and replay guidance."},
             {"id": "policy_replay", "label": "Policy Replay", "purpose": "Policy decision drift replay and HITL review evidence."},
             {"id": "audit_integrity", "label": "Audit Integrity", "purpose": "Hash-chain verification for local audit evidence."},
@@ -18962,6 +18969,8 @@ class DashboardSmokeService:
             self._endpoint_ref("worker_queue_admission", "GET", "/workers/queue-admission", "Worker queue admission, tenant fairness, and backpressure report."),
             self._endpoint_ref("worker_queue_pack", "POST", "/workers/queue-pack", "Writes Worker Queue Admission artifacts."),
             self._endpoint_ref("worker_runbook_pack", "POST", "/workers/runbook-pack", "Writes Worker Scale-Out Runbook artifacts."),
+            self._endpoint_ref("worker_replay_report", "POST", "/workers/replay-report", "Replays worker runs through queue, sandbox, and invocation checkpoints."),
+            self._endpoint_ref("worker_replay_pack", "POST", "/workers/replay-pack", "Writes Worker Run Replay artifacts."),
             self._endpoint_ref("run_ledger", "GET", "/runs/ledger", "Unified task-run observability ledger."),
             self._endpoint_ref("run_transparency_pack", "POST", "/runs/transparency-pack", "Writes Task Run Transparency artifacts."),
             self._endpoint_ref("policy_replay_drift", "GET", "/policy/replay-drift", "Policy decision replay drift report."),
@@ -19044,6 +19053,7 @@ class DashboardSmokeService:
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
             self._artifact_tab("worker_scaleout", "Worker Scale-Out", "Runbook", "data/worker_runbooks/"),
             self._artifact_tab("worker_queue_admission", "Worker Scale-Out", "Queue Admission Pack", "data/worker_runbooks/"),
+            self._artifact_tab("worker_replay", "Worker Replay", "Replay Pack", "data/worker_replays/"),
             self._artifact_tab("run_transparency", "Run Transparency", "Transparency Pack", "data/run_transparency/"),
             self._artifact_tab("policy_replay", "Policy Replay", "Policy Replay Pack", "data/policy_replay/"),
             self._artifact_tab("audit_integrity", "Audit Integrity", "Integrity Pack", "data/audit_integrity/"),
@@ -19388,6 +19398,8 @@ class DashboardSmokeService:
 class WorkerScaleOutService:
     PACK_ID = "worker_scaleout_runbook_latest"
     QUEUE_PACK_ID = "worker_queue_admission_latest"
+    REPLAY_PACK_ID = "worker_run_replay_pack_latest"
+    REPLAY_REPORT_ID = "worker_run_replay_latest"
     PLAN_ID = "worker_scale_plan_latest"
     QUEUE_REPORT_ID = "worker_queue_admission_latest"
 
@@ -19442,6 +19454,7 @@ class WorkerScaleOutService:
     def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
         self.app_state = app_state
         self.output_dir = output_dir or Path("data") / "worker_runbooks"
+        self.replay_output_dir = Path("data") / "worker_replays"
         self.runs: list[WorkerSkillRunRecord] = []
         self.admission_decisions: list[WorkerQueueAdmissionDecision] = []
 
@@ -19855,6 +19868,127 @@ class WorkerScaleOutService:
             },
         )
 
+    async def replay_report(
+        self,
+        request: WorkerRunReplayRequest | None = None,
+    ) -> WorkerRunReplayReport:
+        request = request or WorkerRunReplayRequest()
+        originals = self._replay_candidates(request.run_ids, request.max_replays)
+        comparisons: list[WorkerRunReplayComparison] = []
+        for original in originals:
+            replay_request = self._replay_request(original, request)
+            replay = await self.submit_run(replay_request)
+            comparisons.append(self._replay_comparison(original, replay))
+        drift_count = sum(1 for comparison in comparisons if comparison.drift_flags)
+        readiness_status: SecurityReadinessStatus = "ready"
+        if not comparisons or drift_count:
+            readiness_status = "needs_review"
+        report = WorkerRunReplayReport(
+            report_id=self.REPLAY_REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary={
+                "local_only": True,
+                "mock_provider": self.app_state.provider.name == "mock",
+                "candidate_count": len(originals),
+                "comparison_count": len(comparisons),
+                "drift_count": drift_count,
+                "status_match_count": sum(1 for comparison in comparisons if comparison.status_match),
+                "output_match_count": sum(1 for comparison in comparisons if comparison.output_match),
+                "queue_decision_match_count": sum(
+                    1 for comparison in comparisons if comparison.queue_decision_match
+                ),
+                "sandbox_decision_match_count": sum(
+                    1 for comparison in comparisons if comparison.sandbox_decision_match
+                ),
+                "artifact_directory": str(self.replay_output_dir),
+            },
+            comparisons=comparisons,
+            state_observations=self._replay_state_observations(comparisons),
+            bounded_action_loop=self._replay_action_loop(comparisons),
+            verification_commands=self._replay_verification_commands(),
+            patterns_used=[
+                "worker scale-out",
+                "run transparency",
+                "state observation",
+                "bounded action loop",
+                "step verification",
+                "task sandbox",
+            ],
+            limitations=self._replay_limitations(),
+        )
+        self.app_state.audit.record(
+            "worker_replay.report_generated",
+            "worker_run_replay",
+            self.REPLAY_REPORT_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "comparison_count": len(comparisons),
+                "drift_count": drift_count,
+            },
+        )
+        return report
+
+    async def replay_pack(
+        self,
+        request: WorkerRunReplayPackRequest | None = None,
+    ) -> WorkerRunReplayPackResult:
+        request = request or WorkerRunReplayPackRequest()
+        report = await self.replay_report(
+            WorkerRunReplayRequest(
+                actor=request.actor,
+                run_ids=request.run_ids,
+                max_replays=request.max_replays,
+                enforce_sandbox=request.enforce_sandbox,
+            )
+        )
+        output_dir = self.replay_output_dir
+        bundle = {
+            "pack_id": self.REPLAY_PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "worker_run_replay": report.model_dump(mode="json"),
+            "architecture_patterns": report.patterns_used,
+            "state_observations": report.state_observations,
+            "bounded_action_loop": report.bounded_action_loop,
+            "verification_commands": report.verification_commands,
+            "limitations": report.limitations,
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = output_dir / f"{self.REPLAY_PACK_ID}.json"
+        markdown_path = output_dir / f"{self.REPLAY_PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._replay_markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "worker_replay.pack_exported",
+            "worker_run_replay_pack",
+            self.REPLAY_PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "comparison_count": report.summary["comparison_count"],
+                "drift_count": report.summary["drift_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return WorkerRunReplayPackResult(
+            pack_id=self.REPLAY_PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
     def _policy_context(self, request: WorkerSkillRunRequest, skill_id: str) -> PolicyInvocationContext:
         base = request.policy_context or PolicyInvocationContext()
         return base.model_copy(
@@ -20156,6 +20290,11 @@ class WorkerScaleOutService:
                 "pool": request.worker_pool,
                 "allow_queue": request.allow_queue,
                 "max_queue_wait_ms": request.max_queue_wait_ms,
+                "action_class": (
+                    request.policy_context.action_class
+                    if request.policy_context
+                    else "skill_invocation"
+                ),
                 "dispatch_mode": "synchronous_local_simulation",
             },
             "external_services": "none",
@@ -20194,6 +20333,8 @@ class WorkerScaleOutService:
             "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/runbook-pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/replay-report -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/replay-pack -Method POST -Headers $headers",
             'rg "workers/scale-plan|workers/queue-admission|Worker Scale-Out|worker_runbooks|worker scale-out" app dashboard docs README.md tests',
         ]
 
@@ -20222,6 +20363,191 @@ class WorkerScaleOutService:
             "Tenant fairness rules are illustrative defaults for portfolio review and should be connected to production entitlements before deployment.",
             "Rejected admissions do not execute skills or call external providers.",
             "Generated queue admission artifacts are written under ignored data/worker_runbooks/.",
+        ]
+
+    def _replay_candidates(self, run_ids: list[str], max_replays: int) -> list[WorkerSkillRunRecord]:
+        originals = [
+            run
+            for run in self.list_runs()
+            if "replay_of_run_id" not in run.transparency
+        ]
+        if run_ids:
+            selected = [run for run in originals if run.run_id in set(run_ids)]
+        else:
+            selected = originals
+        return selected[:max_replays]
+
+    def _replay_request(
+        self,
+        original: WorkerSkillRunRecord,
+        request: WorkerRunReplayRequest,
+    ) -> WorkerSkillRunRequest:
+        queue_policy = original.transparency.get("queue_policy", {})
+        action_class = queue_policy.get("action_class", "skill_invocation")
+        policy_context = PolicyInvocationContext(
+            tenant_id=original.queue_decision.tenant if original.queue_decision else "internal_demo",
+            user_id=request.actor,
+            enforce_sandbox=request.enforce_sandbox,
+            action_class=action_class,
+            endpoint=f"worker-replay:{original.worker_pool}/{original.skill_id}",
+        )
+        return WorkerSkillRunRequest(
+            skill_id=original.skill_id,
+            input=original.input,
+            actor=request.actor,
+            tenant=original.queue_decision.tenant if original.queue_decision else "internal_demo",
+            worker_pool=original.worker_pool,
+            priority=original.priority,
+            policy_context=policy_context,
+            enforce_sandbox=request.enforce_sandbox,
+            allow_queue=bool(queue_policy.get("allow_queue", True)),
+            max_queue_wait_ms=int(queue_policy.get("max_queue_wait_ms", 30_000)),
+        )
+
+    def _replay_comparison(
+        self,
+        original: WorkerSkillRunRecord,
+        replay: WorkerSkillRunRecord,
+    ) -> WorkerRunReplayComparison:
+        original_queue = original.queue_decision.decision if original.queue_decision else "not_evaluated"
+        replay_queue = replay.queue_decision.decision if replay.queue_decision else "not_evaluated"
+        original_sandbox = original.sandbox_decision.decision if original.sandbox_decision else "not_enforced"
+        replay_sandbox = replay.sandbox_decision.decision if replay.sandbox_decision else "not_enforced"
+        original_stages = [event.stage for event in original.timeline]
+        replay_stages = [event.stage for event in replay.timeline]
+        drift_flags = []
+        if original.status != replay.status:
+            drift_flags.append("status_drift")
+        original_output = self._stable_replay_payload(original.output)
+        replay_output = self._stable_replay_payload(replay.output)
+        if original_output != replay_output:
+            drift_flags.append("output_drift")
+        if original_queue != replay_queue:
+            drift_flags.append("queue_decision_drift")
+        if original_sandbox != replay_sandbox:
+            drift_flags.append("sandbox_decision_drift")
+        if original_stages != replay_stages:
+            drift_flags.append("timeline_stage_drift")
+        replay.transparency["replay_of_run_id"] = original.run_id
+        self._replace_run(replay)
+        recommendation = (
+            "Replay matched original worker checkpoints; keep current sandbox and queue policy."
+            if not drift_flags
+            else "Review replay drift before scaling this skill or changing worker admission policy."
+        )
+        return WorkerRunReplayComparison(
+            original_run_id=original.run_id,
+            replay_run_id=replay.run_id,
+            skill_id=original.skill_id,
+            worker_pool=original.worker_pool,
+            original_status=original.status,
+            replay_status=replay.status,
+            status_match=original.status == replay.status,
+            output_match=original_output == replay_output,
+            queue_decision_match=original_queue == replay_queue,
+            sandbox_decision_match=original_sandbox == replay_sandbox,
+            timeline_stage_match=original_stages == replay_stages,
+            original_trace_id=original.trace_id,
+            replay_trace_id=replay.trace_id,
+            drift_flags=drift_flags,
+            replay_steps=[
+                {
+                    "step": 1,
+                    "name": "state_observation",
+                    "detail": f"Original run `{original.run_id}` status `{original.status}` with queue `{original_queue}`.",
+                },
+                {
+                    "step": 2,
+                    "name": "sandbox_replay",
+                    "detail": f"Replay run `{replay.run_id}` sandbox `{replay_sandbox}`.",
+                },
+                {
+                    "step": 3,
+                    "name": "checkpoint_compare",
+                    "detail": f"Drift flags: {', '.join(drift_flags) if drift_flags else 'none'}.",
+                },
+            ],
+            recommendation=recommendation,
+        )
+
+    def _stable_replay_payload(self, payload: JsonDict | None) -> JsonDict | None:
+        if payload is None:
+            return None
+        normalized = json.loads(json.dumps(payload, sort_keys=True))
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("trace_id", None)
+        return normalized
+
+    def _replay_state_observations(
+        self,
+        comparisons: list[WorkerRunReplayComparison],
+    ) -> list[JsonDict]:
+        return [
+            {
+                "id": "worker_history_snapshot",
+                "observation": "Replay uses a snapshot of non-replay worker runs to avoid recursive replay loops.",
+                "value": len(comparisons),
+            },
+            {
+                "id": "drift_snapshot",
+                "observation": "Each replay compares status, output, queue decision, sandbox decision, and timeline stages.",
+                "value": {
+                    "drift_count": sum(1 for comparison in comparisons if comparison.drift_flags),
+                    "clean_count": sum(1 for comparison in comparisons if not comparison.drift_flags),
+                },
+            },
+        ]
+
+    def _replay_action_loop(
+        self,
+        comparisons: list[WorkerRunReplayComparison],
+    ) -> list[JsonDict]:
+        drift_count = sum(1 for comparison in comparisons if comparison.drift_flags)
+        return [
+            {
+                "step": 1,
+                "pattern": "state observation",
+                "action": "Select recent non-replay worker runs and snapshot queue/sandbox/output checkpoints.",
+                "status": "complete" if comparisons else "needs_input",
+            },
+            {
+                "step": 2,
+                "pattern": "task sandbox",
+                "action": "Re-run each worker request through queue admission and sandbox preflight before invocation.",
+                "status": "complete" if comparisons else "not_started",
+            },
+            {
+                "step": 3,
+                "pattern": "step verification",
+                "action": "Compare original and replayed checkpoints and surface drift flags.",
+                "status": "needs_review" if drift_count else "complete",
+            },
+            {
+                "step": 4,
+                "pattern": "bounded action loop",
+                "action": "Stop after the requested max replay count and export local evidence for human review.",
+                "status": "complete",
+            },
+        ]
+
+    def _replay_verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_worker_replay.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/workers/replay-report -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/workers/replay-pack -Method POST -Headers $headers",
+            'rg "workers/replay-report|workers/replay-pack|Worker Replay|worker_replays" app dashboard docs README.md tests',
+        ]
+
+    def _replay_limitations(self) -> list[str]:
+        return [
+            "Worker replay creates new local worker run records; it does not mutate or delete original runs.",
+            "Replay comparison uses deterministic mock/local providers and in-memory queue state.",
+            "Distributed queue timing, OS-level sandbox isolation, and remote workers are outside this local portfolio pack.",
+            "Generated worker replay artifacts are written under ignored data/worker_replays/.",
         ]
 
     def _markdown(self, bundle: JsonDict) -> str:
@@ -20277,6 +20603,54 @@ class WorkerScaleOutService:
             "## Local Proof Commands",
             "",
             *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _replay_markdown(self, bundle: JsonDict) -> str:
+        report = bundle["worker_run_replay"]
+        lines = [
+            "# Worker Run Replay Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Comparisons: `{report['summary']['comparison_count']}`",
+            f"- Drift count: `{report['summary']['drift_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Replay Comparisons",
+            "",
+            *[
+                f"- `{item['original_run_id']}` -> `{item['replay_run_id']}` skill=`{item['skill_id']}` status_match=`{item['status_match']}` output_match=`{item['output_match']}` drift=`{', '.join(item['drift_flags']) if item['drift_flags'] else 'none'}`"
+                for item in report["comparisons"]
+            ],
+            "",
+            "## State Observations",
+            "",
+            *[
+                f"- `{item['id']}`: {item['observation']} value=`{item['value']}`"
+                for item in bundle["state_observations"]
+            ],
+            "",
+            "## Bounded Action Loop",
+            "",
+            *[
+                f"- {item['step']}. `{item['pattern']}` `{item['status']}`: {item['action']}"
+                for item in bundle["bounded_action_loop"]
+            ],
+            "",
+            "## Verification Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["verification_commands"]],
             "",
             "## Limitations",
             "",
@@ -24357,6 +24731,15 @@ class ArtifactInventoryService:
                 "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
                 ["worker_queue_admission_latest.json", "worker_queue_admission_latest.md"],
                 "Tenant fair-share admission, pool backpressure, queued/rejected decision evidence, and local worker admission limitations.",
+            ),
+            self._catalog_row(
+                "worker_replays",
+                "Worker Run Replay Pack",
+                Path("data") / "worker_replays",
+                "POST /workers/replay-pack",
+                "Invoke-RestMethod http://localhost:8000/workers/replay-pack -Method POST -Headers $headers",
+                ["worker_run_replay_pack_latest.json", "worker_run_replay_pack_latest.md"],
+                "Deterministic replay of local worker run checkpoints across queue admission, sandbox preflight, invocation output, trace evidence, and drift flags.",
             ),
             self._catalog_row(
                 "run_transparency",

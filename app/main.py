@@ -228,6 +228,10 @@ from app.models import (
     WorkerQueueAdmissionReport,
     WorkerRunbookPackRequest,
     WorkerRunbookPackResult,
+    WorkerRunReplayPackRequest,
+    WorkerRunReplayPackResult,
+    WorkerRunReplayReport,
+    WorkerRunReplayRequest,
     WorkerScalePlanResult,
     WorkerSkillRunRecord,
     WorkerSkillRunRequest,
@@ -875,6 +879,22 @@ async def worker_runbook_pack(
     _: str = Depends(require_api_key),
 ) -> WorkerRunbookPackResult:
     return await state.worker_scaleout.runbook_pack(request or WorkerRunbookPackRequest())
+
+
+@app.post("/workers/replay-report", response_model=WorkerRunReplayReport)
+async def worker_run_replay_report(
+    request: WorkerRunReplayRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> WorkerRunReplayReport:
+    return await state.worker_scaleout.replay_report(request or WorkerRunReplayRequest())
+
+
+@app.post("/workers/replay-pack", response_model=WorkerRunReplayPackResult)
+async def worker_run_replay_pack(
+    request: WorkerRunReplayPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> WorkerRunReplayPackResult:
+    return await state.worker_scaleout.replay_pack(request or WorkerRunReplayPackRequest())
 
 
 @app.get("/runs/ledger", response_model=TaskRunObservabilityResult)

@@ -86,6 +86,8 @@ from app.models import (
     UsageChargebackPackRequest,
     WorkerQueueAdmissionPackRequest,
     WorkerRunbookPackRequest,
+    WorkerRunReplayPackRequest,
+    WorkerRunReplayRequest,
     WorkerSkillRunRequest,
     WorkflowSimulationRequest,
     WorkflowTemplate,
@@ -139,6 +141,7 @@ view = st.sidebar.radio(
         "Agent Collaboration",
         "Agent Society Evaluation",
         "Worker Scale-Out",
+        "Worker Replay",
         "Run Transparency",
         "Policy Replay",
         "Audit Integrity",
@@ -1799,6 +1802,81 @@ elif view == "Worker Scale-Out":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(plan.model_dump(mode="json"))
+
+elif view == "Worker Replay":
+    st.subheader("Worker Replay")
+    st.caption("Replay recent local worker runs through queue admission, sandbox preflight, and deterministic invocation checks.")
+    candidate_runs = [
+        run for run in state.worker_scaleout.list_runs() if "replay_of_run_id" not in run.transparency
+    ]
+    col_ready, col_comparisons, col_drift, col_status = st.columns(4)
+    col_ready.metric("Candidates", len(candidate_runs))
+    col_comparisons.metric("Comparisons", "Run report")
+    col_drift.metric("Drift", "Run report")
+    col_status.metric("Status Matches", "Run report")
+
+    tab_comparisons, tab_loop, tab_export, tab_json = st.tabs(
+        ["Comparisons", "Action Loop", "Replay Pack", "JSON"]
+    )
+    with tab_comparisons:
+        actor = st.text_input("Replay report actor", value="streamlit-worker-replay-reviewer")
+        max_replays = st.slider("Report max replay count", min_value=1, max_value=10, value=3)
+        if st.button("Run Worker Replay Report", use_container_width=True):
+            report = run_async(
+                state.worker_scaleout.replay_report(
+                    WorkerRunReplayRequest(actor=actor, max_replays=max_replays)
+                )
+            )
+            st.dataframe(
+                [
+                    {
+                        "original": item.original_run_id,
+                        "replay": item.replay_run_id,
+                        "skill": item.skill_id,
+                        "pool": item.worker_pool,
+                        "status_match": item.status_match,
+                        "output_match": item.output_match,
+                        "queue_match": item.queue_decision_match,
+                        "sandbox_match": item.sandbox_decision_match,
+                        "drift": ", ".join(item.drift_flags),
+                    }
+                    for item in report.comparisons
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.json(report.model_dump(mode="json"))
+        else:
+            st.dataframe(
+                [
+                    {
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "skill": run.skill_id,
+                        "pool": run.worker_pool,
+                        "trace_id": run.trace_id,
+                    }
+                    for run in candidate_runs
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+    with tab_loop:
+        st.info("Run the replay report or export the pack to generate bounded action-loop evidence.")
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/worker_replays/.")
+        actor = st.text_input("Worker replay actor", value="streamlit-worker-replay-reviewer")
+        max_replays = st.slider("Max replay count", min_value=1, max_value=10, value=3)
+        if st.button("Export Worker Replay Pack", use_container_width=True):
+            export = run_async(
+                state.worker_scaleout.replay_pack(
+                    WorkerRunReplayPackRequest(actor=actor, max_replays=max_replays)
+                )
+            )
+            st.success("Worker Replay Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json({"candidate_run_count": len(candidate_runs), "artifact_dir": "data/worker_replays/"})
 
 elif view == "Run Transparency":
     st.subheader("Run Transparency")

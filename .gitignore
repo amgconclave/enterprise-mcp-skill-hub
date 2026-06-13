@@ -33,6 +33,7 @@ data/review_sla/
 data/agent_collaboration/
 data/agent_society_evals/
 data/worker_runbooks/
+data/worker_replays/
 data/run_transparency/
 data/policy_replay/
 data/audit_integrity/

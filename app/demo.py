@@ -66,6 +66,8 @@ from app.models import (
     UsageChargebackPackRequest,
     WorkerQueueAdmissionPackRequest,
     WorkerRunbookPackRequest,
+    WorkerRunReplayPackRequest,
+    WorkerRunReplayRequest,
     WorkerSkillRunRequest,
     WorkflowSimulationRequest,
     WorkflowTemplate,
@@ -307,6 +309,12 @@ async def main() -> None:
     )
     worker_runbook = await state.worker_scaleout.runbook_pack(
         WorkerRunbookPackRequest(actor="demo-platform-sre")
+    )
+    worker_replay_report = await state.worker_scaleout.replay_report(
+        WorkerRunReplayRequest(actor="demo-worker-replay-reviewer", max_replays=1)
+    )
+    worker_replay_pack = await state.worker_scaleout.replay_pack(
+        WorkerRunReplayPackRequest(actor="demo-worker-replay-reviewer", max_replays=1)
     )
     task_run_ledger = state.task_runs.ledger()
     task_run_transparency_pack = state.task_runs.transparency_pack(
@@ -676,6 +684,12 @@ async def main() -> None:
                 "worker_queue_pack_path": worker_queue_pack.markdown_path,
                 "worker runbook path": worker_runbook.markdown_path,
                 "worker_runbook_path": worker_runbook.markdown_path,
+                "worker replay readiness": worker_replay_report.readiness_status,
+                "worker_replay_readiness": worker_replay_report.readiness_status,
+                "worker replay drift count": worker_replay_report.summary["drift_count"],
+                "worker_replay_drift_count": worker_replay_report.summary["drift_count"],
+                "worker replay pack path": worker_replay_pack.markdown_path,
+                "worker_replay_pack_path": worker_replay_pack.markdown_path,
                 "task run ledger readiness": task_run_ledger.readiness_status,
                 "task_run_ledger_readiness": task_run_ledger.readiness_status,
                 "task run ledger entries": task_run_ledger.summary["ledger_entry_count"],

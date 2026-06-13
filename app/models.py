@@ -1796,6 +1796,61 @@ class WorkerRunbookPackResult(BaseModel):
     summary: JsonDict
 
 
+class WorkerRunReplayRequest(BaseModel):
+    actor: str = "worker-replay-reviewer"
+    run_ids: list[str] = Field(default_factory=list)
+    max_replays: int = Field(default=3, ge=1, le=10)
+    enforce_sandbox: bool = True
+
+
+class WorkerRunReplayComparison(BaseModel):
+    original_run_id: str
+    replay_run_id: str
+    skill_id: str
+    worker_pool: WorkerPoolKey
+    original_status: WorkerRunStatus
+    replay_status: WorkerRunStatus
+    status_match: bool
+    output_match: bool
+    queue_decision_match: bool
+    sandbox_decision_match: bool
+    timeline_stage_match: bool
+    original_trace_id: str
+    replay_trace_id: str
+    drift_flags: list[str] = Field(default_factory=list)
+    replay_steps: list[JsonDict] = Field(default_factory=list)
+    recommendation: str
+
+
+class WorkerRunReplayReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    comparisons: list[WorkerRunReplayComparison] = Field(default_factory=list)
+    state_observations: list[JsonDict] = Field(default_factory=list)
+    bounded_action_loop: list[JsonDict] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class WorkerRunReplayPackRequest(BaseModel):
+    actor: str = "worker-replay-reviewer"
+    run_ids: list[str] = Field(default_factory=list)
+    max_replays: int = Field(default=3, ge=1, le=10)
+    enforce_sandbox: bool = True
+
+
+class WorkerRunReplayPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class ApiContractCheck(BaseModel):
     id: str
     category: str

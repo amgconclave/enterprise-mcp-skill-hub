@@ -104,6 +104,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `GET /workers/queue-admission` - returns worker queue admission policy, tenant fair-share rows, pool backpressure, and recent admit/queue/reject decisions.
 - `POST /workers/queue-pack` - writes the Worker Queue Admission Pack Markdown/JSON under ignored local folder `data/worker_runbooks/`.
 - `POST /workers/runbook-pack` - writes the Worker Scale-Out Runbook Markdown/JSON under ignored local folder `data/worker_runbooks/`.
+- `POST /workers/replay-report` - replays recent or selected local worker runs through queue admission, sandbox preflight, and deterministic invocation output comparison.
+- `POST /workers/replay-pack` - writes the Worker Run Replay Pack Markdown/JSON under ignored local folder `data/worker_replays/`.
 - `GET /runs/ledger` - returns a unified local task-run observability ledger across skill invocations, worker runs, sandbox decisions, sandbox exceptions, and audit-only events with trace ids, checkpoints, replay commands, risk flags, state observations, bounded action-loop steps, and verification commands.
 - `POST /runs/transparency-pack` - writes the Task Run Transparency Pack Markdown/JSON under ignored local folder `data/run_transparency/`.
 - `GET /audit/integrity` - returns a local audit integrity hash chain across audit events and skill invocations, with root hash, gap checks, replay commands, and limitations.
@@ -841,9 +843,21 @@ Invoke-RestMethod http://localhost:8000/workers/runbook-pack `
   -Headers $headers `
   -ContentType "application/json" `
   -Body '{"actor":"platform-sre"}'
+Invoke-RestMethod http://localhost:8000/workers/replay-report `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-sre","max_replays":1}'
+Invoke-RestMethod http://localhost:8000/workers/replay-pack `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"actor":"platform-sre","max_replays":1}'
 ```
 
 Worker execution is local and deterministic. A worker run records queued, queue admission, sandbox preflight, dispatch, and invocation completion timeline events, attaches sandbox decision evidence when enforced, and links to the normal invocation/audit trace. The queue admission report shows tenant fair-share policy, pool pressure, recent admit/queue/reject decisions, and bounded local recommendations before dispatch. The scale plan combines local capacity forecasts with in-memory worker run history to recommend hold or scale-out actions per pool.
+
+The Worker Run Replay report creates new replay run records without mutating originals, compares original and replayed status, output, queue decision, sandbox decision, and timeline stages, and surfaces drift flags for platform review. The replay pack writes `worker_run_replay_pack_latest.json` and `.md` under ignored `data/worker_replays/`.
 
 The Worker Scale-Out Runbook writes `worker_scaleout_runbook_latest.json` and `.md` under ignored `data/worker_runbooks/`. The Queue Admission Pack writes `worker_queue_admission_latest.json` and `.md` in the same ignored folder. Together they demonstrate worker scale-out, run transparency, state observation, bounded action loops, step verification, task sandbox, typed contracts, and structured outputs without requiring remote workers or external providers.
 
