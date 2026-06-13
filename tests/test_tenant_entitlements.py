@@ -10,9 +10,12 @@ from app.models import (
     PolicyInvocationContext,
     TenantEntitlementAccessReviewPackRequest,
     TenantEntitlementAccessReviewRequest,
+    TenantEntitlementChangePackRequest,
+    TenantEntitlementChangePreviewRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
+    TenantSkillEntitlementPolicy,
 )
 
 API_KEY = "dev-local-token"
@@ -163,6 +166,86 @@ def test_entitlement_access_review_flags_privileged_rows_and_safe_break_glass() 
     assert any("step verification" in pattern for pattern in review.patterns_used)
 
 
+def test_entitlement_change_preview_compares_before_after_without_mutating_policy() -> None:
+    state = create_state()
+    before_policy_count = len(state.entitlements.policies)
+
+    preview = state.entitlements.preview_change(
+        TenantEntitlementChangePreviewRequest(
+            actor="pytest-entitlement-change-reviewer",
+            proposed_policy=TenantSkillEntitlementPolicy(
+                tenant_id="healthcare",
+                skill_id="translate_text",
+                allowed_roles=["admin", "reviewer", "agent"],
+                denied_roles=["viewer"],
+                required_scopes=["skill.invoke", "tenant.healthcare", "phi.review"],
+                allowed_environments=["local", "dev", "test"],
+                allowed_data_sensitivities=["public", "internal"],
+                reason="Preview reviewer-scoped healthcare translation access.",
+            ),
+            scenario=TenantEntitlementMatrixRequest(
+                tenant_id="healthcare",
+                user_id="care-agent",
+                role="agent",
+                user_scopes=["skill.invoke", "tenant.healthcare", "phi.review"],
+                skill_ids=["translate_text", "search_knowledge_base"],
+            ),
+        )
+    )
+
+    assert preview.readiness_status == "needs_review"
+    assert preview.blast_radius["allowed_added"] == ["translate_text"]
+    assert preview.before.denied_skill_ids == ["translate_text"]
+    assert "translate_text" in preview.after.mcp_safe_tool_names
+    assert any(row["change_type"] == "allow_added" for row in preview.changed_decisions)
+    assert any(check["id"] == "no_live_policy_mutation" for check in preview.guardrail_checks)
+    assert len(state.entitlements.policies) == before_policy_count
+    live_decision = state.entitlements.decide(
+        state.registry.get("translate_text"),
+        PolicyInvocationContext(
+            role="agent",
+            tenant_id="healthcare",
+            user_id="care-agent",
+            user_scopes=["skill.invoke", "tenant.healthcare", "phi.review"],
+            enforce_entitlements=True,
+        ),
+    )
+    assert live_decision.decision == "deny"
+
+
+def test_entitlement_change_preview_blocks_broad_production_agent_policy() -> None:
+    state = create_state()
+
+    preview = state.entitlements.preview_change(
+        TenantEntitlementChangePreviewRequest(
+            proposed_policy=TenantSkillEntitlementPolicy(
+                tenant_id="fintech",
+                skill_id="*",
+                allowed_roles=["admin", "reviewer", "agent"],
+                denied_roles=["viewer"],
+                required_scopes=["skill.invoke", "tenant.fintech"],
+                allowed_environments=["local", "production"],
+                allowed_data_sensitivities=["public", "internal", "confidential"],
+                reason="Unsafe broad production policy for guardrail proof.",
+            ),
+            scenario=TenantEntitlementMatrixRequest(
+                tenant_id="fintech",
+                user_id="risk-agent",
+                role="agent",
+                environment="production",
+                user_scopes=["skill.invoke", "tenant.fintech"],
+            ),
+        )
+    )
+
+    assert preview.readiness_status == "blocked"
+    assert any(
+        check["id"] == "production_agent_block" and check["status"] == "fail"
+        for check in preview.guardrail_checks
+    )
+    assert any("human-in-the-loop" in pattern for pattern in preview.patterns_used)
+
+
 def test_entitlement_coverage_api_and_review_pack(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -197,6 +280,49 @@ def test_entitlement_access_review_api_and_pack(
     assert pack.status_code == 200
     assert pack.json()["pack_id"] == "tenant_entitlement_access_review_latest"
     assert pack.json()["summary"]["privileged_policy_count"] >= 1
+
+
+def test_entitlement_change_preview_api_and_pack(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    payload = {
+        "actor": "pytest-entitlement-change-reviewer",
+        "proposed_policy": {
+            "tenant_id": "healthcare",
+            "skill_id": "translate_text",
+            "allowed_roles": ["admin", "reviewer", "agent"],
+            "denied_roles": ["viewer"],
+            "required_scopes": ["skill.invoke", "tenant.healthcare", "phi.review"],
+            "allowed_environments": ["local", "dev", "test"],
+            "allowed_data_sensitivities": ["public", "internal"],
+            "reason": "Preview reviewer-scoped healthcare translation access.",
+        },
+        "scenario": {
+            "tenant_id": "healthcare",
+            "user_id": "care-agent",
+            "role": "agent",
+            "user_scopes": ["skill.invoke", "tenant.healthcare", "phi.review"],
+            "skill_ids": ["translate_text"],
+        },
+    }
+
+    preview = client.post(
+        "/tenants/entitlements/change-preview",
+        headers=auth_headers,
+        json=payload,
+    )
+    pack = client.post(
+        "/tenants/entitlements/change-pack",
+        headers=auth_headers,
+        json=payload,
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["blast_radius"]["allowed_added"] == ["translate_text"]
+    assert pack.status_code == 200
+    assert pack.json()["pack_id"] == "tenant_entitlement_change_preview_latest"
+    assert pack.json()["summary"]["allowed_added_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -273,6 +399,20 @@ async def test_entitlement_access_review_pack_export_writes_local_artifacts(tmp_
     assert (tmp_path / "tenant_entitlement_access_review_latest.md").exists()
 
 
+@pytest.mark.asyncio
+async def test_entitlement_change_pack_export_writes_local_artifacts(tmp_path) -> None:
+    state = create_state()
+    state.entitlements.output_dir = tmp_path
+
+    export = await state.entitlements.export_change_pack(
+        TenantEntitlementChangePackRequest(actor="pytest-entitlement-change-reviewer")
+    )
+
+    assert export.readiness_status == "needs_review"
+    assert (tmp_path / "tenant_entitlement_change_preview_latest.json").exists()
+    assert (tmp_path / "tenant_entitlement_change_preview_latest.md").exists()
+
+
 def test_entitlement_access_review_is_wired_to_dashboard_and_artifact_inventory() -> None:
     state = create_state()
 
@@ -286,5 +426,17 @@ def test_entitlement_access_review_is_wired_to_dashboard_and_artifact_inventory(
     )
     assert any(
         item.producer_endpoint == "POST /tenants/entitlements/access-review-pack"
+        for item in inventory.items
+    )
+    assert any(
+        endpoint["path"] == "/tenants/entitlements/change-preview"
+        for endpoint in smoke.endpoint_references
+    )
+    assert any(
+        endpoint["path"] == "/tenants/entitlements/change-pack"
+        for endpoint in smoke.endpoint_references
+    )
+    assert any(
+        item.producer_endpoint == "POST /tenants/entitlements/change-pack"
         for item in inventory.items
     )

@@ -57,6 +57,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /tenants/entitlements/review-pack` - writes `tenant_entitlement_review_pack_latest.json` and `.md` with entitlement coverage, wildcard-policy review rows, denied audit evidence, and local verification commands.
 - `GET /tenants/entitlements/access-review` - reports privileged entitlement rows, wildcard exposure, denied-audit pressure, break-glass drill outcomes, and bounded reviewer steps.
 - `POST /tenants/entitlements/access-review-pack` - writes `tenant_entitlement_access_review_latest.json` and `.md` with state observation, bounded action-loop steps, local verification commands, and limitations.
+- `POST /tenants/entitlements/change-preview` - overlays one proposed policy row without mutating runtime policy, then returns before/after entitlement matrices, MCP-safe allow delta, blast radius, and guardrail checks.
+- `POST /tenants/entitlements/change-pack` - writes `tenant_entitlement_change_preview_latest.json` and `.md` with proposed policy evidence, decision deltas, guardrails, local verification commands, and limitations.
 - `GET /marketplace/catalog` - returns Skill Marketplace listings with lifecycle status, versions, tenant rollout eligibility, risk level, required review state, usage signals, MCP exposure state, disabled-skill blocks, blocked/review-required rollouts, and coverage summary.
 - `POST /marketplace/rollout-pack` - writes the Tenant Rollout approval pack Markdown/JSON under ignored local folder `data/marketplace_packs/` with rollout recommendations, tenant policy decisions, disabled-skill blocks, version comparison notes, reviewer checklist, local proof commands, and limitations.
 - `GET /marketplace/approvals` - returns the local approval queue, catalog promotion checks, owner signoff requirements, rollout stage policy, local proof commands, and architecture patterns for durable workflows, human-in-the-loop, governance, and tool governance.
@@ -498,9 +500,21 @@ Invoke-RestMethod http://localhost:8000/tenants/entitlements/access-review-pack 
   -Method POST `
   -ContentType "application/json" `
   -Body '{"actor":"entitlement-access-reviewer"}'
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/change-preview `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"proposed_policy":{"tenant_id":"healthcare","skill_id":"translate_text","allowed_roles":["admin","reviewer","agent"],"denied_roles":["viewer"],"required_scopes":["skill.invoke","tenant.healthcare","phi.review"],"allowed_environments":["local","dev","test"],"allowed_data_sensitivities":["public","internal"],"reason":"Preview reviewer-scoped healthcare translation access."},"scenario":{"tenant_id":"healthcare","user_id":"care-agent","role":"agent","user_scopes":["skill.invoke","tenant.healthcare","phi.review"],"skill_ids":["translate_text"]}}'
+
+Invoke-RestMethod http://localhost:8000/tenants/entitlements/change-pack `
+  -Headers $headers `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"actor":"entitlement-change-reviewer"}'
 ```
 
-The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The coverage report compares promoted MCP tools against exact and wildcard tenant policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. The packs write Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, coverage review rows, reviewer proof, and local-only limitations.
+The entitlement evaluator returns per-skill `allow` or `deny` decisions for tenant id, user id, user scopes, role, environment, and sensitivity. `mcp_safe_tool_names` is the intersection of promoted MCP tools, valid manifests, and allowed entitlement decisions. The coverage report compares promoted MCP tools against exact and wildcard tenant policies, flags wildcard-only rows for review, and includes denied entitlement audit evidence. The change preview is advisory: it overlays a proposed policy row, computes before/after MCP-safe tool deltas and guardrails, and does not mutate live runtime policy. The packs write Markdown/JSON under `data/entitlement_packs/` with scenario results, denied skill ids, coverage review rows, reviewer proof, and local-only limitations.
 
 ## Skill Marketplace Governance And Tenant Rollout
 

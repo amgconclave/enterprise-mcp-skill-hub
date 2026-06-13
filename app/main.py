@@ -203,6 +203,10 @@ from app.models import (
     TenantEntitlementAccessReviewPackResult,
     TenantEntitlementAccessReviewRequest,
     TenantEntitlementAccessReviewResult,
+    TenantEntitlementChangePackRequest,
+    TenantEntitlementChangePackResult,
+    TenantEntitlementChangePreviewRequest,
+    TenantEntitlementChangePreviewResult,
     TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
     TenantEntitlementMatrixResult,
@@ -465,6 +469,24 @@ async def tenant_entitlement_access_review_pack(
 ) -> TenantEntitlementAccessReviewPackResult:
     return await state.entitlements.export_access_review_pack(
         request or TenantEntitlementAccessReviewPackRequest()
+    )
+
+
+@app.post("/tenants/entitlements/change-preview", response_model=TenantEntitlementChangePreviewResult)
+def tenant_entitlement_change_preview(
+    request: TenantEntitlementChangePreviewRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementChangePreviewResult:
+    return state.entitlements.preview_change(request or TenantEntitlementChangePreviewRequest())
+
+
+@app.post("/tenants/entitlements/change-pack", response_model=TenantEntitlementChangePackResult)
+async def tenant_entitlement_change_pack(
+    request: TenantEntitlementChangePackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> TenantEntitlementChangePackResult:
+    return await state.entitlements.export_change_pack(
+        request or TenantEntitlementChangePackRequest()
     )
 
 

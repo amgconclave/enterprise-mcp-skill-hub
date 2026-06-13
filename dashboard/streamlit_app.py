@@ -77,11 +77,14 @@ from app.models import (
     SupplyChainPackRequest,
     TaskRunTransparencyPackRequest,
     TenantEntitlementAccessReviewPackRequest,
+    TenantEntitlementChangePackRequest,
+    TenantEntitlementChangePreviewRequest,
     TenantEntitlementMatrixRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
     TenantPolicySimulationRequest,
     TenantSandboxExportRequest,
+    TenantSkillEntitlementPolicy,
     UiVerificationPackRequest,
     UsageChargebackPackRequest,
     WorkerQueueAdmissionPackRequest,
@@ -725,8 +728,17 @@ elif view == "Tenant RBAC / Entitlements":
     col_allowed.metric("Allowed", entitlement.summary["allowed_skill_count"])
     col_denied.metric("Denied", entitlement.summary["denied_skill_count"])
     col_safe.metric("MCP-safe tools", entitlement.summary["mcp_safe_tool_count"])
-    tab_decisions, tab_policies, tab_mcp, tab_coverage, tab_access, tab_export, tab_json = st.tabs(
-        ["Decisions", "Policies", "MCP Safe", "Coverage", "Access Review", "Export", "JSON"]
+    tab_decisions, tab_policies, tab_mcp, tab_coverage, tab_access, tab_change, tab_export, tab_json = st.tabs(
+        [
+            "Decisions",
+            "Policies",
+            "MCP Safe",
+            "Coverage",
+            "Access Review",
+            "Change Preview",
+            "Export",
+            "JSON",
+        ]
     )
     with tab_decisions:
         st.dataframe(
@@ -813,6 +825,83 @@ elif view == "Tenant RBAC / Entitlements":
         st.dataframe(access_review.bounded_steps, use_container_width=True, hide_index=True)
         with st.expander("Break-glass drill"):
             st.json(access_review.break_glass_drill)
+    with tab_change:
+        st.caption("Preview an entitlement row before changing live policy fixtures.")
+        col_skill, col_roles = st.columns(2)
+        proposed_skill = col_skill.selectbox(
+            "Proposed skill",
+            [skill.id for skill in state.registry.mcp_exposed()],
+            index=0,
+            key="entitlement_change_skill",
+        )
+        proposed_roles = col_roles.multiselect(
+            "Allowed roles",
+            ["admin", "reviewer", "agent", "viewer"],
+            default=["admin", "reviewer", "agent"],
+            key="entitlement_change_roles",
+        )
+        col_envs, col_denied = st.columns(2)
+        proposed_envs = col_envs.multiselect(
+            "Allowed environments",
+            ["local", "dev", "test", "production"],
+            default=["local", "dev", "test"],
+            key="entitlement_change_envs",
+        )
+        proposed_denied = col_denied.multiselect(
+            "Denied roles",
+            ["admin", "reviewer", "agent", "viewer"],
+            default=["viewer"],
+            key="entitlement_change_denied",
+        )
+        proposed_scopes_text = st.text_input(
+            "Proposed required scopes",
+            value=",".join(entitlement_request.user_scopes),
+            key="entitlement_change_scopes",
+        )
+        proposed_reason = st.text_area(
+            "Proposed reason",
+            value="Preview least-privilege tenant entitlement change before owner approval.",
+            key="entitlement_change_reason",
+        )
+        proposed_policy = TenantSkillEntitlementPolicy(
+            tenant_id=tenant_id,
+            skill_id=proposed_skill,
+            allowed_roles=proposed_roles,
+            denied_roles=proposed_denied,
+            required_scopes=[scope.strip() for scope in proposed_scopes_text.split(",") if scope.strip()],
+            allowed_environments=proposed_envs,
+            allowed_data_sensitivities=[sensitivity],
+            reason=proposed_reason,
+        )
+        change_preview = state.entitlements.preview_change(
+            TenantEntitlementChangePreviewRequest(
+                actor="streamlit-entitlement-change-reviewer",
+                proposed_policy=proposed_policy,
+                scenario=entitlement_request,
+            )
+        )
+        col_change_ready, col_added, col_changed, col_guardrails = st.columns(4)
+        col_change_ready.metric("Preview", change_preview.readiness_status.upper())
+        col_added.metric("Added allows", change_preview.blast_radius["allowed_added_count"])
+        col_changed.metric("Decision changes", change_preview.blast_radius["changed_decision_count"])
+        col_guardrails.metric(
+            "Guardrail fails",
+            sum(1 for check in change_preview.guardrail_checks if check["status"] == "fail"),
+        )
+        st.dataframe(change_preview.changed_decisions, use_container_width=True, hide_index=True)
+        st.dataframe(change_preview.guardrail_checks, use_container_width=True, hide_index=True)
+        if st.button("Export Change Preview Pack", use_container_width=True):
+            change_export = run_async(
+                state.entitlements.export_change_pack(
+                    TenantEntitlementChangePackRequest(
+                        actor="streamlit-entitlement-change-reviewer",
+                        proposed_policy=proposed_policy,
+                        scenario=entitlement_request,
+                    )
+                )
+            )
+            st.success("Tenant entitlement change preview pack exported.")
+            st.json(change_export.model_dump(mode="json"))
     with tab_export:
         st.caption("Writes Markdown and JSON under data/entitlement_packs/.")
         if st.button("Export Entitlement Pack", use_container_width=True):

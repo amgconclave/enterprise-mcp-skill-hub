@@ -245,6 +245,10 @@ from app.models import (
     TenantEntitlementAccessReviewPackResult,
     TenantEntitlementAccessReviewRequest,
     TenantEntitlementAccessReviewResult,
+    TenantEntitlementChangePackRequest,
+    TenantEntitlementChangePackResult,
+    TenantEntitlementChangePreviewRequest,
+    TenantEntitlementChangePreviewResult,
     TenantEntitlementCoverageRecord,
     TenantEntitlementCoverageResult,
     TenantEntitlementMatrixRequest,
@@ -446,6 +450,7 @@ class TenantEntitlementService:
     PACK_ID = "tenant_entitlement_pack_latest"
     REVIEW_PACK_ID = "tenant_entitlement_review_pack_latest"
     ACCESS_REVIEW_ID = "tenant_entitlement_access_review_latest"
+    CHANGE_PREVIEW_ID = "tenant_entitlement_change_preview_latest"
 
     DEFAULT_POLICIES = [
         {
@@ -537,9 +542,17 @@ class TenantEntitlementService:
         return sorted(self.policies, key=lambda policy: (policy.tenant_id, policy.skill_id))
 
     def decide(self, skill: SkillManifest, context: PolicyInvocationContext) -> SkillEntitlementDecision:
-        exact = [policy for policy in self.policies if policy.tenant_id == context.tenant_id and policy.skill_id == skill.id]
+        return self._decide_with_policies(skill, context, self.policies)
+
+    def _decide_with_policies(
+        self,
+        skill: SkillManifest,
+        context: PolicyInvocationContext,
+        policies: list[TenantSkillEntitlementPolicy],
+    ) -> SkillEntitlementDecision:
+        exact = [policy for policy in policies if policy.tenant_id == context.tenant_id and policy.skill_id == skill.id]
         wildcard = [
-            policy for policy in self.policies if policy.tenant_id == context.tenant_id and policy.skill_id == "*"
+            policy for policy in policies if policy.tenant_id == context.tenant_id and policy.skill_id == "*"
         ]
         applicable = exact or wildcard
         reasons: list[str] = []
@@ -623,6 +636,13 @@ class TenantEntitlementService:
         )
 
     def matrix(self, request: TenantEntitlementMatrixRequest | None = None) -> TenantEntitlementMatrixResult:
+        return self._matrix_with_policies(request, self.policies)
+
+    def _matrix_with_policies(
+        self,
+        request: TenantEntitlementMatrixRequest | None,
+        policies: list[TenantSkillEntitlementPolicy],
+    ) -> TenantEntitlementMatrixResult:
         request = request or TenantEntitlementMatrixRequest()
         skill_ids = request.skill_ids or [skill.id for skill in self.registry.mcp_exposed()]
         decisions: list[SkillEntitlementDecision] = []
@@ -642,7 +662,7 @@ class TenantEntitlementService:
                 user_id=request.user_id,
                 user_scopes=request.user_scopes,
             )
-            decisions.append(self.decide(skill, context))
+            decisions.append(self._decide_with_policies(skill, context, policies))
         allowed = [decision.skill_id for decision in decisions if decision.decision == "allow"]
         denied = [decision.skill_id for decision in decisions if decision.decision == "deny"]
         mcp_safe_tool_names = [
@@ -660,11 +680,11 @@ class TenantEntitlementService:
                 "user_id": request.user_id,
                 "allowed_skill_count": len(allowed),
                 "denied_skill_count": len(denied),
-                "policy_count": len(self.policies),
+                "policy_count": len(policies),
                 "mcp_safe_tool_count": len(mcp_safe_tool_names),
             },
             decisions=decisions,
-            policies=self.list_policies(),
+            policies=sorted(policies, key=lambda policy: (policy.tenant_id, policy.skill_id)),
             mcp_safe_tool_names=sorted(mcp_safe_tool_names),
             denied_skill_ids=sorted(denied),
             reviewer_notes=[
@@ -954,6 +974,116 @@ class TenantEntitlementService:
             summary=review.summary,
         )
 
+    def preview_change(
+        self,
+        request: TenantEntitlementChangePreviewRequest | None = None,
+    ) -> TenantEntitlementChangePreviewResult:
+        request = request or TenantEntitlementChangePreviewRequest()
+        scenario = request.scenario.model_copy(
+            update={"skill_ids": self._preview_skill_ids(request.scenario, request.proposed_policy)}
+        )
+        before = self.matrix(scenario)
+        after_policies = self._overlay_policy(request.proposed_policy)
+        after = self._matrix_with_policies(scenario, after_policies)
+        changed_decisions = self._changed_decisions(before, after)
+        blast_radius = self._change_blast_radius(before, after, changed_decisions)
+        guardrail_checks = self._change_guardrail_checks(
+            request.proposed_policy,
+            before,
+            after,
+            blast_radius,
+        )
+        fail_count = sum(1 for check in guardrail_checks if check["status"] == "fail")
+        warn_count = sum(1 for check in guardrail_checks if check["status"] == "warn")
+        readiness_status: SecurityReadinessStatus = (
+            "blocked" if fail_count else "needs_review" if warn_count or changed_decisions else "ready"
+        )
+        return TenantEntitlementChangePreviewResult(
+            preview_id=self.CHANGE_PREVIEW_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            actor=request.actor,
+            proposed_policy=request.proposed_policy,
+            before=before,
+            after=after,
+            changed_decisions=changed_decisions,
+            guardrail_checks=guardrail_checks,
+            blast_radius=blast_radius,
+            reviewer_notes=[
+                "Preview overlays one proposed entitlement policy row and does not mutate runtime policies.",
+                "Allowed skill additions must be reviewed before changing live entitlement fixtures or an external IAM policy store.",
+                "MCP-safe tools in the after matrix remain restricted to promoted, schema-valid local skills.",
+            ],
+            patterns_used=[
+                "governance: proposed entitlement changes require guardrail evidence before rollout",
+                "tool_governance: blast radius is computed from MCP-safe tool allow/deny deltas",
+                "state observation: before and after matrices are stored with exact policy evidence",
+                "human-in-the-loop: export pack is reviewer evidence, not an automatic policy mutation",
+            ],
+            limitations=[
+                "The preview uses static local entitlement fixtures rather than a production IAM graph.",
+                "The endpoint does not persist or apply policy changes; it only writes reviewer evidence.",
+                "External OpenAI, Azure OpenAI, and identity providers are not called.",
+            ],
+        )
+
+    async def export_change_pack(
+        self,
+        request: TenantEntitlementChangePackRequest | None = None,
+    ) -> TenantEntitlementChangePackResult:
+        request = request or TenantEntitlementChangePackRequest()
+        preview = self.preview_change(
+            TenantEntitlementChangePreviewRequest(
+                actor=request.actor,
+                proposed_policy=request.proposed_policy,
+                scenario=request.scenario,
+            )
+        )
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.CHANGE_PREVIEW_ID}.json"
+        markdown_path = self.output_dir / f"{self.CHANGE_PREVIEW_ID}.md"
+        bundle = {
+            "pack_id": self.CHANGE_PREVIEW_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "preview": preview.model_dump(mode="json"),
+            "summary": {
+                **preview.blast_radius,
+                "guardrail_fail_count": sum(1 for check in preview.guardrail_checks if check["status"] == "fail"),
+                "guardrail_warn_count": sum(1 for check in preview.guardrail_checks if check["status"] == "warn"),
+            },
+            "local_verification_commands": [
+                "python -m pytest tests/test_tenant_entitlements.py -q",
+                "python -m app.mcp_server tools",
+                "python -m app.demo",
+            ],
+            "limitations": preview.limitations,
+        }
+        json_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._change_markdown(bundle), encoding="utf-8")
+        self.audit.record(
+            "entitlement.change_pack_exported",
+            "entitlement_change_preview",
+            self.CHANGE_PREVIEW_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": preview.readiness_status,
+                "allowed_added_count": preview.blast_radius["allowed_added_count"],
+                "guardrail_fail_count": bundle["summary"]["guardrail_fail_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return TenantEntitlementChangePackResult(
+            pack_id=self.CHANGE_PREVIEW_ID,
+            generated_at=utc_now(),
+            readiness_status=preview.readiness_status,
+            json_path=str(json_path),
+            markdown_path=str(markdown_path),
+            summary=bundle["summary"],
+        )
+
     def _missing_skill_decision(
         self,
         skill_id: str,
@@ -977,6 +1107,193 @@ class TenantEntitlementService:
         except KeyError:
             return False
         return self.registry.is_mcp_exposed(skill) and self.validator.validate_manifest(skill.model_dump(mode="json")).valid
+
+    def _preview_skill_ids(
+        self,
+        scenario: TenantEntitlementMatrixRequest,
+        proposed_policy: TenantSkillEntitlementPolicy,
+    ) -> list[str]:
+        skill_ids = list(scenario.skill_ids or [skill.id for skill in self.registry.mcp_exposed()])
+        if proposed_policy.skill_id != "*" and proposed_policy.skill_id not in skill_ids:
+            skill_ids.append(proposed_policy.skill_id)
+        return sorted(skill_ids)
+
+    def _overlay_policy(
+        self,
+        proposed_policy: TenantSkillEntitlementPolicy,
+    ) -> list[TenantSkillEntitlementPolicy]:
+        overlaid = [
+            policy
+            for policy in self.policies
+            if not (
+                policy.tenant_id == proposed_policy.tenant_id
+                and policy.skill_id == proposed_policy.skill_id
+            )
+        ]
+        overlaid.append(proposed_policy)
+        return sorted(overlaid, key=lambda policy: (policy.tenant_id, policy.skill_id))
+
+    def _changed_decisions(
+        self,
+        before: TenantEntitlementMatrixResult,
+        after: TenantEntitlementMatrixResult,
+    ) -> list[JsonDict]:
+        before_by_skill = {decision.skill_id: decision for decision in before.decisions}
+        after_by_skill = {decision.skill_id: decision for decision in after.decisions}
+        rows: list[JsonDict] = []
+        for skill_id in sorted(set(before_by_skill) | set(after_by_skill)):
+            before_decision = before_by_skill.get(skill_id)
+            after_decision = after_by_skill.get(skill_id)
+            before_value = before_decision.decision if before_decision else "missing"
+            after_value = after_decision.decision if after_decision else "missing"
+            before_scopes = before_decision.missing_scopes if before_decision else []
+            after_scopes = after_decision.missing_scopes if after_decision else []
+            if before_value == after_value and before_scopes == after_scopes:
+                continue
+            rows.append(
+                {
+                    "skill_id": skill_id,
+                    "before_decision": before_value,
+                    "after_decision": after_value,
+                    "before_missing_scopes": before_scopes,
+                    "after_missing_scopes": after_scopes,
+                    "before_policies": before_decision.matched_policies if before_decision else [],
+                    "after_policies": after_decision.matched_policies if after_decision else [],
+                    "change_type": self._decision_change_type(before_value, after_value),
+                }
+            )
+        return rows
+
+    def _decision_change_type(self, before_value: str, after_value: str) -> str:
+        if before_value == "deny" and after_value == "allow":
+            return "allow_added"
+        if before_value == "allow" and after_value == "deny":
+            return "allow_removed"
+        return "decision_metadata_changed"
+
+    def _change_blast_radius(
+        self,
+        before: TenantEntitlementMatrixResult,
+        after: TenantEntitlementMatrixResult,
+        changed_decisions: list[JsonDict],
+    ) -> JsonDict:
+        before_allowed = set(before.mcp_safe_tool_names)
+        after_allowed = set(after.mcp_safe_tool_names)
+        allowed_added = sorted(after_allowed - before_allowed)
+        allowed_removed = sorted(before_allowed - after_allowed)
+        return {
+            "tenant_id": after.request.tenant_id,
+            "user_id": after.request.user_id,
+            "role": after.request.role,
+            "skill_count": len(after.decisions),
+            "changed_decision_count": len(changed_decisions),
+            "allowed_added_count": len(allowed_added),
+            "allowed_removed_count": len(allowed_removed),
+            "mcp_safe_before": sorted(before_allowed),
+            "mcp_safe_after": sorted(after_allowed),
+            "allowed_added": allowed_added,
+            "allowed_removed": allowed_removed,
+        }
+
+    def _change_guardrail_checks(
+        self,
+        proposed_policy: TenantSkillEntitlementPolicy,
+        before: TenantEntitlementMatrixResult,
+        after: TenantEntitlementMatrixResult,
+        blast_radius: JsonDict,
+    ) -> list[JsonDict]:
+        required_tenant_scope = f"tenant.{proposed_policy.tenant_id}"
+        tenant_scope_ok = (
+            proposed_policy.tenant_id == "internal_demo"
+            or required_tenant_scope in proposed_policy.required_scopes
+        )
+        production_envs = {
+            environment.lower()
+            for environment in proposed_policy.allowed_environments
+            if environment.lower() in {"prod", "production"}
+        }
+        sensitive_skill = proposed_policy.skill_id in {
+            "translate_text",
+            "extract_entities",
+            "generate_action_items",
+        }
+        reviewer_scope_present = any(scope.endswith(".review") for scope in proposed_policy.required_scopes)
+        live_policy_count = len(self.policies)
+        checks = [
+            {
+                "id": "no_live_policy_mutation",
+                "status": "pass",
+                "evidence": {
+                    "live_policy_count_before": live_policy_count,
+                    "live_policy_count_after_preview": live_policy_count,
+                    "preview_policy_count": len(after.policies),
+                },
+                "reviewer_action": "Apply policy changes only after reviewer signoff outside this preview endpoint.",
+            },
+            {
+                "id": "mcp_skill_exists",
+                "status": "pass"
+                if proposed_policy.skill_id == "*" or self._is_valid_mcp_skill(proposed_policy.skill_id)
+                else "fail",
+                "evidence": {"skill_id": proposed_policy.skill_id},
+                "reviewer_action": "Only grant entitlements to promoted, schema-valid MCP skills.",
+            },
+            {
+                "id": "tenant_scope_required",
+                "status": "pass" if tenant_scope_ok else "fail",
+                "evidence": {
+                    "required_scope": required_tenant_scope,
+                    "policy_scopes": proposed_policy.required_scopes,
+                },
+                "reviewer_action": "Require tenant-scoped user claims for non-internal tenants.",
+            },
+            {
+                "id": "viewer_denied",
+                "status": "pass"
+                if "viewer" in proposed_policy.denied_roles and "viewer" not in proposed_policy.allowed_roles
+                else "fail",
+                "evidence": {
+                    "allowed_roles": proposed_policy.allowed_roles,
+                    "denied_roles": proposed_policy.denied_roles,
+                },
+                "reviewer_action": "Keep viewer role read-only for governed MCP skills.",
+            },
+            {
+                "id": "production_agent_block",
+                "status": "fail"
+                if production_envs and ("agent" in proposed_policy.allowed_roles or proposed_policy.skill_id == "*")
+                else "pass",
+                "evidence": {
+                    "production_environments": sorted(production_envs),
+                    "allowed_roles": proposed_policy.allowed_roles,
+                    "skill_id": proposed_policy.skill_id,
+                },
+                "reviewer_action": "Do not introduce broad or agent production access through local fixtures.",
+            },
+            {
+                "id": "sensitive_skill_reviewer_scope",
+                "status": "pass"
+                if not (sensitive_skill and "agent" in proposed_policy.allowed_roles) or reviewer_scope_present
+                else "fail",
+                "evidence": {
+                    "sensitive_skill": sensitive_skill,
+                    "reviewer_scope_present": reviewer_scope_present,
+                    "required_scopes": proposed_policy.required_scopes,
+                },
+                "reviewer_action": "Require an explicit reviewer scope for sensitive skills allowed to agents.",
+            },
+            {
+                "id": "allow_delta_needs_human_review",
+                "status": "warn" if blast_radius["allowed_added_count"] else "pass",
+                "evidence": {
+                    "allowed_added": blast_radius["allowed_added"],
+                    "before_allowed_count": before.summary["allowed_skill_count"],
+                    "after_allowed_count": after.summary["allowed_skill_count"],
+                },
+                "reviewer_action": "Attach the change pack to owner approval before expanding MCP-safe tools.",
+            },
+        ]
+        return checks
 
     def _default_scenarios(self) -> list[TenantEntitlementMatrixRequest]:
         return [
@@ -1343,6 +1660,63 @@ class TenantEntitlementService:
                 "",
                 "## Patterns Used",
                 *[f"- {pattern}" for pattern in bundle["patterns_used"]],
+                "",
+                "## Local Verification",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+            ]
+        )
+        return "\n".join(lines)
+
+    def _change_markdown(self, bundle: JsonDict) -> str:
+        preview = bundle["preview"]
+        blast_radius = preview["blast_radius"]
+        lines = [
+            "# Tenant Entitlement Change Preview Pack",
+            "",
+            f"- Readiness: `{preview['readiness_status']}`",
+            f"- Actor: `{preview['actor']}`",
+            f"- Tenant: `{blast_radius['tenant_id']}`",
+            f"- User: `{blast_radius['user_id']}`",
+            f"- Changed decisions: `{blast_radius['changed_decision_count']}`",
+            f"- Added MCP-safe allows: `{blast_radius['allowed_added_count']}`",
+            f"- Removed MCP-safe allows: `{blast_radius['allowed_removed_count']}`",
+            "",
+            "## Proposed Policy",
+            f"- Tenant: `{preview['proposed_policy']['tenant_id']}`",
+            f"- Skill: `{preview['proposed_policy']['skill_id']}`",
+            f"- Allowed roles: `{', '.join(preview['proposed_policy']['allowed_roles']) or 'none'}`",
+            f"- Required scopes: `{', '.join(preview['proposed_policy']['required_scopes']) or 'none'}`",
+            f"- Reason: {preview['proposed_policy']['reason']}",
+            "",
+            "## Decision Deltas",
+        ]
+        if preview["changed_decisions"]:
+            for row in preview["changed_decisions"]:
+                lines.append(
+                    "- "
+                    f"`{row['skill_id']}` `{row['before_decision']}` -> `{row['after_decision']}` "
+                    f"type=`{row['change_type']}`"
+                )
+        else:
+            lines.append("- No allow/deny decision changed for the selected scenario.")
+        lines.extend(["", "## Guardrails"])
+        for check in preview["guardrail_checks"]:
+            lines.append(
+                "- "
+                f"`{check['id']}` status=`{check['status']}` action={check['reviewer_action']}"
+            )
+        lines.extend(
+            [
+                "",
+                "## MCP-Safe Tool Delta",
+                f"- Before: `{', '.join(blast_radius['mcp_safe_before']) or 'none'}`",
+                f"- After: `{', '.join(blast_radius['mcp_safe_after']) or 'none'}`",
+                "",
+                "## Patterns Used",
+                *[f"- {pattern}" for pattern in preview["patterns_used"]],
                 "",
                 "## Local Verification",
                 *[f"- `{command}`" for command in bundle["local_verification_commands"]],
@@ -18987,6 +19361,8 @@ class DashboardSmokeService:
             self._endpoint_ref("mcp_admission_pack", "POST", "/mcp/admission-pack", "Writes MCP Tool Admission artifacts."),
             self._endpoint_ref("tenant_entitlement_access_review", "GET", "/tenants/entitlements/access-review", "Privileged entitlement access review and break-glass drill."),
             self._endpoint_ref("tenant_entitlement_access_review_pack", "POST", "/tenants/entitlements/access-review-pack", "Writes Tenant Entitlement Access Review artifacts."),
+            self._endpoint_ref("tenant_entitlement_change_preview", "POST", "/tenants/entitlements/change-preview", "Previews entitlement policy changes without mutating runtime policy."),
+            self._endpoint_ref("tenant_entitlement_change_pack", "POST", "/tenants/entitlements/change-pack", "Writes Tenant Entitlement Change Preview artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
             self._endpoint_ref("prompt_governance_pack", "POST", "/prompt-governance/pack", "Writes Prompt Governance artifacts."),
             self._endpoint_ref(
@@ -19060,6 +19436,7 @@ class DashboardSmokeService:
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
             self._artifact_tab("mcp_admission", "MCP Admission", "Export", "data/mcp_admission/"),
+            self._artifact_tab("entitlement_change_preview", "Tenant RBAC / Entitlements", "Change Preview", "data/entitlement_packs/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
@@ -24553,8 +24930,22 @@ class ArtifactInventoryService:
                     "tenant_entitlement_review_pack_latest.md",
                     "tenant_entitlement_access_review_latest.json",
                     "tenant_entitlement_access_review_latest.md",
+                    "tenant_entitlement_change_preview_latest.json",
+                    "tenant_entitlement_change_preview_latest.md",
                 ],
                 "Tenant/user RBAC decisions, coverage drift, privileged access review, break-glass drill, and MCP-safe entitlement proof.",
+            ),
+            self._catalog_row(
+                "entitlement_change_preview",
+                "Tenant Entitlement Change Preview Pack",
+                Path("data") / "entitlement_packs",
+                "POST /tenants/entitlements/change-pack",
+                "Invoke-RestMethod http://localhost:8000/tenants/entitlements/change-pack -Method POST -Headers $headers",
+                [
+                    "tenant_entitlement_change_preview_latest.json",
+                    "tenant_entitlement_change_preview_latest.md",
+                ],
+                "Before/after entitlement matrix, MCP-safe allow delta, guardrail checks, and reviewer approval evidence for proposed policy rows.",
             ),
             self._catalog_row(
                 "marketplace_packs",

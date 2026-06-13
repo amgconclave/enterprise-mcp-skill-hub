@@ -59,6 +59,7 @@ from app.models import (
     SupplyChainPackRequest,
     TaskRunTransparencyPackRequest,
     TenantEntitlementAccessReviewPackRequest,
+    TenantEntitlementChangePackRequest,
     TenantEntitlementPackRequest,
     TenantEntitlementReviewPackRequest,
     TenantSandboxExportRequest,
@@ -207,6 +208,9 @@ async def main() -> None:
     entitlement_access_review = state.entitlements.access_review()
     entitlement_access_review_pack = await state.entitlements.export_access_review_pack(
         TenantEntitlementAccessReviewPackRequest(actor="demo-entitlement-access-reviewer")
+    )
+    entitlement_change_pack = await state.entitlements.export_change_pack(
+        TenantEntitlementChangePackRequest(actor="demo-entitlement-change-reviewer")
     )
     marketplace_catalog = await state.marketplace.catalog()
     marketplace_pack = await state.marketplace.rollout_pack(
@@ -544,6 +548,10 @@ async def main() -> None:
                 ],
                 "tenant entitlement access review pack path": entitlement_access_review_pack.markdown_path,
                 "tenant_entitlement_access_review_pack_path": entitlement_access_review_pack.markdown_path,
+                "tenant entitlement change preview": entitlement_change_pack.readiness_status,
+                "tenant_entitlement_change_preview": entitlement_change_pack.readiness_status,
+                "tenant entitlement change pack path": entitlement_change_pack.markdown_path,
+                "tenant_entitlement_change_pack_path": entitlement_change_pack.markdown_path,
                 "skill marketplace readiness": marketplace_catalog.readiness_status,
                 "skill_marketplace_readiness": marketplace_catalog.readiness_status,
                 "marketplace catalog listings": marketplace_catalog.coverage_summary["listing_count"],

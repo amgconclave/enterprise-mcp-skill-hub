@@ -653,6 +653,66 @@ class TenantEntitlementAccessReviewPackResult(BaseModel):
     summary: JsonDict
 
 
+class TenantEntitlementChangePreviewRequest(BaseModel):
+    actor: str = "entitlement-change-reviewer"
+    proposed_policy: TenantSkillEntitlementPolicy = Field(
+        default_factory=lambda: TenantSkillEntitlementPolicy(
+            tenant_id="healthcare",
+            skill_id="translate_text",
+            allowed_roles=["admin", "reviewer", "agent"],
+            denied_roles=["viewer"],
+            required_scopes=["skill.invoke", "tenant.healthcare", "phi.review"],
+            allowed_environments=["local", "dev", "test"],
+            allowed_data_sensitivities=["public", "internal"],
+            reason="Preview a reviewer-scoped healthcare translation entitlement change.",
+        )
+    )
+    scenario: TenantEntitlementMatrixRequest = Field(
+        default_factory=lambda: TenantEntitlementMatrixRequest(
+            tenant_id="healthcare",
+            user_id="change-preview-agent",
+            role="agent",
+            user_scopes=["skill.invoke", "tenant.healthcare", "phi.review"],
+            skill_ids=["translate_text", "search_knowledge_base"],
+        )
+    )
+
+
+class TenantEntitlementChangePreviewResult(BaseModel):
+    preview_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    actor: str
+    proposed_policy: TenantSkillEntitlementPolicy
+    before: TenantEntitlementMatrixResult
+    after: TenantEntitlementMatrixResult
+    changed_decisions: list[JsonDict] = Field(default_factory=list)
+    guardrail_checks: list[JsonDict] = Field(default_factory=list)
+    blast_radius: JsonDict = Field(default_factory=dict)
+    reviewer_notes: list[str] = Field(default_factory=list)
+    patterns_used: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class TenantEntitlementChangePackRequest(BaseModel):
+    actor: str = "entitlement-change-reviewer"
+    proposed_policy: TenantSkillEntitlementPolicy = Field(
+        default_factory=lambda: TenantEntitlementChangePreviewRequest().proposed_policy
+    )
+    scenario: TenantEntitlementMatrixRequest = Field(
+        default_factory=lambda: TenantEntitlementChangePreviewRequest().scenario
+    )
+
+
+class TenantEntitlementChangePackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class MarketplaceTenantEligibility(BaseModel):
     scenario_id: str
     tenant: TenantKey
