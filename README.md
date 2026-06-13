@@ -34,6 +34,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Provider Readiness + Fallback Pack for mock-default local posture, optional OpenAI/Azure configuration checks, fallback routes, re-enable gates, audit events, and ignored `data/provider_packs/` artifacts.
 - Provider Failover Drill Pack for deterministic hosted-provider outage scenarios, mock fallback decisions, reviewer re-enable gates, replay commands, cost deltas, and ignored `data/provider_failover/` artifacts.
 - Config Hygiene + Secret Rotation Pack for `.env.example`, `.gitignore`, provider credential gates, redacted local secret findings, rotation guidance, and ignored `data/config_hygiene/` artifacts.
+- Skill Lineage Pack for mapping MCP-exposed skills to manifest/schema fingerprints, resources, prompts, workflows, policy controls, providers, recent invocations, reviewer actions, and ignored `data/lineage/` artifacts.
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
 - Human Review SLA Pack for workflow review, marketplace approval, and sandbox exception queues with SLA status, escalation owner, recommended action, trace evidence, and ignored `data/review_sla/` artifacts.
 - Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
@@ -60,7 +61,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Platform Pack, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Policy Replay, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Skill Lineage, Platform Pack, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Policy Replay, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -581,6 +582,19 @@ Get-ChildItem -Recurse -File data\config_hygiene -ErrorAction SilentlyContinue |
 ```
 
 `GET /config/hygiene` checks `.env.example`, `.gitignore`, current provider mode, optional OpenAI/Azure credential presence, and suspicious literal secret patterns without exporting secret values. `POST /config/hygiene-pack` writes `config_hygiene_pack_latest.json` and `.md` under ignored `data/config_hygiene/` with provider gates, redacted findings, rotation steps, reviewer checklist, local proof commands, and limitations. The Streamlit dashboard has a `Config Hygiene` view, and `python -m app.demo` prints config hygiene readiness plus the pack path.
+
+## Skill Lineage Pack
+
+Trace governed MCP skills back to their local evidence before changing manifests, prompts, resources, or workflows:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/lineage/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/lineage/pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\lineage -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /lineage/report` returns manifest/schema fingerprints, MCP exposure, provider mode, prompt/resource/workflow links, policy controls, recent invocation IDs, graph nodes/edges, and reviewer actions for each skill. `POST /lineage/pack` writes `skill_lineage_pack_latest.json` and `.md` under ignored `data/lineage/` with a reviewer checklist, governance/shared-state/handoff patterns, local proof commands, and limitations. The Streamlit dashboard has a `Skill Lineage` view.
 
 ## Governed Skill Platform Pack
 

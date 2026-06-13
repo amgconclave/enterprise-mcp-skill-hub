@@ -165,6 +165,9 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillIncidentRunbookResult,
     SkillInvocation,
+    SkillLineagePackRequest,
+    SkillLineagePackResult,
+    SkillLineageReport,
     SkillManifest,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
@@ -626,6 +629,19 @@ def provider_failover_pack(
         return state.provider_failover.pack(request or ProviderFailoverPackRequest())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/lineage/report", response_model=SkillLineageReport)
+def skill_lineage_report(_: str = Depends(require_api_key)) -> SkillLineageReport:
+    return state.lineage.report()
+
+
+@app.post("/lineage/pack", response_model=SkillLineagePackResult)
+def skill_lineage_pack(
+    request: SkillLineagePackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillLineagePackResult:
+    return state.lineage.pack(request or SkillLineagePackRequest())
 
 
 @app.get("/config/hygiene", response_model=ConfigHygieneReport)

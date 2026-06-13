@@ -65,6 +65,7 @@ from app.models import (
     SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
+    SkillLineagePackRequest,
     SkillManifest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
@@ -123,6 +124,7 @@ view = st.sidebar.radio(
         "Provider Readiness",
         "Provider Failover",
         "Config Hygiene",
+        "Skill Lineage",
         "Platform Pack",
         "Review SLA",
         "Agent Collaboration",
@@ -1250,6 +1252,46 @@ elif view == "Config Hygiene":
         if st.button("Export Config Hygiene Pack", use_container_width=True):
             export = state.config_hygiene.pack(ConfigHygienePackRequest(actor=actor))
             st.success("Config Hygiene Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
+
+elif view == "Skill Lineage":
+    st.subheader("Skill Lineage")
+    st.caption("Trace MCP skills back to manifests, schema hashes, resources, prompts, workflows, policy controls, and recent invocations.")
+    report = state.lineage.report()
+    col_ready, col_skills, col_edges, col_review = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_skills.metric("Skills", report.summary["skill_count"])
+    col_edges.metric("Graph edges", report.summary["graph_edge_count"])
+    col_review.metric("Needs review", report.summary["needs_review_count"])
+
+    tab_records, tab_graph, tab_controls, tab_export, tab_json = st.tabs(
+        ["Records", "Graph", "Controls", "Lineage Pack", "JSON"]
+    )
+    with tab_records:
+        st.dataframe(
+            [record.model_dump(mode="json") for record in report.records],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_graph:
+        st.dataframe(report.graph_nodes, use_container_width=True, hide_index=True)
+        st.dataframe(report.graph_edges, use_container_width=True, hide_index=True)
+    with tab_controls:
+        st.json({"governance_patterns": report.governance_patterns})
+        st.dataframe(report.reviewer_actions, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [{"command": command} for command in report.local_proof_commands],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/lineage/.")
+        actor = st.text_input("Lineage pack actor", value="streamlit-lineage-reviewer")
+        if st.button("Export Skill Lineage Pack", use_container_width=True):
+            export = state.lineage.pack(SkillLineagePackRequest(actor=actor))
+            st.success("Skill Lineage Pack exported.")
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))

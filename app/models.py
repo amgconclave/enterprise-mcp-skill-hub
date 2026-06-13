@@ -1102,6 +1102,56 @@ class ConfigHygienePackResult(BaseModel):
     summary: JsonDict
 
 
+SkillLineageStatus = Literal["complete", "needs_review"]
+
+
+class SkillLineageRecord(BaseModel):
+    skill_id: str
+    version: str
+    lineage_status: SkillLineageStatus
+    mcp_exposed: bool
+    provider: str
+    manifest_hash: str
+    input_schema_hash: str
+    output_schema_hash: str
+    tags: list[str] = Field(default_factory=list)
+    resource_uris: list[str] = Field(default_factory=list)
+    prompt_ids: list[str] = Field(default_factory=list)
+    workflow_template_ids: list[str] = Field(default_factory=list)
+    recent_invocation_ids: list[str] = Field(default_factory=list)
+    policy_controls: list[JsonDict] = Field(default_factory=list)
+    data_classes: list[DataSensitivity] = Field(default_factory=list)
+    audit_event_count: int = 0
+    reviewer_action: str
+
+
+class SkillLineageReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[SkillLineageRecord] = Field(default_factory=list)
+    graph_nodes: list[JsonDict] = Field(default_factory=list)
+    graph_edges: list[JsonDict] = Field(default_factory=list)
+    governance_patterns: list[str] = Field(default_factory=list)
+    reviewer_actions: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillLineagePackRequest(BaseModel):
+    actor: str = "lineage-reviewer"
+
+
+class SkillLineagePackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class PromptGovernanceValidationRequest(BaseModel):
     content: str
     target_id: str = "ad_hoc"

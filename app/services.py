@@ -197,6 +197,10 @@ from app.models import (
     SkillIncidentScenario,
     SkillIncidentSeverity,
     SkillInvocation,
+    SkillLineagePackRequest,
+    SkillLineagePackResult,
+    SkillLineageRecord,
+    SkillLineageReport,
     SkillManifest,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
@@ -18493,6 +18497,7 @@ class DashboardSmokeService:
             {"id": "provider_readiness", "label": "Provider Readiness", "purpose": "Provider fallback controls."},
             {"id": "provider_failover", "label": "Provider Failover", "purpose": "Provider outage drill and mock fallback proof."},
             {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
+            {"id": "skill_lineage", "label": "Skill Lineage", "purpose": "Skill-to-manifest, prompt, resource, workflow, and policy traceability."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "review_sla", "label": "Review SLA", "purpose": "Human-review queue SLA and escalation evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
@@ -18560,6 +18565,8 @@ class DashboardSmokeService:
             self._endpoint_ref("provider_failover_pack", "POST", "/providers/failover-pack", "Writes Provider Failover Drill artifacts."),
             self._endpoint_ref("config_hygiene", "GET", "/config/hygiene", "Config hygiene and secret rotation posture."),
             self._endpoint_ref("config_hygiene_pack", "POST", "/config/hygiene-pack", "Writes Config Hygiene artifacts."),
+            self._endpoint_ref("skill_lineage_report", "GET", "/lineage/report", "Skill lineage graph and reviewer actions."),
+            self._endpoint_ref("skill_lineage_pack", "POST", "/lineage/pack", "Writes Skill Lineage artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
             self._endpoint_ref("review_sla", "GET", "/reviews/sla", "Human-review SLA and escalation report."),
@@ -18644,6 +18651,7 @@ class DashboardSmokeService:
             self._artifact_tab("provider_readiness", "Provider Readiness", "Provider Pack", "data/provider_packs/"),
             self._artifact_tab("provider_failover", "Provider Failover", "Failover Pack", "data/provider_failover/"),
             self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
+            self._artifact_tab("skill_lineage", "Skill Lineage", "Lineage Pack", "data/lineage/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("review_sla", "Review SLA", "SLA Pack", "data/review_sla/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
@@ -22560,6 +22568,15 @@ class ArtifactInventoryService:
                 "Local config posture, optional provider credential gates, redacted secret findings, and rotation proof.",
             ),
             self._catalog_row(
+                "lineage",
+                "Skill Lineage Pack",
+                Path("data") / "lineage",
+                "POST /lineage/pack",
+                "Invoke-RestMethod http://localhost:8000/lineage/pack -Method POST -Headers $headers",
+                ["skill_lineage_pack_latest.json", "skill_lineage_pack_latest.md"],
+                "Skill-to-manifest, schema, prompt, resource, workflow, policy, provider, and invocation lineage proof.",
+            ),
+            self._catalog_row(
                 "platform_packs",
                 "Governed Skill Platform Pack",
                 Path("data") / "platform_packs",
@@ -24299,6 +24316,353 @@ class ProviderFailoverDrillService:
         return "\n".join(lines)
 
 
+class SkillLineageService:
+    REPORT_ID = "skill_lineage_report_latest"
+    PACK_ID = "skill_lineage_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "lineage"
+
+    def report(self) -> SkillLineageReport:
+        records = [self._record(skill) for skill in self.app_state.registry.list()]
+        mcp_records = [record for record in records if record.mcp_exposed]
+        needs_review = [record for record in records if record.lineage_status == "needs_review"]
+        readiness_status: SecurityReadinessStatus = "needs_review" if needs_review else "ready"
+        nodes, edges = self._graph(records)
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "skill_count": len(records),
+            "mcp_exposed_skill_count": len(mcp_records),
+            "needs_review_count": len(needs_review),
+            "resource_reference_count": sum(len(record.resource_uris) for record in records),
+            "prompt_reference_count": sum(len(record.prompt_ids) for record in records),
+            "workflow_reference_count": sum(len(record.workflow_template_ids) for record in records),
+            "recent_invocation_reference_count": sum(len(record.recent_invocation_ids) for record in records),
+            "graph_node_count": len(nodes),
+            "graph_edge_count": len(edges),
+            "artifact_root": str(self.output_dir),
+        }
+        return SkillLineageReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            records=records,
+            graph_nodes=nodes,
+            graph_edges=edges,
+            governance_patterns=[
+                "governance: every promoted MCP skill is tied back to manifest, schema, policy, prompt, resource, and workflow evidence.",
+                "shared state: lineage graph connects reusable skills with shared prompts, resources, workflows, and recent run IDs.",
+                "handoffs: the pack exports reviewer actions and local proof commands for release or platform-owner signoff.",
+            ],
+            reviewer_actions=self._reviewer_actions(records),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: SkillLineagePackRequest | None = None) -> SkillLineagePackResult:
+        request = request or SkillLineagePackRequest()
+        report = self.report()
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "skill_lineage_report": report.model_dump(mode="json"),
+            "reviewer_checklist": self._reviewer_checklist(report),
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "lineage.pack_exported",
+            "skill_lineage_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "skill_count": report.summary["skill_count"],
+                "needs_review_count": report.summary["needs_review_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return SkillLineagePackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _record(self, skill: SkillManifest) -> SkillLineageRecord:
+        resources = self._resource_uris(skill)
+        prompts = self._prompt_ids(skill)
+        workflows = self._workflow_ids(skill.id)
+        recent_invocations = [
+            invocation.id
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.skill_id == skill.id
+        ][-5:]
+        policy_controls = self._policy_controls(skill)
+        data_classes = sorted(
+            {
+                control["data_sensitivity"]
+                for control in policy_controls
+                if control["decision"] == "allow" and control["role"] in {"agent", "reviewer"}
+            }
+        )
+        audit_count = sum(
+            1
+            for event in self.app_state.audit.events
+            if event.resource_id == skill.id or event.metadata.get("skill_id") == skill.id
+        )
+        complete = self.app_state.registry.is_mcp_exposed(skill) and bool(prompts) and bool(policy_controls)
+        return SkillLineageRecord(
+            skill_id=skill.id,
+            version=skill.version,
+            lineage_status="complete" if complete else "needs_review",
+            mcp_exposed=self.app_state.registry.is_mcp_exposed(skill),
+            provider=skill.provider,
+            manifest_hash=self._hash(skill.model_dump(mode="json")),
+            input_schema_hash=self._hash(skill.input_schema),
+            output_schema_hash=self._hash(skill.output_schema),
+            tags=skill.tags,
+            resource_uris=resources,
+            prompt_ids=prompts,
+            workflow_template_ids=workflows,
+            recent_invocation_ids=recent_invocations,
+            policy_controls=policy_controls,
+            data_classes=data_classes,
+            audit_event_count=audit_count,
+            reviewer_action=(
+                "Lineage is ready for reviewer signoff."
+                if complete
+                else "Add prompt/resource/workflow references before exposing or widening this skill."
+            ),
+        )
+
+    def _resource_uris(self, skill: SkillManifest) -> list[str]:
+        resources = self.app_state.resources.list()
+        by_kind: dict[str, list[str]] = defaultdict(list)
+        for resource in resources:
+            by_kind[resource.annotations.get("kind", "unknown")].append(resource.uri)
+        if skill.id == "search_knowledge_base":
+            return sorted(resource.uri for resource in resources)
+        if skill.id in {"summarize_document", "classify_request", "extract_entities"}:
+            return sorted(by_kind["policy"] + by_kind["product"] + ["resource://skill-catalog"])
+        if skill.id == "generate_action_items":
+            return sorted(by_kind["workflow_templates"] + ["resource://skill-catalog"])
+        return ["resource://skill-catalog"]
+
+    def _prompt_ids(self, skill: SkillManifest) -> list[str]:
+        mapping = {
+            "summarize_document": ["meeting_summary", "support_reply"],
+            "extract_entities": ["meeting_summary", "workflow_composition"],
+            "translate_text": ["workflow_composition"],
+            "classify_request": ["support_reply", "workflow_composition"],
+            "generate_action_items": ["meeting_summary", "workflow_composition"],
+            "search_knowledge_base": ["rfp_answer", "support_reply", "workflow_composition"],
+        }
+        available = {prompt.id for prompt in self.app_state.prompts.list()}
+        return sorted(prompt_id for prompt_id in mapping.get(skill.id, ["workflow_composition"]) if prompt_id in available)
+
+    def _workflow_ids(self, skill_id: str) -> list[str]:
+        return sorted(
+            template.id
+            for template in self.app_state.workflows.list()
+            if skill_id in template.ordered_skill_ids
+        )
+
+    def _policy_controls(self, skill: SkillManifest) -> list[JsonDict]:
+        controls: list[JsonDict] = []
+        for role in ("agent", "reviewer"):
+            for sensitivity in ("public", "internal", "confidential"):
+                result = self.app_state.policy.simulate(
+                    skill,
+                    PolicySimulationRequest(
+                        skill_id=skill.id,
+                        role=role,
+                        environment="local",
+                        data_sensitivity=sensitivity,
+                        requested_action="invoke",
+                    ),
+                )
+                controls.append(
+                    {
+                        "role": role,
+                        "data_sensitivity": sensitivity,
+                        "decision": result.decision,
+                        "matched_rules": result.matched_rules,
+                    }
+                )
+        return controls
+
+    def _graph(self, records: list[SkillLineageRecord]) -> tuple[list[JsonDict], list[JsonDict]]:
+        node_ids: set[str] = set()
+        nodes: list[JsonDict] = []
+        edges: list[JsonDict] = []
+
+        def add_node(node_id: str, node_type: str, label: str) -> None:
+            if node_id in node_ids:
+                return
+            node_ids.add(node_id)
+            nodes.append({"id": node_id, "type": node_type, "label": label})
+
+        add_node(f"provider:{self.app_state.provider.name}", "provider", self.app_state.provider.name)
+        for record in records:
+            skill_node = f"skill:{record.skill_id}"
+            add_node(skill_node, "skill", record.skill_id)
+            edges.append(
+                {
+                    "source": skill_node,
+                    "target": f"provider:{self.app_state.provider.name}",
+                    "type": "uses_provider",
+                }
+            )
+            for uri in record.resource_uris:
+                add_node(f"resource:{uri}", "resource", uri)
+                edges.append({"source": skill_node, "target": f"resource:{uri}", "type": "reads_resource"})
+            for prompt_id in record.prompt_ids:
+                add_node(f"prompt:{prompt_id}", "prompt", prompt_id)
+                edges.append({"source": f"prompt:{prompt_id}", "target": skill_node, "type": "guides_skill"})
+            for workflow_id in record.workflow_template_ids:
+                add_node(f"workflow:{workflow_id}", "workflow", workflow_id)
+                edges.append({"source": f"workflow:{workflow_id}", "target": skill_node, "type": "invokes_skill"})
+        return nodes, edges
+
+    def _reviewer_actions(self, records: list[SkillLineageRecord]) -> list[JsonDict]:
+        actions = [
+            {
+                "target": record.skill_id,
+                "status": "pass" if record.lineage_status == "complete" else "warn",
+                "action": record.reviewer_action,
+                "evidence": {
+                    "resources": len(record.resource_uris),
+                    "prompts": len(record.prompt_ids),
+                    "workflows": len(record.workflow_template_ids),
+                    "recent_invocations": len(record.recent_invocation_ids),
+                },
+            }
+            for record in records
+        ]
+        actions.append(
+            {
+                "target": "lineage_pack",
+                "status": "pass",
+                "action": "Export the Skill Lineage Pack before changing MCP exposure, prompts, resources, or workflow templates.",
+                "evidence": {"command": "POST /lineage/pack"},
+            }
+        )
+        return actions
+
+    def _reviewer_checklist(self, report: SkillLineageReport) -> list[JsonDict]:
+        return [
+            {
+                "item": "Every MCP-exposed skill has a manifest and schema fingerprint.",
+                "status": "pass" if all(record.manifest_hash for record in report.records if record.mcp_exposed) else "fail",
+                "proof": f"{report.summary['mcp_exposed_skill_count']} MCP skill(s).",
+            },
+            {
+                "item": "Promoted tools have prompt or workflow lineage.",
+                "status": "pass" if report.summary["needs_review_count"] == 0 else "warn",
+                "proof": f"{report.summary['needs_review_count']} lineage row(s) need review.",
+            },
+            {
+                "item": "Policy controls are visible for agent and reviewer roles.",
+                "status": "pass" if all(record.policy_controls for record in report.records) else "fail",
+                "proof": "Local policy simulation rows are embedded per skill.",
+            },
+            {
+                "item": "Graph edges are exportable for handoff review.",
+                "status": "pass" if report.summary["graph_edge_count"] else "warn",
+                "proof": f"{report.summary['graph_edge_count']} edge(s).",
+            },
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "Invoke-RestMethod http://localhost:8000/lineage/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/lineage/pack -Method POST -Headers $headers",
+            'rg "lineage/report|lineage/pack|Skill Lineage|data/lineage" app dashboard docs README.md tests sample_data',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Lineage is derived from local manifests, static resources, prompt templates, workflows, audit events, and in-process invocations.",
+            "Recent invocation links only include history retained in the current local process.",
+            "Provider checks remain local and do not call OpenAI, Azure OpenAI, or external tracing systems.",
+            "Generated lineage artifacts are ignored under data/lineage/ and should be regenerated after manifest, prompt, resource, or workflow changes.",
+        ]
+
+    def _hash(self, payload: JsonDict) -> str:
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["skill_lineage_report"]
+        lines = [
+            "# Skill Lineage Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Skills: `{report['summary']['skill_count']}`",
+            f"- Graph edges: `{report['summary']['graph_edge_count']}`",
+            "",
+            "## Lineage Records",
+            "",
+            "| Skill | Status | Version | Resources | Prompts | Workflows | Invocations |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            *[
+                (
+                    f"| `{record['skill_id']}` | `{record['lineage_status']}` | `{record['version']}` | "
+                    f"`{len(record['resource_uris'])}` | `{len(record['prompt_ids'])}` | "
+                    f"`{len(record['workflow_template_ids'])}` | `{len(record['recent_invocation_ids'])}` |"
+                )
+                for record in report["records"]
+            ],
+            "",
+            "## Governance Patterns",
+            "",
+            *[f"- {pattern}" for pattern in report["governance_patterns"]],
+            "",
+            "## Reviewer Checklist",
+            "",
+            *[f"- `{item['status']}` {item['item']} - {item['proof']}" for item in bundle["reviewer_checklist"]],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class ConfigHygieneService:
     PACK_ID = "config_hygiene_pack_latest"
 
@@ -24821,6 +25185,7 @@ class AppState:
     sandbox_exceptions: SandboxExceptionReviewService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
     provider_failover: ProviderFailoverDrillService = field(init=False)
+    lineage: SkillLineageService = field(init=False)
     config_hygiene: ConfigHygieneService = field(init=False)
     prompt_governance: PromptGovernanceService = field(init=False)
     privacy_retention: PrivacyRetentionService = field(init=False)
@@ -24893,6 +25258,7 @@ class AppState:
         self.sandbox_exceptions = SandboxExceptionReviewService(self)
         self.provider_readiness = ProviderReadinessService(self)
         self.provider_failover = ProviderFailoverDrillService(self)
+        self.lineage = SkillLineageService(self)
         self.config_hygiene = ConfigHygieneService(self)
         self.prompt_governance = PromptGovernanceService(self)
         self.privacy_retention = PrivacyRetentionService(self)

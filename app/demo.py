@@ -49,6 +49,7 @@ from app.models import (
     SkillCompatibilityPackRequest,
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
+    SkillLineagePackRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
@@ -249,6 +250,10 @@ async def main() -> None:
     config_hygiene_report = state.config_hygiene.report()
     config_hygiene_pack = state.config_hygiene.pack(
         ConfigHygienePackRequest(actor="demo-config-reviewer")
+    )
+    lineage_report = state.lineage.report()
+    lineage_pack = state.lineage.pack(
+        SkillLineagePackRequest(actor="demo-lineage-reviewer")
     )
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
@@ -577,6 +582,12 @@ async def main() -> None:
                 "config_hygiene_secret_findings": config_hygiene_report.summary["secret_finding_count"],
                 "config hygiene pack path": config_hygiene_pack.markdown_path,
                 "config_hygiene_pack_path": config_hygiene_pack.markdown_path,
+                "skill lineage readiness": lineage_report.readiness_status,
+                "skill_lineage_readiness": lineage_report.readiness_status,
+                "skill lineage graph edges": lineage_report.summary["graph_edge_count"],
+                "skill_lineage_graph_edges": lineage_report.summary["graph_edge_count"],
+                "skill lineage pack path": lineage_pack.markdown_path,
+                "skill_lineage_pack_path": lineage_pack.markdown_path,
                 "platform pack readiness": platform_pack_report.readiness_status,
                 "platform_pack_readiness": platform_pack_report.readiness_status,
                 "platform pack controls": len(platform_pack_report.capability_controls),

@@ -41,6 +41,7 @@ It checks:
 - Provider Readiness tests cover `GET /providers/readiness`, `POST /providers/fallback-pack`, mock-default posture, optional OpenAI/Azure static checks without network calls, generated artifacts under `data/provider_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Provider Failover tests cover `POST /providers/failover-drill`, `POST /providers/failover-pack`, deterministic hosted-provider failure scenarios, mock fallback decisions, reviewer gates, zero network calls, cost-delta visibility, generated artifacts under `data/provider_failover/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and demo output.
 - Config Hygiene tests cover `GET /config/hygiene`, `POST /config/hygiene-pack`, `.env.example` and `.gitignore` posture, mock-default provider gates, redacted secret-value handling, rotation guidance, generated artifacts under `data/config_hygiene/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
+- Skill Lineage tests cover `GET /lineage/report`, `POST /lineage/pack`, manifest/schema fingerprints, prompt/resource/workflow graph edges, policy controls, reviewer actions, generated artifacts under `data/lineage/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
 - Governed Skill Platform Pack tests cover `GET /platform/pack`, `POST /platform/pack/export`, durable workflow evidence, human-in-the-loop review state, governance/conformance controls, provider flexibility, tool governance, cost/trace signals, handoff readiness, generated artifacts under `data/platform_packs/`, dashboard smoke wiring, Artifact Inventory, API Contract coverage, and smoke matrix wiring.
 - Human Review SLA tests cover `GET /reviews/sla`, `POST /reviews/sla-pack`, workflow review, marketplace approval, and sandbox exception queue normalization, SLA breach escalation, generated artifacts under `data/review_sla/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
 - Agent Collaboration tests cover `POST /agents/collaborate`, `POST /agents/collaboration-pack`, deterministic multi-agent handoffs, shared-state artifacts, policy-denied stops before tool execution, token/cost tracking, generated artifacts under `data/agent_collaboration/`, dashboard smoke wiring, Artifact Inventory, and API Contract coverage.
@@ -70,6 +71,7 @@ It checks:
 - The demo prints API Contract audit status/route count and the exported Reviewer Collection path.
 - The demo prints Skill Marketplace readiness, catalog listing count, and the exported Tenant Rollout approval pack path.
 - The demo prints Skill Usage Analytics readiness, Cost Chargeback estimated cost, and the exported chargeback pack path.
+- The demo prints Skill Lineage readiness, graph edge count, and the exported Skill Lineage Pack path.
 - The demo prints Governed Skill Platform Pack readiness, control count, and the exported platform pack path.
 - The demo prints Agent Collaboration readiness, handoff count, and the exported collaboration pack path.
 - The demo prints Agent Society Evaluation readiness, score, and the exported society eval pack path.
