@@ -43,6 +43,7 @@ from app.models import (
     MarketplaceRolloutPackRequest,
     MarketplaceStageAdvanceRequest,
     McpToolAdmissionPackRequest,
+    PlatformOperationsDrillRequest,
     PolicyInvocationContext,
     PolicyReplayPackRequest,
     PolicySimulationRequest,
@@ -129,6 +130,7 @@ view = st.sidebar.radio(
         "Config Hygiene",
         "Skill Lineage",
         "Platform Pack",
+        "Platform Operations",
         "Skill Ownership",
         "Review SLA",
         "Agent Collaboration",
@@ -1395,6 +1397,50 @@ elif view == "Platform Pack":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Platform Operations":
+    st.subheader("Platform Operations")
+    st.caption("Local platform operations drill across sandbox policy, run transparency, workers, policy replay, and dry-run repo automation.")
+    include_repo = st.checkbox("Include repository automation dry-run", value=True)
+    request = PlatformOperationsDrillRequest(
+        actor="streamlit-platform-operator",
+        include_repository_automation=include_repo,
+    )
+    drill = run_async(state.platform_operations.drill(request))
+    col_ready, col_observations, col_risks, col_steps = st.columns(4)
+    col_ready.metric("Readiness", drill.readiness_status.upper())
+    col_observations.metric("Observations", drill.summary["observation_count"])
+    col_risks.metric("Risks", drill.summary["risk_count"])
+    col_steps.metric("Verification", drill.summary["verification_step_count"])
+
+    tab_observe, tab_loop, tab_risks, tab_export, tab_json = st.tabs(
+        ["Observations", "Action Loop", "Risks / Handoff", "Drill Pack", "JSON"]
+    )
+    with tab_observe:
+        st.dataframe(drill.state_observations, use_container_width=True, hide_index=True)
+        st.dataframe(drill.step_verification, use_container_width=True, hide_index=True)
+        st.json({"patterns": drill.architecture_patterns})
+    with tab_loop:
+        st.dataframe(drill.action_loop, use_container_width=True, hide_index=True)
+    with tab_risks:
+        st.dataframe(drill.risk_register, use_container_width=True, hide_index=True)
+        st.dataframe(drill.reviewer_handoff, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/platform_operations/.")
+        actor = st.text_input("Operations pack actor", value="streamlit-platform-operator")
+        if st.button("Export Platform Operations Drill Pack", use_container_width=True):
+            export = run_async(
+                state.platform_operations.pack(
+                    PlatformOperationsDrillRequest(
+                        actor=actor,
+                        include_repository_automation=include_repo,
+                    )
+                )
+            )
+            st.success("Platform Operations Drill Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(drill.model_dump(mode="json"))
 
 elif view == "Skill Ownership":
     st.subheader("Skill Ownership")

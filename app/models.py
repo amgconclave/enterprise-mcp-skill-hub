@@ -1486,6 +1486,35 @@ class GovernedSkillPlatformPackExportResult(BaseModel):
     summary: JsonDict
 
 
+class PlatformOperationsDrillResult(BaseModel):
+    drill_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    architecture_patterns: list[str] = Field(default_factory=list)
+    state_observations: list[JsonDict] = Field(default_factory=list)
+    action_loop: list[JsonDict] = Field(default_factory=list)
+    step_verification: list[JsonDict] = Field(default_factory=list)
+    risk_register: list[JsonDict] = Field(default_factory=list)
+    reviewer_handoff: list[JsonDict] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class PlatformOperationsDrillRequest(BaseModel):
+    actor: str = "platform-operator"
+    include_repository_automation: bool = True
+
+
+class PlatformOperationsDrillPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
 class SkillOwnershipRecord(BaseModel):
     skill_id: str
     version: str

@@ -102,6 +102,9 @@ from app.models import (
     McpToolAdmissionPackResult,
     McpToolAdmissionReport,
     McpToolDefinition,
+    PlatformOperationsDrillPackResult,
+    PlatformOperationsDrillRequest,
+    PlatformOperationsDrillResult,
     PolicyInvocationContext,
     PolicyReplayDriftReport,
     PolicyReplayPackRequest,
@@ -763,6 +766,21 @@ async def export_governed_skill_platform_pack(
     _: str = Depends(require_api_key),
 ) -> GovernedSkillPlatformPackExportResult:
     return await state.platform_pack.export(request or GovernedSkillPlatformPackRequest())
+
+
+@app.get("/platform/operations-drill", response_model=PlatformOperationsDrillResult)
+async def platform_operations_drill(_: str = Depends(require_api_key)) -> PlatformOperationsDrillResult:
+    return await state.platform_operations.drill(
+        PlatformOperationsDrillRequest(actor="api-platform-operator")
+    )
+
+
+@app.post("/platform/operations-pack", response_model=PlatformOperationsDrillPackResult)
+async def platform_operations_pack(
+    request: PlatformOperationsDrillRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> PlatformOperationsDrillPackResult:
+    return await state.platform_operations.pack(request or PlatformOperationsDrillRequest())
 
 
 @app.get("/ownership/matrix", response_model=SkillOwnershipMatrixResult)

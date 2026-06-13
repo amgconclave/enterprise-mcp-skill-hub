@@ -30,6 +30,7 @@ from app.models import (
     MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
     McpToolAdmissionPackRequest,
+    PlatformOperationsDrillRequest,
     PolicyReplayPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
@@ -313,6 +314,12 @@ async def main() -> None:
     policy_replay_report = state.policy_replay.report(actor="demo-policy-replay-reviewer")
     policy_replay_pack = state.policy_replay.pack(
         PolicyReplayPackRequest(actor="demo-policy-replay-reviewer")
+    )
+    platform_operations_drill = await state.platform_operations.drill(
+        PlatformOperationsDrillRequest(actor="demo-platform-operator")
+    )
+    platform_operations_pack = await state.platform_operations.pack(
+        PlatformOperationsDrillRequest(actor="demo-platform-operator")
     )
     audit_integrity = state.audit_integrity.report()
     audit_integrity_pack = state.audit_integrity.pack(
@@ -604,6 +611,18 @@ async def main() -> None:
                 "platform_pack_controls": len(platform_pack_report.capability_controls),
                 "platform pack path": platform_pack_export.markdown_path,
                 "platform_pack_path": platform_pack_export.markdown_path,
+                "platform operations readiness": platform_operations_drill.readiness_status,
+                "platform_operations_readiness": platform_operations_drill.readiness_status,
+                "platform operations observations": platform_operations_drill.summary[
+                    "observation_count"
+                ],
+                "platform_operations_observations": platform_operations_drill.summary[
+                    "observation_count"
+                ],
+                "platform operations risk count": platform_operations_drill.summary["risk_count"],
+                "platform_operations_risk_count": platform_operations_drill.summary["risk_count"],
+                "platform operations pack path": platform_operations_pack.markdown_path,
+                "platform_operations_pack_path": platform_operations_pack.markdown_path,
                 "skill ownership readiness": ownership_matrix.readiness_status,
                 "skill_ownership_readiness": ownership_matrix.readiness_status,
                 "skill ownership owners": ownership_matrix.summary["owner_count"],

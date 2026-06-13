@@ -121,6 +121,9 @@ from app.models import (
     McpToolAdmissionRecord,
     McpToolAdmissionReport,
     McpToolDefinition,
+    PlatformOperationsDrillPackResult,
+    PlatformOperationsDrillRequest,
+    PlatformOperationsDrillResult,
     PolicyInvocationContext,
     PolicyReplayDriftReport,
     PolicyReplayPackRequest,
@@ -169,6 +172,7 @@ from app.models import (
     ReleasePublishPackRequest,
     ReleasePublishPackResult,
     ReleaseQualityGate,
+    RepositoryAutomationPlanResult,
     ResourceDefinition,
     ResourcePayload,
     ReviewerQuickstartResult,
@@ -18859,6 +18863,7 @@ class DashboardSmokeService:
             {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
             {"id": "skill_lineage", "label": "Skill Lineage", "purpose": "Skill-to-manifest, prompt, resource, workflow, and policy traceability."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
+            {"id": "platform_operations", "label": "Platform Operations", "purpose": "Operations drill across sandbox, workers, runs, policy, and repo automation."},
             {"id": "skill_ownership", "label": "Skill Ownership", "purpose": "Owner roster, escalation routes, and handoff evidence."},
             {"id": "review_sla", "label": "Review SLA", "purpose": "Human-review queue SLA and escalation evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
@@ -18931,6 +18936,8 @@ class DashboardSmokeService:
             self._endpoint_ref("skill_lineage_pack", "POST", "/lineage/pack", "Writes Skill Lineage artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
+            self._endpoint_ref("platform_operations_drill", "GET", "/platform/operations-drill", "Platform operations state observation and bounded action loop."),
+            self._endpoint_ref("platform_operations_pack", "POST", "/platform/operations-pack", "Writes Platform Operations Drill artifacts."),
             self._endpoint_ref("skill_ownership", "GET", "/ownership/matrix", "Skill ownership matrix and escalation routes."),
             self._endpoint_ref("skill_ownership_pack", "POST", "/ownership/pack", "Writes Skill Ownership artifacts."),
             self._endpoint_ref("review_sla", "GET", "/reviews/sla", "Human-review SLA and escalation report."),
@@ -19019,6 +19026,7 @@ class DashboardSmokeService:
             self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
             self._artifact_tab("skill_lineage", "Skill Lineage", "Lineage Pack", "data/lineage/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
+            self._artifact_tab("platform_operations", "Platform Operations", "Drill Pack", "data/platform_operations/"),
             self._artifact_tab("skill_ownership", "Skill Ownership", "Ownership Pack", "data/ownership_packs/"),
             self._artifact_tab("review_sla", "Review SLA", "SLA Pack", "data/review_sla/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
@@ -22107,6 +22115,405 @@ class GovernedSkillPlatformPackService:
         return "\n".join(lines)
 
 
+class PlatformOperationsDrillService:
+    DRILL_ID = "platform_operations_drill_latest"
+    PACK_ID = "platform_operations_drill_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "platform_operations"
+
+    async def drill(
+        self,
+        request: PlatformOperationsDrillRequest | None = None,
+    ) -> PlatformOperationsDrillResult:
+        request = request or PlatformOperationsDrillRequest()
+        platform = await self.app_state.platform_pack.report(actor=request.actor)
+        worker = await self.app_state.worker_scaleout.scale_plan()
+        queue = self.app_state.worker_scaleout.queue_admission_report()
+        ledger = self.app_state.task_runs.ledger()
+        sandbox = self.app_state.invocation_sandbox.report()
+        policy_replay = self.app_state.policy_replay.report(actor=request.actor)
+        repository_plan = (
+            self.app_state.git_readiness.automation_plan()
+            if request.include_repository_automation
+            else None
+        )
+        observations = self._state_observations(
+            platform,
+            worker,
+            queue,
+            ledger,
+            sandbox,
+            policy_replay,
+            repository_plan,
+        )
+        action_loop = self._action_loop(observations)
+        step_verification = self._step_verification(observations)
+        risk_register = self._risk_register(observations)
+        readiness_status = self._readiness_status(observations, risk_register)
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "observation_count": len(observations),
+            "action_step_count": len(action_loop),
+            "verification_step_count": len(step_verification),
+            "risk_count": len(risk_register),
+            "blocking_risk_count": sum(1 for risk in risk_register if risk["severity"] == "blocking"),
+            "warning_risk_count": sum(1 for risk in risk_register if risk["severity"] == "warning"),
+            "repository_automation_included": repository_plan is not None,
+            "artifact_directory": str(self.output_dir),
+        }
+        return PlatformOperationsDrillResult(
+            drill_id=self.DRILL_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            architecture_patterns=[
+                "task sandbox",
+                "run transparency",
+                "repository automation",
+                "worker scale-out",
+                "state observation",
+                "bounded action loop",
+                "step verification",
+            ],
+            state_observations=observations,
+            action_loop=action_loop,
+            step_verification=step_verification,
+            risk_register=risk_register,
+            reviewer_handoff=self._reviewer_handoff(risk_register),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def pack(
+        self,
+        request: PlatformOperationsDrillRequest | None = None,
+    ) -> PlatformOperationsDrillPackResult:
+        request = request or PlatformOperationsDrillRequest()
+        drill = await self.drill(request)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": drill.readiness_status,
+            "platform_operations_drill": drill.model_dump(mode="json"),
+            "architecture_patterns": drill.architecture_patterns,
+            "state_observations": drill.state_observations,
+            "action_loop": drill.action_loop,
+            "step_verification": drill.step_verification,
+            "risk_register": drill.risk_register,
+            "reviewer_handoff": drill.reviewer_handoff,
+            "local_proof_commands": drill.local_proof_commands,
+            "limitations": drill.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "platform_operations.drill_pack_exported",
+            "platform_operations_drill_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": drill.readiness_status,
+                "observation_count": drill.summary["observation_count"],
+                "risk_count": drill.summary["risk_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+        return PlatformOperationsDrillPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=drill.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **drill.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _state_observations(
+        self,
+        platform: GovernedSkillPlatformPackResult,
+        worker: WorkerScalePlanResult,
+        queue: WorkerQueueAdmissionReport,
+        ledger: TaskRunObservabilityResult,
+        sandbox: InvocationSandboxReport,
+        policy_replay: PolicyReplayDriftReport,
+        repository_plan: RepositoryAutomationPlanResult | None,
+    ) -> list[JsonDict]:
+        observations = [
+            self._observation(
+                "platform_controls",
+                platform.readiness_status,
+                platform.summary["control_count"],
+                f"{platform.summary['ready_control_count']} controls pass; {platform.summary['needs_review_control_count']} need review.",
+                "GET /platform/pack",
+            ),
+            self._observation(
+                "worker_capacity",
+                worker.readiness_status,
+                worker.summary["total_max_concurrency"],
+                f"{worker.summary['run_count']} worker runs tracked across {worker.summary['total_worker_count']} local workers.",
+                "GET /workers/scale-plan",
+            ),
+            self._observation(
+                "queue_admission",
+                queue.readiness_status,
+                queue.summary["decision_count"],
+                f"{queue.summary['queued_count']} queued and {queue.summary['rejected_count']} rejected admission decisions.",
+                "GET /workers/queue-admission",
+            ),
+            self._observation(
+                "run_transparency",
+                ledger.readiness_status,
+                ledger.summary["ledger_entry_count"],
+                f"{ledger.summary['trace_id_count']} trace ids and {ledger.summary['risk_flag_count']} risk flags in the run ledger.",
+                "GET /runs/ledger",
+            ),
+            self._observation(
+                "sandbox_policy",
+                sandbox.readiness_status,
+                sandbox.summary["decision_count"],
+                f"{sandbox.summary['blocked_action_class_count']} blocked action classes and {sandbox.summary['denied_decision_count']} denied decisions.",
+                "GET /sandbox/policy",
+            ),
+            self._observation(
+                "policy_replay",
+                policy_replay.readiness_status,
+                policy_replay.summary["record_count"],
+                f"{policy_replay.summary['drift_count']} drift rows and {policy_replay.summary['needs_evidence_count']} rows needing evidence.",
+                "GET /policy/replay-drift",
+            ),
+        ]
+        if repository_plan is not None:
+            observations.append(
+                self._observation(
+                    "repository_automation",
+                    repository_plan.readiness_status,
+                    repository_plan.summary["planned_task_count"],
+                    f"{repository_plan.summary['blocked_mutation_count']} repo mutation tasks blocked by dry-run sandbox.",
+                    "GET /repository/automation-plan",
+                )
+            )
+        return observations
+
+    def _observation(
+        self,
+        observation_id: str,
+        readiness_status: str,
+        value: int | float | str | dict,
+        detail: str,
+        evidence_endpoint: str,
+    ) -> JsonDict:
+        return {
+            "id": observation_id,
+            "readiness_status": readiness_status,
+            "value": value,
+            "detail": detail,
+            "evidence_endpoint": evidence_endpoint,
+        }
+
+    def _action_loop(self, observations: list[JsonDict]) -> list[JsonDict]:
+        steps = [
+            ("observe_state", "state observation", "complete", "Collect platform, worker, sandbox, policy, and repository state."),
+            ("classify_risks", "run transparency", "complete", "Normalize readiness into pass, review, and blocked rows."),
+            ("verify_steps", "step verification", "complete", "Attach local endpoint/script proof for every observed control."),
+        ]
+        if any(item["readiness_status"] == "blocked" for item in observations):
+            steps.append(
+                ("stop_for_owner", "bounded action loop", "blocked", "Stop automation and route blocking rows to the platform owner.")
+            )
+        elif any(item["readiness_status"] == "needs_review" for item in observations):
+            steps.append(
+                ("route_review", "bounded action loop", "review_required", "Route warning rows to owner queues before release.")
+            )
+        else:
+            steps.append(
+                ("approve_local_run", "bounded action loop", "clear", "Local/mock platform operations drill has no blocking rows.")
+            )
+        return [
+            {"order": index + 1, "step": step, "pattern": pattern, "status": status, "action": action}
+            for index, (step, pattern, status, action) in enumerate(steps)
+        ]
+
+    def _step_verification(self, observations: list[JsonDict]) -> list[JsonDict]:
+        commands = {
+            "platform_controls": "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
+            "worker_capacity": "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
+            "queue_admission": "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
+            "run_transparency": "Invoke-RestMethod http://localhost:8000/runs/ledger -Headers $headers",
+            "sandbox_policy": "Invoke-RestMethod http://localhost:8000/sandbox/policy -Headers $headers",
+            "policy_replay": "Invoke-RestMethod http://localhost:8000/policy/replay-drift -Headers $headers",
+            "repository_automation": "Invoke-RestMethod http://localhost:8000/repository/automation-plan -Headers $headers",
+        }
+        return [
+            {
+                "id": observation["id"],
+                "status": "required" if observation["readiness_status"] != "ready" else "pass",
+                "verification_command": commands[observation["id"]],
+                "expected_evidence": observation["detail"],
+            }
+            for observation in observations
+        ]
+
+    def _risk_register(self, observations: list[JsonDict]) -> list[JsonDict]:
+        risks = []
+        for observation in observations:
+            readiness = observation["readiness_status"]
+            if readiness == "ready":
+                continue
+            risks.append(
+                {
+                    "id": f"risk_{observation['id']}",
+                    "severity": "blocking" if readiness == "blocked" else "warning",
+                    "source": observation["id"],
+                    "detail": observation["detail"],
+                    "owner": self._owner_for(observation["id"]),
+                    "gate": self._gate_for(observation["id"]),
+                }
+            )
+        return risks
+
+    def _readiness_status(self, observations: list[JsonDict], risks: list[JsonDict]) -> SecurityReadinessStatus:
+        if not self._gitignore_ok():
+            return "blocked"
+        if any(risk["severity"] == "blocking" for risk in risks):
+            return "blocked"
+        if risks or any(observation["readiness_status"] == "needs_review" for observation in observations):
+            return "needs_review"
+        return "ready"
+
+    def _owner_for(self, source: str) -> str:
+        owners = {
+            "platform_controls": "platform-owner",
+            "worker_capacity": "platform-sre",
+            "queue_admission": "platform-sre",
+            "run_transparency": "observability-owner",
+            "sandbox_policy": "security-reviewer",
+            "policy_replay": "policy-owner",
+            "repository_automation": "repo-maintainer",
+        }
+        return owners.get(source, "platform-owner")
+
+    def _gate_for(self, source: str) -> str:
+        gates = {
+            "platform_controls": "platform_pack_review_before_release",
+            "worker_capacity": "worker_scale_plan_review_before_parallel_runs",
+            "queue_admission": "queue_admission_review_before_worker_scaleout",
+            "run_transparency": "ledger_review_before_external_handoff",
+            "sandbox_policy": "sandbox_review_before_invocation_policy_change",
+            "policy_replay": "policy_owner_signoff_before_release",
+            "repository_automation": "manual_approval_before_repo_mutation",
+        }
+        return gates.get(source, "platform_owner_signoff")
+
+    def _reviewer_handoff(self, risks: list[JsonDict]) -> list[JsonDict]:
+        if not risks:
+            return [
+                {
+                    "owner": "platform-owner",
+                    "action": "Retain the drill pack with release evidence.",
+                    "evidence": "POST /platform/operations-pack",
+                }
+            ]
+        return [
+            {
+                "owner": risk["owner"],
+                "action": f"Review {risk['source']} and clear gate {risk['gate']}.",
+                "severity": risk["severity"],
+                "evidence": risk["detail"],
+            }
+            for risk in risks
+        ]
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "Invoke-RestMethod http://localhost:8000/platform/operations-drill -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/platform/operations-pack -Method POST -Headers $headers",
+            "python -m pytest tests/test_platform_operations.py -q",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            'rg "platform/operations-drill|Platform Operations|platform_operations" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\platform_operations -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The drill composes local/mock evidence and does not mutate repositories, start workers, or call hosted LLM providers.",
+            "Repository automation remains dry-run only; mutating tasks require separate human approval outside this service.",
+            "Worker scale-out is modeled with deterministic local worker pools, not a distributed queue backend.",
+            "Generated operation artifacts are written under ignored data/platform_operations/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/platform_operations/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        drill = bundle["platform_operations_drill"]
+        lines = [
+            "# Platform Operations Drill Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Observations: `{drill['summary']['observation_count']}`",
+            f"- Risks: `{drill['summary']['risk_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## State Observations",
+            "",
+        ]
+        for observation in bundle["state_observations"]:
+            lines.append(
+                f"- `{observation['readiness_status']}` `{observation['id']}`: {observation['detail']}"
+            )
+        lines.extend(["", "## Bounded Action Loop", ""])
+        for step in bundle["action_loop"]:
+            lines.append(
+                f"- `{step['status']}` {step['order']}. `{step['step']}` ({step['pattern']}): {step['action']}"
+            )
+        lines.extend(["", "## Step Verification", ""])
+        for step in bundle["step_verification"]:
+            lines.append(f"- `{step['id']}`: `{step['verification_command']}`")
+        lines.extend(["", "## Risk Register", ""])
+        if bundle["risk_register"]:
+            for risk in bundle["risk_register"]:
+                lines.append(
+                    f"- `{risk['severity']}` `{risk['source']}` owner `{risk['owner']}` gate `{risk['gate']}`"
+                )
+        else:
+            lines.append("- No operation drill risks found.")
+        lines.extend(
+            [
+                "",
+                "## Reviewer Handoff",
+                *[f"- `{item['owner']}`: {item['action']}" for item in bundle["reviewer_handoff"]],
+                "",
+                "## Local Proof Commands",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
 class SkillOwnershipService:
     MATRIX_ID = "skill_ownership_matrix_latest"
     PACK_ID = "skill_ownership_pack_latest"
@@ -23396,6 +23803,18 @@ class ArtifactInventoryService:
                     "governed_skill_platform_pack_latest.md",
                 ],
                 "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
+            ),
+            self._catalog_row(
+                "platform_operations",
+                "Platform Operations Drill Pack",
+                Path("data") / "platform_operations",
+                "POST /platform/operations-pack",
+                "Invoke-RestMethod http://localhost:8000/platform/operations-pack -Method POST -Headers $headers",
+                [
+                    "platform_operations_drill_pack_latest.json",
+                    "platform_operations_drill_pack_latest.md",
+                ],
+                "Operator drill across task sandbox, run transparency, repository automation dry-run, worker scale-out, policy replay, and step verification.",
             ),
             self._catalog_row(
                 "ownership_packs",
@@ -26028,6 +26447,7 @@ class AppState:
     runtime_demo: RuntimeDemoService = field(init=False)
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
+    platform_operations: PlatformOperationsDrillService = field(init=False)
     ownership: SkillOwnershipService = field(init=False)
     review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
@@ -26102,6 +26522,7 @@ class AppState:
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
+        self.platform_operations = PlatformOperationsDrillService(self)
         self.ownership = SkillOwnershipService(self)
         self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
