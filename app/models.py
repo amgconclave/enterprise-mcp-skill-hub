@@ -113,6 +113,9 @@ class SkillManifest(BaseModel):
     enabled: bool = True
     status: SkillLifecycleStatus = "draft"
     tags: list[str] = Field(default_factory=list)
+    owner: str = "platform-owner"
+    owner_team: str = "AI Platform"
+    escalation_channel: str = "#mcp-skill-ops"
 
     @field_validator("input_schema", "output_schema")
     @classmethod
@@ -1475,6 +1478,52 @@ class GovernedSkillPlatformPackRequest(BaseModel):
 
 
 class GovernedSkillPlatformPackExportResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class SkillOwnershipRecord(BaseModel):
+    skill_id: str
+    version: str
+    name: str
+    owner: str
+    owner_team: str
+    backup_owner: str
+    escalation_channel: str
+    business_capability: str
+    lifecycle_status: SkillLifecycleStatus
+    mcp_exposed: bool
+    provider: str
+    risk_tier: Literal["low", "medium", "high"]
+    support_tier: Literal["tier_1", "tier_2", "tier_3"]
+    evidence_refs: list[JsonDict] = Field(default_factory=list)
+    trace_ids: list[str] = Field(default_factory=list)
+    review_actions: list[str] = Field(default_factory=list)
+
+
+class SkillOwnershipMatrixResult(BaseModel):
+    matrix_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[SkillOwnershipRecord]
+    coverage_gaps: list[JsonDict] = Field(default_factory=list)
+    escalation_routes: list[JsonDict] = Field(default_factory=list)
+    handoff_plan: list[JsonDict] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillOwnershipPackRequest(BaseModel):
+    actor: str = "skill-ownership-reviewer"
+
+
+class SkillOwnershipPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

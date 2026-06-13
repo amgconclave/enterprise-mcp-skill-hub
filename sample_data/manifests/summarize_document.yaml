@@ -5,6 +5,9 @@ description: Summarize document text or a resource URI into a concise summary an
 provider: mock
 enabled: true
 tags: [summarization, documents, prompt-engineering]
+owner: document-ai-owner
+owner_team: Knowledge Productivity
+escalation_channel: "#mcp-doc-skills"
 input_schema:
   type: object
   properties:

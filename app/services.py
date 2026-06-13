@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Literal
 
 from app.api_contracts import ApiContractService
 from app.config import get_settings
@@ -206,6 +207,10 @@ from app.models import (
     SkillLineageRecord,
     SkillLineageReport,
     SkillManifest,
+    SkillOwnershipMatrixResult,
+    SkillOwnershipPackRequest,
+    SkillOwnershipPackResult,
+    SkillOwnershipRecord,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
@@ -18854,6 +18859,7 @@ class DashboardSmokeService:
             {"id": "config_hygiene", "label": "Config Hygiene", "purpose": "Local config and secret rotation controls."},
             {"id": "skill_lineage", "label": "Skill Lineage", "purpose": "Skill-to-manifest, prompt, resource, workflow, and policy traceability."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
+            {"id": "skill_ownership", "label": "Skill Ownership", "purpose": "Owner roster, escalation routes, and handoff evidence."},
             {"id": "review_sla", "label": "Review SLA", "purpose": "Human-review queue SLA and escalation evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
             {"id": "agent_society_eval", "label": "Agent Society Evaluation", "purpose": "Role, memory, handoff, tool-use, and policy-gate evals."},
@@ -18925,6 +18931,8 @@ class DashboardSmokeService:
             self._endpoint_ref("skill_lineage_pack", "POST", "/lineage/pack", "Writes Skill Lineage artifacts."),
             self._endpoint_ref("platform_pack", "GET", "/platform/pack", "Governed Skill Platform Pack report."),
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
+            self._endpoint_ref("skill_ownership", "GET", "/ownership/matrix", "Skill ownership matrix and escalation routes."),
+            self._endpoint_ref("skill_ownership_pack", "POST", "/ownership/pack", "Writes Skill Ownership artifacts."),
             self._endpoint_ref("review_sla", "GET", "/reviews/sla", "Human-review SLA and escalation report."),
             self._endpoint_ref("review_sla_pack", "POST", "/reviews/sla-pack", "Writes Human Review SLA artifacts."),
             self._endpoint_ref("agent_collaborate", "POST", "/agents/collaborate", "Runs governed multi-agent collaboration over MCP skills."),
@@ -19011,6 +19019,7 @@ class DashboardSmokeService:
             self._artifact_tab("config_hygiene", "Config Hygiene", "Config Pack", "data/config_hygiene/"),
             self._artifact_tab("skill_lineage", "Skill Lineage", "Lineage Pack", "data/lineage/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
+            self._artifact_tab("skill_ownership", "Skill Ownership", "Ownership Pack", "data/ownership_packs/"),
             self._artifact_tab("review_sla", "Review SLA", "SLA Pack", "data/review_sla/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
             self._artifact_tab("agent_society_eval", "Agent Society Evaluation", "Eval Pack", "data/agent_society_evals/"),
@@ -19099,6 +19108,8 @@ class DashboardSmokeService:
             "Invoke-RestMethod http://localhost:8000/config/hygiene-pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/platform/pack/export -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ownership/matrix -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ownership/pack -Method POST -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/scale-plan -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/queue-admission -Headers $headers",
             "Invoke-RestMethod http://localhost:8000/workers/queue-pack -Method POST -Headers $headers",
@@ -19133,6 +19144,7 @@ class DashboardSmokeService:
             'rg "providers/readiness|providers/fallback-pack|Provider Readiness|provider_packs|Provider Fallback" app dashboard docs README.md tests scripts sample_data',
             'rg "config/hygiene|Config Hygiene|config_hygiene|secret rotation" app dashboard docs README.md tests scripts sample_data',
             'rg "platform/pack|Governed Skill Platform Pack|Platform Pack|platform_packs" app dashboard docs README.md tests scripts sample_data',
+            'rg "ownership/matrix|ownership/pack|Skill Ownership|ownership_packs" app dashboard docs README.md tests scripts sample_data',
             'rg "workers/scale-plan|workers/queue-admission|workers/runbook-pack|Worker Scale-Out|worker_runbooks" app dashboard docs README.md tests scripts sample_data',
             'rg "runs/ledger|runs/transparency-pack|Run Transparency|run_transparency" app dashboard docs README.md tests scripts sample_data',
             'rg "audit/integrity|Audit Integrity|audit_integrity|hash chain" app dashboard docs README.md tests scripts sample_data',
@@ -19151,6 +19163,7 @@ class DashboardSmokeService:
             "Get-ChildItem -Recurse -File data\\provider_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\config_hygiene -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\platform_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+            "Get-ChildItem -Recurse -File data\\ownership_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\worker_runbooks -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\run_transparency -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
             "Get-ChildItem -Recurse -File data\\audit_integrity -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
@@ -22094,6 +22107,443 @@ class GovernedSkillPlatformPackService:
         return "\n".join(lines)
 
 
+class SkillOwnershipService:
+    MATRIX_ID = "skill_ownership_matrix_latest"
+    PACK_ID = "skill_ownership_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "ownership_packs"
+
+    def matrix(self, actor: str = "skill-ownership-reviewer") -> SkillOwnershipMatrixResult:
+        reliability = self.app_state.reliability.report()
+        slo = self.app_state.slo.report()
+        lineage = self.app_state.lineage.report()
+        reliability_by_skill = {record.skill_id: record for record in reliability.skills}
+        slo_by_skill = {record.skill_id: record for record in slo.skills}
+        lineage_by_skill = {record.skill_id: record for record in lineage.records}
+        records = [
+            self._record(skill, reliability_by_skill.get(skill.id), slo_by_skill.get(skill.id), lineage_by_skill.get(skill.id))
+            for skill in self.app_state.registry.list()
+        ]
+        coverage_gaps = self._coverage_gaps(records)
+        high_risk = [record for record in records if record.risk_tier == "high"]
+        readiness_status: SecurityReadinessStatus = "ready"
+        if coverage_gaps:
+            readiness_status = "needs_review"
+        if any(gap["severity"] == "blocker" for gap in coverage_gaps):
+            readiness_status = "blocked"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "skill_count": len(records),
+            "mcp_exposed_count": sum(1 for record in records if record.mcp_exposed),
+            "owner_count": len({record.owner for record in records}),
+            "team_count": len({record.owner_team for record in records}),
+            "high_risk_count": len(high_risk),
+            "coverage_gap_count": len(coverage_gaps),
+            "tier_1_support_count": sum(1 for record in records if record.support_tier == "tier_1"),
+            "artifact_directory": str(self.output_dir),
+        }
+        self.app_state.audit.record(
+            "ownership.matrix_generated",
+            "skill_ownership_matrix",
+            self.MATRIX_ID,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness_status,
+                "skill_count": len(records),
+                "coverage_gap_count": len(coverage_gaps),
+            },
+        )
+        return SkillOwnershipMatrixResult(
+            matrix_id=self.MATRIX_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            records=records,
+            coverage_gaps=coverage_gaps,
+            escalation_routes=self._escalation_routes(records),
+            handoff_plan=self._handoff_plan(records),
+            architecture_patterns=[
+                "governance",
+                "human-in-the-loop",
+                "handoffs",
+                "tool governance",
+                "shared state",
+                "agent cost tracking",
+            ],
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+
+    def pack(self, request: SkillOwnershipPackRequest | None = None) -> SkillOwnershipPackResult:
+        request = request or SkillOwnershipPackRequest()
+        matrix = self.matrix(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": matrix.readiness_status,
+            "ownership_matrix": matrix.model_dump(mode="json"),
+            "owner_roster": self._owner_roster(matrix.records),
+            "coverage_gaps": matrix.coverage_gaps,
+            "escalation_routes": matrix.escalation_routes,
+            "handoff_plan": matrix.handoff_plan,
+            "architecture_patterns": matrix.architecture_patterns,
+            "local_proof_commands": matrix.local_proof_commands,
+            "limitations": matrix.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "ownership.pack_exported",
+            "skill_ownership_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": matrix.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "skill_count": matrix.summary["skill_count"],
+                "coverage_gap_count": matrix.summary["coverage_gap_count"],
+            },
+        )
+        return SkillOwnershipPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=matrix.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                "readiness_status": matrix.readiness_status,
+                "skill_count": matrix.summary["skill_count"],
+                "owner_count": matrix.summary["owner_count"],
+                "coverage_gap_count": matrix.summary["coverage_gap_count"],
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def _record(
+        self,
+        skill: SkillManifest,
+        reliability: SkillReliabilityRecord | None,
+        slo: SkillSloRecord | None,
+        lineage: SkillLineageRecord | None,
+    ) -> SkillOwnershipRecord:
+        mcp_exposed = self.app_state.registry.is_mcp_exposed(skill)
+        risk_tier = self._risk_tier(skill, reliability, slo)
+        owner_team_slug = re.sub(r"[^a-z0-9]+", "-", skill.owner_team.lower()).strip("-") or "ai-platform"
+        backup_owner = f"{owner_team_slug}-backup"
+        return SkillOwnershipRecord(
+            skill_id=skill.id,
+            version=skill.version,
+            name=skill.name,
+            owner=skill.owner,
+            owner_team=skill.owner_team,
+            backup_owner=backup_owner,
+            escalation_channel=skill.escalation_channel,
+            business_capability=self._business_capability(skill),
+            lifecycle_status=skill.status,
+            mcp_exposed=mcp_exposed,
+            provider=skill.provider,
+            risk_tier=risk_tier,
+            support_tier=self._support_tier(mcp_exposed, risk_tier),
+            evidence_refs=self._evidence_refs(skill, reliability, slo, lineage),
+            trace_ids=self._trace_ids(skill.id),
+            review_actions=self._review_actions(skill, risk_tier, reliability, slo),
+        )
+
+    def _risk_tier(
+        self,
+        skill: SkillManifest,
+        reliability: SkillReliabilityRecord | None,
+        slo: SkillSloRecord | None,
+    ) -> Literal["low", "medium", "high"]:
+        tags = set(skill.tags)
+        if reliability and reliability.circuit_state == "open":
+            return "high"
+        if slo and slo.release_gate == "block_release":
+            return "high"
+        if tags & {"governance", "retrieval", "rag"}:
+            return "high"
+        if tags & {"translation", "handoff", "automation", "agent-tools"}:
+            return "medium"
+        return "low"
+
+    def _support_tier(self, mcp_exposed: bool, risk_tier: str) -> Literal["tier_1", "tier_2", "tier_3"]:
+        if mcp_exposed and risk_tier == "high":
+            return "tier_1"
+        if mcp_exposed:
+            return "tier_2"
+        return "tier_3"
+
+    def _business_capability(self, skill: SkillManifest) -> str:
+        tags = set(skill.tags)
+        if "retrieval" in tags or "rag" in tags:
+            return "knowledge_retrieval"
+        if "governance" in tags or "extraction" in tags:
+            return "governed_text_understanding"
+        if "translation" in tags:
+            return "localization"
+        if "classification" in tags or "routing" in tags:
+            return "request_intake"
+        if "handoff" in tags or "meetings" in tags:
+            return "workflow_handoff"
+        return "productivity_ai"
+
+    def _evidence_refs(
+        self,
+        skill: SkillManifest,
+        reliability: SkillReliabilityRecord | None,
+        slo: SkillSloRecord | None,
+        lineage: SkillLineageRecord | None,
+    ) -> list[JsonDict]:
+        refs = [
+            {"kind": "endpoint", "ref": f"GET /skills/{skill.id}/versions"},
+            {"kind": "endpoint", "ref": f"GET /skills/{skill.id}/compatibility"},
+            {"kind": "endpoint", "ref": "GET /lineage/report"},
+            {"kind": "endpoint", "ref": "GET /reliability/skills"},
+            {"kind": "endpoint", "ref": "GET /slo/report"},
+        ]
+        if reliability:
+            refs.append(
+                {
+                    "kind": "reliability",
+                    "ref": reliability.circuit_state,
+                    "failure_count": reliability.failure_count,
+                    "p95_latency_ms": reliability.p95_latency_ms,
+                }
+            )
+        if slo:
+            refs.append(
+                {
+                    "kind": "slo",
+                    "ref": slo.release_gate,
+                    "success_rate_pct": slo.success_rate_pct,
+                    "availability_slo_pct": slo.availability_slo_pct,
+                    "error_budget_status": slo.error_budget_status,
+                }
+            )
+        if lineage:
+            refs.append(
+                {
+                    "kind": "lineage",
+                    "ref": lineage.lineage_status,
+                    "workflow_template_ids": lineage.workflow_template_ids,
+                    "prompt_ids": lineage.prompt_ids,
+                }
+            )
+        return refs
+
+    def _trace_ids(self, skill_id: str) -> list[str]:
+        invocation_traces = [
+            invocation.trace_id
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.skill_id == skill_id
+        ]
+        audit_traces = [
+            event.trace_id
+            for event in self.app_state.audit.events
+            if event.resource_id == skill_id and event.resource_type == "skill"
+        ]
+        return sorted({*invocation_traces, *audit_traces})[:8]
+
+    def _review_actions(
+        self,
+        skill: SkillManifest,
+        risk_tier: str,
+        reliability: SkillReliabilityRecord | None,
+        slo: SkillSloRecord | None,
+    ) -> list[str]:
+        actions = [
+            f"Owner `{skill.owner}` reviews manifest, compatibility, and lineage evidence before MCP exposure changes.",
+            f"Escalate incidents in `{skill.escalation_channel}` with trace IDs and recent invocation evidence.",
+        ]
+        if risk_tier == "high":
+            actions.append("Require owner and governance reviewer signoff before tenant rollout or major-version promotion.")
+        if reliability and reliability.circuit_state != "closed":
+            actions.append(f"Resolve circuit breaker state `{reliability.circuit_state}` before widening usage.")
+        if slo and slo.release_gate != "pass":
+            actions.append(f"Review SLO release gate `{slo.release_gate}` before release or canary.")
+        return actions
+
+    def _coverage_gaps(self, records: list[SkillOwnershipRecord]) -> list[JsonDict]:
+        gaps: list[JsonDict] = []
+        for record in records:
+            if record.owner == "platform-owner":
+                gaps.append(
+                    {
+                        "skill_id": record.skill_id,
+                        "severity": "warning",
+                        "gap": "generic_owner",
+                        "recommendation": "Assign a named service owner before broad tenant rollout.",
+                    }
+                )
+            if not record.escalation_channel.startswith("#"):
+                gaps.append(
+                    {
+                        "skill_id": record.skill_id,
+                        "severity": "blocker",
+                        "gap": "missing_local_escalation_channel",
+                        "recommendation": "Add a local escalation channel or queue reference to the manifest.",
+                    }
+                )
+            if record.mcp_exposed and not record.trace_ids:
+                gaps.append(
+                    {
+                        "skill_id": record.skill_id,
+                        "severity": "warning",
+                        "gap": "no_recent_trace_evidence",
+                        "recommendation": "Run a demo invocation or conformance check before owner review.",
+                    }
+                )
+        return gaps
+
+    def _escalation_routes(self, records: list[SkillOwnershipRecord]) -> list[JsonDict]:
+        routes = []
+        for team in sorted({record.owner_team for record in records}):
+            team_records = [record for record in records if record.owner_team == team]
+            routes.append(
+                {
+                    "owner_team": team,
+                    "primary_owners": sorted({record.owner for record in team_records}),
+                    "backup_owners": sorted({record.backup_owner for record in team_records}),
+                    "channels": sorted({record.escalation_channel for record in team_records}),
+                    "tier_1_skills": sorted(record.skill_id for record in team_records if record.support_tier == "tier_1"),
+                }
+            )
+        return routes
+
+    def _handoff_plan(self, records: list[SkillOwnershipRecord]) -> list[JsonDict]:
+        return [
+            {
+                "step": "pre_change_review",
+                "owner": "skill-owner",
+                "action": "Review compatibility, lineage, policy, and SLO evidence before changing a promoted MCP skill.",
+                "evidence": "GET /ownership/matrix plus GET /skills/compatibility and GET /lineage/report.",
+            },
+            {
+                "step": "incident_escalation",
+                "owner": "platform-sre",
+                "action": "Route high-risk or tier-1 failures to the listed escalation channel with trace IDs attached.",
+                "evidence": f"{sum(1 for record in records if record.support_tier == 'tier_1')} tier-1 skill(s).",
+            },
+            {
+                "step": "tenant_rollout_handoff",
+                "owner": "marketplace-reviewer",
+                "action": "Attach owner roster and escalation routes to marketplace approval before tenant canary.",
+                "evidence": "POST /ownership/pack and POST /marketplace/approval-pack.",
+            },
+        ]
+
+    def _owner_roster(self, records: list[SkillOwnershipRecord]) -> list[JsonDict]:
+        roster = []
+        for owner in sorted({record.owner for record in records}):
+            owner_records = [record for record in records if record.owner == owner]
+            roster.append(
+                {
+                    "owner": owner,
+                    "owner_team": owner_records[0].owner_team,
+                    "skill_ids": sorted(record.skill_id for record in owner_records),
+                    "highest_risk_tier": "high"
+                    if any(record.risk_tier == "high" for record in owner_records)
+                    else "medium"
+                    if any(record.risk_tier == "medium" for record in owner_records)
+                    else "low",
+                    "channels": sorted({record.escalation_channel for record in owner_records}),
+                }
+            )
+        return roster
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_conformance",
+            "python -m app.demo",
+            "Invoke-RestMethod http://localhost:8000/ownership/matrix -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/ownership/pack -Method POST -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/lineage/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/reliability/skills -Headers $headers",
+            'rg "ownership/matrix|ownership/pack|Skill Ownership|ownership_packs" app dashboard docs README.md tests sample_data',
+            "Get-ChildItem -Recurse -File data\\ownership_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "Ownership routing is local governance metadata; it does not page, message, or call external incident systems.",
+            "Escalation channels are portfolio-safe labels and should be mapped to real queues before production use.",
+            "Risk tiers are deterministic local heuristics derived from manifest tags, reliability, and SLO evidence.",
+            "Generated ownership artifacts are ignored under data/ownership_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        matrix = bundle["ownership_matrix"]
+        lines = [
+            "# Skill Ownership And Escalation Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Skills: `{matrix['summary']['skill_count']}`",
+            f"- Owners: `{matrix['summary']['owner_count']}`",
+            "",
+            "## Owner Roster",
+            "",
+            "| Owner | Team | Skills | Risk | Channels |",
+            "| --- | --- | --- | --- | --- |",
+            *[
+                f"| `{row['owner']}` | {row['owner_team']} | `{', '.join(row['skill_ids'])}` | `{row['highest_risk_tier']}` | `{', '.join(row['channels'])}` |"
+                for row in bundle["owner_roster"]
+            ],
+            "",
+            "## Ownership Matrix",
+            "",
+            "| Skill | Owner | Team | Risk | Support | Escalation |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| `{record['skill_id']}` | `{record['owner']}` | {record['owner_team']} | `{record['risk_tier']}` | `{record['support_tier']}` | `{record['escalation_channel']}` |"
+                for record in matrix["records"]
+            ],
+            "",
+            "## Coverage Gaps",
+            "",
+            *([
+                f"- `{gap['severity']}` `{gap['skill_id']}` {gap['gap']}: {gap['recommendation']}"
+                for gap in bundle["coverage_gaps"]
+            ] or ["- None."]),
+            "",
+            "## Handoff Plan",
+            "",
+            *[
+                f"- `{step['step']}` owner `{step['owner']}`: {step['action']} Evidence: {step['evidence']}"
+                for step in bundle["handoff_plan"]
+            ],
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Local Proof Commands",
+            "",
+            *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+            "",
+            "## Limitations",
+            "",
+            *[f"- {note}" for note in bundle["limitations"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+
 class ReviewSlaService:
     REPORT_ID = "human_review_sla_latest"
     PACK_ID = "human_review_sla_pack_latest"
@@ -22946,6 +23396,15 @@ class ArtifactInventoryService:
                     "governed_skill_platform_pack_latest.md",
                 ],
                 "Platform-team evidence for durable workflows, HITL review, governance, provider fallback, tool exposure, cost traces, and handoffs.",
+            ),
+            self._catalog_row(
+                "ownership_packs",
+                "Skill Ownership And Escalation Pack",
+                Path("data") / "ownership_packs",
+                "POST /ownership/pack",
+                "Invoke-RestMethod http://localhost:8000/ownership/pack -Method POST -Headers $headers",
+                ["skill_ownership_pack_latest.json", "skill_ownership_pack_latest.md"],
+                "Owner roster, escalation routes, support tiering, handoff plan, and local governance evidence for reusable MCP skills.",
             ),
             self._catalog_row(
                 "review_sla",
@@ -25569,6 +26028,7 @@ class AppState:
     runtime_demo: RuntimeDemoService = field(init=False)
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
+    ownership: SkillOwnershipService = field(init=False)
     review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
     policy_replay: PolicyReplayDriftService = field(init=False)
@@ -25642,6 +26102,7 @@ class AppState:
         self.ui_verification = DashboardSmokeService(self)
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
+        self.ownership = SkillOwnershipService(self)
         self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)
         self.policy_replay = PolicyReplayDriftService(self)

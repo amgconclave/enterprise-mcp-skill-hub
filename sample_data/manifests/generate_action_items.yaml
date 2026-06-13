@@ -5,6 +5,9 @@ description: Generate owner, task, due date, and priority action items from note
 provider: mock
 enabled: true
 tags: [meetings, handoff, automation]
+owner: workflow-automation-owner
+owner_team: Workflow Platform
+escalation_channel: "#mcp-handoff-skills"
 input_schema:
   type: object
   properties:

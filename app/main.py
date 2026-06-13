@@ -172,6 +172,9 @@ from app.models import (
     SkillLineagePackResult,
     SkillLineageReport,
     SkillManifest,
+    SkillOwnershipMatrixResult,
+    SkillOwnershipPackRequest,
+    SkillOwnershipPackResult,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
@@ -760,6 +763,19 @@ async def export_governed_skill_platform_pack(
     _: str = Depends(require_api_key),
 ) -> GovernedSkillPlatformPackExportResult:
     return await state.platform_pack.export(request or GovernedSkillPlatformPackRequest())
+
+
+@app.get("/ownership/matrix", response_model=SkillOwnershipMatrixResult)
+def skill_ownership_matrix(_: str = Depends(require_api_key)) -> SkillOwnershipMatrixResult:
+    return state.ownership.matrix(actor="api-skill-ownership-reviewer")
+
+
+@app.post("/ownership/pack", response_model=SkillOwnershipPackResult)
+def skill_ownership_pack(
+    request: SkillOwnershipPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillOwnershipPackResult:
+    return state.ownership.pack(request or SkillOwnershipPackRequest())
 
 
 @app.get("/reviews/sla", response_model=ReviewSlaReport)

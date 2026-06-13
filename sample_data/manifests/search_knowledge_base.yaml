@@ -5,6 +5,9 @@ description: Search fake internal policy and product resources and return ranked
 provider: mock
 enabled: true
 tags: [retrieval, resources, rag]
+owner: knowledge-retrieval-owner
+owner_team: Knowledge Platform
+escalation_channel: "#mcp-retrieval-skills"
 input_schema:
   type: object
   properties:

@@ -17,6 +17,9 @@ Skill manifests are YAML or JSON documents that describe reusable governed capab
 - `enabled` - defaults to `true`.
 - `status` - lifecycle state: `draft`, `validated`, `promoted`, or `disabled`; defaults to `draft`.
 - `tags` - discovery and governance tags; local policy rules can use tags such as `agent-tools` when deciding role access.
+- `owner` - accountable skill owner; defaults to `platform-owner` for backward compatibility.
+- `owner_team` - team responsible for review, incident response, and migration handoff; defaults to `AI Platform`.
+- `escalation_channel` - local queue or channel label used by the Skill Ownership pack; defaults to `#mcp-skill-ops`.
 
 `enabled` is retained for backward compatibility. MCP exposure requires both `enabled: true` and `status: promoted`. If `enabled: false` or `status: disabled`, the skill is hidden from MCP tools and blocked from agent use.
 
@@ -31,6 +34,9 @@ provider: mock
 enabled: true
 status: promoted
 tags: [classification, routing, agent-tools]
+owner: intake-routing-owner
+owner_team: Workflow Platform
+escalation_channel: "#mcp-routing-skills"
 input_schema:
   type: object
   properties:

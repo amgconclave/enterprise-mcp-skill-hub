@@ -5,6 +5,9 @@ description: Extract people, organizations, products, dates, risks, and action i
 provider: mock
 enabled: true
 tags: [extraction, nlp, governance]
+owner: governance-nlp-owner
+owner_team: AI Governance
+escalation_channel: "#mcp-governance-skills"
 input_schema:
   type: object
   properties:

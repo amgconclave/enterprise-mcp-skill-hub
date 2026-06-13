@@ -68,6 +68,7 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillLineagePackRequest,
     SkillManifest,
+    SkillOwnershipPackRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
@@ -128,6 +129,7 @@ view = st.sidebar.radio(
         "Config Hygiene",
         "Skill Lineage",
         "Platform Pack",
+        "Skill Ownership",
         "Review SLA",
         "Agent Collaboration",
         "Agent Society Evaluation",
@@ -1393,6 +1395,41 @@ elif view == "Platform Pack":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(report.model_dump(mode="json"))
+
+elif view == "Skill Ownership":
+    st.subheader("Skill Ownership")
+    st.caption("Skill owner roster, escalation routes, handoff plan, and local governance evidence for promoted MCP capabilities.")
+    matrix = state.ownership.matrix(actor="streamlit-skill-ownership-reviewer")
+    col_ready, col_skills, col_owners, col_gaps = st.columns(4)
+    col_ready.metric("Readiness", matrix.readiness_status.upper())
+    col_skills.metric("Skills", matrix.summary["skill_count"])
+    col_owners.metric("Owners", matrix.summary["owner_count"])
+    col_gaps.metric("Coverage gaps", matrix.summary["coverage_gap_count"])
+
+    tab_matrix, tab_routes, tab_handoff, tab_export, tab_json = st.tabs(
+        ["Matrix", "Escalation Routes", "Handoff", "Ownership Pack", "JSON"]
+    )
+    with tab_matrix:
+        st.dataframe(
+            [record.model_dump(mode="json") for record in matrix.records],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(matrix.coverage_gaps, use_container_width=True, hide_index=True)
+    with tab_routes:
+        st.dataframe(matrix.escalation_routes, use_container_width=True, hide_index=True)
+    with tab_handoff:
+        st.dataframe(matrix.handoff_plan, use_container_width=True, hide_index=True)
+        st.json({"patterns": matrix.architecture_patterns, "limitations": matrix.limitations})
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/ownership_packs/.")
+        actor = st.text_input("Ownership pack actor", value="streamlit-skill-ownership-reviewer")
+        if st.button("Export Skill Ownership Pack", use_container_width=True):
+            export = state.ownership.pack(SkillOwnershipPackRequest(actor=actor))
+            st.success("Skill Ownership Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(matrix.model_dump(mode="json"))
 
 elif view == "Review SLA":
     st.subheader("Review SLA")

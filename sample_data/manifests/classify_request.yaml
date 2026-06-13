@@ -5,6 +5,9 @@ description: Classify a business request into category, priority, confidence, an
 provider: mock
 enabled: true
 tags: [classification, routing, agent-tools]
+owner: intake-routing-owner
+owner_team: Workflow Platform
+escalation_channel: "#mcp-routing-skills"
 input_schema:
   type: object
   properties:

@@ -5,6 +5,9 @@ description: Return a deterministic placeholder translation with language metada
 provider: mock
 enabled: true
 tags: [translation, local-mode]
+owner: localization-ai-owner
+owner_team: Global Operations
+escalation_channel: "#mcp-localization-skills"
 input_schema:
   type: object
   properties:

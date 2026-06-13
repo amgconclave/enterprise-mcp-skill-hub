@@ -51,6 +51,7 @@ from app.models import (
     SkillIncidentDrillRequest,
     SkillIncidentRunbookRequest,
     SkillLineagePackRequest,
+    SkillOwnershipPackRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
@@ -259,6 +260,10 @@ async def main() -> None:
     platform_pack_report = await state.platform_pack.report(actor="demo-platform-owner")
     platform_pack_export = await state.platform_pack.export(
         GovernedSkillPlatformPackRequest(actor="demo-platform-owner")
+    )
+    ownership_matrix = state.ownership.matrix(actor="demo-skill-ownership-reviewer")
+    ownership_pack = state.ownership.pack(
+        SkillOwnershipPackRequest(actor="demo-skill-ownership-reviewer")
     )
     review_sla_report = await state.review_sla.report(
         ReviewSlaPackRequest(actor="demo-review-ops")
@@ -599,6 +604,12 @@ async def main() -> None:
                 "platform_pack_controls": len(platform_pack_report.capability_controls),
                 "platform pack path": platform_pack_export.markdown_path,
                 "platform_pack_path": platform_pack_export.markdown_path,
+                "skill ownership readiness": ownership_matrix.readiness_status,
+                "skill_ownership_readiness": ownership_matrix.readiness_status,
+                "skill ownership owners": ownership_matrix.summary["owner_count"],
+                "skill_ownership_owners": ownership_matrix.summary["owner_count"],
+                "skill ownership pack path": ownership_pack.markdown_path,
+                "skill_ownership_pack_path": ownership_pack.markdown_path,
                 "review sla readiness": review_sla_report.readiness_status,
                 "review_sla_readiness": review_sla_report.readiness_status,
                 "review sla open items": review_sla_report.summary["open_item_count"],

@@ -35,6 +35,9 @@ BUILTIN_MANIFESTS = [
             ["summary", "key_points"],
         ),
         tags=["summarization", "documents", "prompt-engineering"],
+        owner="document-ai-owner",
+        owner_team="Knowledge Productivity",
+        escalation_channel="#mcp-doc-skills",
     ),
     SkillManifest(
         id="extract_entities",
@@ -55,6 +58,9 @@ BUILTIN_MANIFESTS = [
             ["people", "organizations"],
         ),
         tags=["extraction", "nlp", "governance"],
+        owner="governance-nlp-owner",
+        owner_team="AI Governance",
+        escalation_channel="#mcp-governance-skills",
     ),
     SkillManifest(
         id="translate_text",
@@ -80,6 +86,9 @@ BUILTIN_MANIFESTS = [
             ["translated_text", "target_language"],
         ),
         tags=["translation", "local-mode"],
+        owner="localization-ai-owner",
+        owner_team="Global Operations",
+        escalation_channel="#mcp-localization-skills",
     ),
     SkillManifest(
         id="classify_request",
@@ -98,6 +107,9 @@ BUILTIN_MANIFESTS = [
             ["category", "priority", "confidence"],
         ),
         tags=["classification", "routing", "agent-tools"],
+        owner="intake-routing-owner",
+        owner_team="Workflow Platform",
+        escalation_channel="#mcp-routing-skills",
     ),
     SkillManifest(
         id="generate_action_items",
@@ -108,6 +120,9 @@ BUILTIN_MANIFESTS = [
         input_schema=schema({"text": {"type": "string"}}, ["text"]),
         output_schema=schema({"action_items": {"type": "array"}, "count": {"type": "integer"}}, ["action_items"]),
         tags=["meetings", "handoff", "automation"],
+        owner="workflow-automation-owner",
+        owner_team="Workflow Platform",
+        escalation_channel="#mcp-handoff-skills",
     ),
     SkillManifest(
         id="search_knowledge_base",
@@ -118,6 +133,9 @@ BUILTIN_MANIFESTS = [
         input_schema=schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
         output_schema=schema({"query": {"type": "string"}, "results": {"type": "array"}}, ["query", "results"]),
         tags=["retrieval", "resources", "rag"],
+        owner="knowledge-retrieval-owner",
+        owner_team="Knowledge Platform",
+        escalation_channel="#mcp-retrieval-skills",
     ),
 ]
 
