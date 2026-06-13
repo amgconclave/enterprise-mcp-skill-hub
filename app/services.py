@@ -115,6 +115,10 @@ from app.models import (
     MarketplaceSkillListing,
     MarketplaceStageAdvanceRequest,
     MarketplaceTenantEligibility,
+    McpToolAdmissionPackRequest,
+    McpToolAdmissionPackResult,
+    McpToolAdmissionRecord,
+    McpToolAdmissionReport,
     McpToolDefinition,
     PolicyInvocationContext,
     PolicyReplayDriftReport,
@@ -2502,6 +2506,357 @@ class SandboxExceptionReviewService:
             )
         lines.extend(
             [
+                "",
+                "## Local Verification Commands",
+                "",
+                *[f"- `{command}`" for command in bundle["local_verification_commands"]],
+                "",
+                "## Limitations",
+                "",
+                *[f"- {item}" for item in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
+class McpToolAdmissionService:
+    REPORT_ID = "mcp_tool_admission_latest"
+    PACK_ID = "mcp_tool_admission_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "mcp_admission"
+
+    async def report(self, actor: str = "mcp-admission-reviewer") -> McpToolAdmissionReport:
+        conformance = await self.app_state.conformance.generate()
+        conformance_by_skill = {record.skill_id: record for record in conformance.skills}
+        records = [self._record(skill, conformance_by_skill, actor) for skill in self.app_state.registry.list()]
+        admitted = [record.skill_id for record in records if record.decision == "admit"]
+        warned = [record.skill_id for record in records if record.decision == "warn"]
+        blocked = [record.skill_id for record in records if record.decision == "block"]
+        readiness: SecurityReadinessStatus = "ready"
+        if warned:
+            readiness = "needs_review"
+        if blocked or not self._gitignore_ok():
+            readiness = "blocked"
+        return McpToolAdmissionReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness,
+            summary={
+                "tool_count": len(records),
+                "admitted_tool_count": len(admitted),
+                "warning_tool_count": len(warned),
+                "blocked_tool_count": len(blocked),
+                "mcp_exposed_tool_count": sum(1 for record in records if record.mcp_exposed),
+                "conformance_status": conformance.status,
+                "artifact_root": str(self.output_dir),
+                "advisory_only": True,
+            },
+            records=records,
+            admitted_tools=admitted,
+            warning_tools=warned,
+            blocked_tools=blocked,
+            architecture_patterns=["task sandbox", "state observation", "step verification", "run transparency"],
+            reviewer_checklist=self._reviewer_checklist(records),
+            local_verification_commands=self._verification_commands(),
+            limitations=self._limitations(),
+        )
+
+    async def pack(
+        self,
+        request: McpToolAdmissionPackRequest | None = None,
+    ) -> McpToolAdmissionPackResult:
+        request = request or McpToolAdmissionPackRequest()
+        report = await self.report(request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "summary": report.summary,
+            "records": [record.model_dump(mode="json") for record in report.records],
+            "admitted_tools": report.admitted_tools,
+            "warning_tools": report.warning_tools,
+            "blocked_tools": report.blocked_tools,
+            "architecture_patterns": report.architecture_patterns,
+            "reviewer_checklist": report.reviewer_checklist,
+            "local_verification_commands": report.local_verification_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "mcp_admission.pack_exported",
+            "mcp_admission_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "admitted_tool_count": len(report.admitted_tools),
+                "blocked_tool_count": len(report.blocked_tools),
+            },
+        )
+        return McpToolAdmissionPackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary=report.summary,
+        )
+
+    def _record(
+        self,
+        skill: SkillManifest,
+        conformance_by_skill: dict[str, ConformanceSkillRecord],
+        actor: str,
+    ) -> McpToolAdmissionRecord:
+        validation = self.app_state.validator.validate_manifest(skill.model_dump(mode="json"))
+        schema_valid = validation.valid
+        mcp_exposed = self.app_state.registry.is_mcp_exposed(skill)
+        conformance = conformance_by_skill.get(skill.id)
+        conformance_status = "pass" if conformance and not conformance.failures else "fail"
+        sample_input = self.app_state.conformance.sample_input(skill.id)
+        sandbox_decision = self.app_state.invocation_sandbox.evaluate(
+            InvocationSandboxEvaluateRequest(
+                skill_id=skill.id,
+                input=sample_input,
+                actor=actor,
+                action_class="skill_invocation",
+                endpoint=f"mcp:tool/{skill.id}",
+                enforce=True,
+            )
+        )
+        risk_flags = self._risk_flags(skill, schema_valid, mcp_exposed, conformance_status, sandbox_decision)
+        if not mcp_exposed or not schema_valid or conformance_status == "fail" or sandbox_decision.decision == "deny":
+            decision = "block"
+        elif sandbox_decision.risk_label in {"medium", "high", "critical"} or risk_flags:
+            decision = "warn"
+        else:
+            decision = "admit"
+        return McpToolAdmissionRecord(
+            skill_id=skill.id,
+            version=skill.version,
+            decision=decision,
+            risk_label=sandbox_decision.risk_label,
+            mcp_exposed=mcp_exposed,
+            schema_valid=schema_valid,
+            conformance_status=conformance_status,
+            sandbox_decision=sandbox_decision,
+            endpoint_policy=self._endpoint_policy(skill.id),
+            state_observations=self._state_observations(skill, mcp_exposed, conformance, sandbox_decision),
+            step_verifications=self._step_verifications(skill.id, schema_valid, conformance_status, sandbox_decision),
+            risk_flags=risk_flags,
+            recommended_action=self._recommended_action(decision, risk_flags, sandbox_decision),
+            trace_ids=[sandbox_decision.trace_id, *self._recent_trace_ids(skill.id)],
+        )
+
+    def _risk_flags(
+        self,
+        skill: SkillManifest,
+        schema_valid: bool,
+        mcp_exposed: bool,
+        conformance_status: str,
+        sandbox_decision: InvocationSandboxDecision,
+    ) -> list[str]:
+        flags: list[str] = []
+        if not mcp_exposed:
+            flags.append("not_mcp_exposed")
+        if not schema_valid:
+            flags.append("schema_invalid")
+        if conformance_status == "fail":
+            flags.append("conformance_failed")
+        if sandbox_decision.decision == "deny":
+            flags.append("sandbox_denied")
+        if sandbox_decision.risk_label in {"high", "critical"}:
+            flags.append(f"{sandbox_decision.risk_label}_sandbox_risk")
+        if "retrieval" in skill.tags or "resources" in skill.tags:
+            flags.append("context_boundary_review")
+        if "automation" in skill.tags or "agent-tools" in skill.tags:
+            flags.append("agent_action_review")
+        return flags
+
+    def _endpoint_policy(self, skill_id: str) -> list[JsonDict]:
+        return [
+            {
+                "endpoint": f"mcp:tool/{skill_id}",
+                "required_gate": "promoted, enabled, schema-valid, conformance-pass, sandbox-allow",
+                "recommended_flags": ["--enforce-policy", "--enforce-entitlements", "--enforce-sandbox"],
+            },
+            {
+                "endpoint": f"/skills/{skill_id}/invoke",
+                "required_gate": "same tool contract plus X-Sandbox-Enforce for governed runtime tests",
+                "recommended_headers": ["X-API-Key", "X-Sandbox-Enforce", "X-Action-Class"],
+            },
+        ]
+
+    def _state_observations(
+        self,
+        skill: SkillManifest,
+        mcp_exposed: bool,
+        conformance: ConformanceSkillRecord | None,
+        sandbox_decision: InvocationSandboxDecision,
+    ) -> list[JsonDict]:
+        return [
+            {
+                "signal": "registry_lifecycle",
+                "status": skill.status,
+                "enabled": skill.enabled,
+                "mcp_exposed": mcp_exposed,
+            },
+            {
+                "signal": "conformance",
+                "status": "pass" if conformance and not conformance.failures else "fail",
+                "failures": conformance.failures if conformance else ["missing_conformance_record"],
+            },
+            {
+                "signal": "sandbox_preflight",
+                "decision": sandbox_decision.decision,
+                "risk_label": sandbox_decision.risk_label,
+                "matched_rules": sandbox_decision.matched_rules,
+            },
+            {
+                "signal": "recent_invocations",
+                "trace_ids": self._recent_trace_ids(skill.id),
+            },
+        ]
+
+    def _step_verifications(
+        self,
+        skill_id: str,
+        schema_valid: bool,
+        conformance_status: str,
+        sandbox_decision: InvocationSandboxDecision,
+    ) -> list[JsonDict]:
+        return [
+            {
+                "step": "Validate manifest schema",
+                "status": "pass" if schema_valid else "fail",
+                "proof": "SkillValidator.validate_manifest",
+            },
+            {
+                "step": "Run conformance sample",
+                "status": conformance_status,
+                "proof": "python -m app.evals.run_conformance",
+            },
+            {
+                "step": "Evaluate MCP sandbox preflight",
+                "status": "pass" if sandbox_decision.decision == "allow" else "fail",
+                "proof": f"POST /sandbox/evaluate for mcp:tool/{skill_id}",
+            },
+        ]
+
+    def _recent_trace_ids(self, skill_id: str) -> list[str]:
+        return [
+            invocation.trace_id
+            for invocation in self.app_state.invocation_service.invocations
+            if invocation.skill_id == skill_id
+        ][-5:]
+
+    def _recommended_action(
+        self,
+        decision: str,
+        risk_flags: list[str],
+        sandbox_decision: InvocationSandboxDecision,
+    ) -> str:
+        if decision == "admit":
+            return "Admit for default local MCP discovery with policy, entitlement, and sandbox verification in release checks."
+        if "conformance_failed" in risk_flags or "schema_invalid" in risk_flags:
+            return "Block default MCP admission until schema and conformance failures are fixed."
+        if sandbox_decision.decision == "deny":
+            return "Block execution and route to sandbox exception review if the business case is still valid."
+        return "Allow only with reviewer awareness; keep sandbox enforcement on and verify trace coverage before release."
+
+    def _reviewer_checklist(self, records: list[McpToolAdmissionRecord]) -> list[JsonDict]:
+        return [
+            {
+                "item": "Every registered skill has an MCP admission record.",
+                "status": "pass" if len(records) == len(self.app_state.registry.list()) else "fail",
+                "proof": "GET /mcp/admission",
+            },
+            {
+                "item": "No tool is admitted without a passing sandbox preflight.",
+                "status": "pass"
+                if all(record.sandbox_decision.decision == "allow" for record in records if record.decision == "admit")
+                else "fail",
+                "proof": "POST /sandbox/evaluate",
+            },
+            {
+                "item": "Admission pack artifacts are ignored local evidence.",
+                "status": "pass" if self._gitignore_ok() else "fail",
+                "proof": "data/mcp_admission/",
+            },
+        ]
+
+    def _verification_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_mcp_admission.py -q",
+            "python -m app.evals.run_conformance",
+            "python -m app.mcp_server tools",
+            "python -m app.mcp_server call --name search_knowledge_base --arguments \"{\\\"query\\\":\\\"policy\\\",\\\"limit\\\":2}\" --enforce-sandbox",
+            "python scripts\\dashboard_smoke.py",
+            'rg "mcp/admission|MCP Admission|mcp_admission" app dashboard docs README.md tests',
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "MCP admission is an advisory local release gate; it does not replace runtime policy, entitlement, or sandbox enforcement.",
+            "The gate uses deterministic conformance samples and local mock sandbox policy rather than external provider calls.",
+            "Recent trace coverage is limited to the current in-process invocation history.",
+            "Generated admission packs are reviewer artifacts under ignored data/mcp_admission/.",
+        ]
+
+    def _gitignore_ok(self) -> bool:
+        gitignore = Path(".gitignore")
+        return gitignore.exists() and "data/mcp_admission/" in gitignore.read_text(encoding="utf-8")
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        lines = [
+            "# MCP Tool Admission Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Admitted tools: `{bundle['summary']['admitted_tool_count']}`",
+            f"- Warning tools: `{bundle['summary']['warning_tool_count']}`",
+            f"- Blocked tools: `{bundle['summary']['blocked_tool_count']}`",
+            "",
+            "## Tool Decisions",
+            "",
+        ]
+        for record in bundle["records"]:
+            lines.extend(
+                [
+                    f"### {record['skill_id']}",
+                    f"- Decision: `{record['decision']}`",
+                    f"- Risk label: `{record['risk_label']}`",
+                    f"- MCP exposed: `{record['mcp_exposed']}`",
+                    f"- Conformance: `{record['conformance_status']}`",
+                    f"- Risk flags: `{', '.join(record['risk_flags']) or 'none'}`",
+                    f"- Recommended action: {record['recommended_action']}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Architecture Patterns",
+                "",
+                *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+                "",
+                "## Reviewer Checklist",
+                "",
+                *[
+                    f"- `{item['status']}` {item['item']} Proof: `{item['proof']}`"
+                    for item in bundle["reviewer_checklist"]
+                ],
                 "",
                 "## Local Verification Commands",
                 "",
@@ -18508,6 +18863,7 @@ class DashboardSmokeService:
             {"id": "audit_integrity", "label": "Audit Integrity", "purpose": "Hash-chain verification for local audit evidence."},
             {"id": "invocation_sandbox", "label": "Invocation Sandbox", "purpose": "Task sandbox limits and blocked action classes."},
             {"id": "sandbox_exceptions", "label": "Sandbox Exceptions", "purpose": "Human review queue for sandbox-denied tool requests."},
+            {"id": "mcp_admission", "label": "MCP Admission", "purpose": "Tool admission gate for schema, conformance, sandbox, and trace evidence."},
             {"id": "prompt_governance", "label": "Prompt Governance", "purpose": "Injection risk controls."},
             {"id": "privacy_retention", "label": "Privacy Retention", "purpose": "PII redaction and retention controls."},
             {"id": "launch_checklist", "label": "Launch Checklist", "purpose": "API smoke and launch checklist."},
@@ -18593,6 +18949,8 @@ class DashboardSmokeService:
             self._endpoint_ref("sandbox_exception_queue", "GET", "/sandbox/exceptions", "Sandbox exception review queue."),
             self._endpoint_ref("sandbox_exception_submit", "POST", "/sandbox/exceptions", "Submits a denied sandbox request for HITL review."),
             self._endpoint_ref("sandbox_exception_pack", "POST", "/sandbox/exceptions/pack", "Writes Sandbox Exception Review artifacts."),
+            self._endpoint_ref("mcp_admission", "GET", "/mcp/admission", "MCP tool admission report."),
+            self._endpoint_ref("mcp_admission_pack", "POST", "/mcp/admission-pack", "Writes MCP Tool Admission artifacts."),
             self._endpoint_ref("tenant_entitlement_access_review", "GET", "/tenants/entitlements/access-review", "Privileged entitlement access review and break-glass drill."),
             self._endpoint_ref("tenant_entitlement_access_review_pack", "POST", "/tenants/entitlements/access-review-pack", "Writes Tenant Entitlement Access Review artifacts."),
             self._endpoint_ref("prompt_governance", "GET", "/prompt-governance/report", "Prompt and resource injection-risk signals."),
@@ -18663,6 +19021,7 @@ class DashboardSmokeService:
             self._artifact_tab("audit_integrity", "Audit Integrity", "Integrity Pack", "data/audit_integrity/"),
             self._artifact_tab("invocation_sandbox", "Invocation Sandbox", "Export", "data/sandbox_policies/"),
             self._artifact_tab("sandbox_exceptions", "Sandbox Exceptions", "Export", "data/sandbox_exceptions/"),
+            self._artifact_tab("mcp_admission", "MCP Admission", "Export", "data/mcp_admission/"),
             self._artifact_tab("prompt_governance", "Prompt Governance", "Prompt Governance Pack", "data/prompt_governance/"),
             self._artifact_tab("privacy_retention", "Privacy Retention", "Privacy Pack", "data/privacy_packs/"),
             self._artifact_tab("final_handoff", "Final Handoff", "Final Handoff Pack", "data/final_handoff/"),
@@ -22682,6 +23041,15 @@ class ArtifactInventoryService:
                 "Human-in-the-loop review queue for sandbox-denied requests with independent reviewer decisions and local audit evidence.",
             ),
             self._catalog_row(
+                "mcp_admission",
+                "MCP Tool Admission Pack",
+                Path("data") / "mcp_admission",
+                "POST /mcp/admission-pack",
+                "Invoke-RestMethod http://localhost:8000/mcp/admission-pack -Method POST -Headers $headers",
+                ["mcp_tool_admission_pack_latest.json", "mcp_tool_admission_pack_latest.md"],
+                "Advisory MCP tool admission gate with schema, conformance, sandbox preflight, state observation, step verification, and trace evidence.",
+            ),
+            self._catalog_row(
                 "prompt_governance",
                 "Prompt Governance + Injection Risk Pack",
                 Path("data") / "prompt_governance",
@@ -25183,6 +25551,7 @@ class AppState:
     slo: SkillSloService = field(init=False)
     invocation_sandbox: InvocationSandboxPolicyService = field(init=False)
     sandbox_exceptions: SandboxExceptionReviewService = field(init=False)
+    mcp_admission: McpToolAdmissionService = field(init=False)
     provider_readiness: ProviderReadinessService = field(init=False)
     provider_failover: ProviderFailoverDrillService = field(init=False)
     lineage: SkillLineageService = field(init=False)
@@ -25256,6 +25625,7 @@ class AppState:
         self.invocation_sandbox = InvocationSandboxPolicyService(self)
         self.invocation_service.sandbox = self.invocation_sandbox
         self.sandbox_exceptions = SandboxExceptionReviewService(self)
+        self.mcp_admission = McpToolAdmissionService(self)
         self.provider_readiness = ProviderReadinessService(self)
         self.provider_failover = ProviderFailoverDrillService(self)
         self.lineage = SkillLineageService(self)

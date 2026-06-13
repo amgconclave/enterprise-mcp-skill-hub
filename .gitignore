@@ -35,6 +35,7 @@ data/policy_replay/
 data/audit_integrity/
 data/sandbox_policies/
 data/sandbox_exceptions/
+data/mcp_admission/
 data/prompt_governance/
 data/privacy_packs/
 data/portfolio_demo/

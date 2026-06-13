@@ -9,6 +9,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `PolicyService` simulates role, environment, sensitivity, tag/provider, and action rules for skill invocation.
 - `SkillInvocationService` enforces enabled status and optional policy context, calls built-in or manifest-backed skill handlers, records audit and metrics, stores policy context/decision, returns traceable invocation records, and replays prior invocations for drift checks.
 - `McpToolAdapter` exposes enabled skills as MCP-shaped tools and provides resources/prompts.
+- `McpToolAdmissionService` produces an advisory default-tool admission gate across schema validity, conformance, sandbox preflight, state observation, step verification, trace evidence, and ignored `data/mcp_admission/` artifacts.
 - `PromptRegistry` stores reusable prompt templates for support replies, RFP answers, and meeting summaries.
 - `ResourceRegistry` exposes file-backed policy/product resources, workflow templates, and a dynamic skill catalog.
 - `AgentRunner` dynamically discovers MCP tools and selects multiple skills for compound tasks.

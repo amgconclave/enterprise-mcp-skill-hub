@@ -16,6 +16,7 @@ InvocationSandboxDecisionValue = Literal["allow", "deny"]
 InvocationSandboxRiskLabel = Literal["low", "medium", "high", "critical"]
 SandboxExceptionStatus = Literal["pending", "approved", "denied"]
 SandboxExceptionDecision = Literal["approve", "deny"]
+McpAdmissionDecisionValue = Literal["admit", "warn", "block"]
 InvocationSandboxActionClass = Literal[
     "skill_invocation",
     "resource_access",
@@ -2430,6 +2431,51 @@ class SandboxExceptionPackRequest(BaseModel):
 
 
 class SandboxExceptionPackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class McpToolAdmissionRecord(BaseModel):
+    skill_id: str
+    version: str
+    decision: McpAdmissionDecisionValue
+    risk_label: InvocationSandboxRiskLabel
+    mcp_exposed: bool
+    schema_valid: bool
+    conformance_status: str
+    sandbox_decision: InvocationSandboxDecision
+    endpoint_policy: list[JsonDict] = Field(default_factory=list)
+    state_observations: list[JsonDict] = Field(default_factory=list)
+    step_verifications: list[JsonDict] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    recommended_action: str
+    trace_ids: list[str] = Field(default_factory=list)
+
+
+class McpToolAdmissionReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    records: list[McpToolAdmissionRecord]
+    admitted_tools: list[str] = Field(default_factory=list)
+    warning_tools: list[str] = Field(default_factory=list)
+    blocked_tools: list[str] = Field(default_factory=list)
+    architecture_patterns: list[str] = Field(default_factory=list)
+    reviewer_checklist: list[JsonDict] = Field(default_factory=list)
+    local_verification_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class McpToolAdmissionPackRequest(BaseModel):
+    actor: str = "mcp-admission-reviewer"
+
+
+class McpToolAdmissionPackResult(BaseModel):
     pack_id: str
     generated_at: datetime
     readiness_status: SecurityReadinessStatus

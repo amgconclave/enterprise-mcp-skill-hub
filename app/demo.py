@@ -29,6 +29,7 @@ from app.models import (
     MarketplaceApprovalPackRequest,
     MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
+    McpToolAdmissionPackRequest,
     PolicyReplayPackRequest,
     PolicySimulationRequest,
     PortfolioInterviewPackRequest,
@@ -335,6 +336,10 @@ async def main() -> None:
     )
     sandbox_exception_pack = state.sandbox_exceptions.pack(
         SandboxExceptionPackRequest(actor="demo-security-reviewer")
+    )
+    mcp_admission_report = await state.mcp_admission.report(actor="demo-mcp-admission-reviewer")
+    mcp_admission_pack = await state.mcp_admission.pack(
+        McpToolAdmissionPackRequest(actor="demo-mcp-admission-reviewer")
     )
     prompt_governance_report = state.prompt_governance.report(actor="demo-prompt-governance")
     prompt_governance_pack = state.prompt_governance.pack(
@@ -660,6 +665,14 @@ async def main() -> None:
                 "sandbox_exception_status": sandbox_exception_decision.status,
                 "sandbox exception pack path": sandbox_exception_pack.markdown_path,
                 "sandbox_exception_pack_path": sandbox_exception_pack.markdown_path,
+                "mcp admission readiness": mcp_admission_report.readiness_status,
+                "mcp_admission_readiness": mcp_admission_report.readiness_status,
+                "mcp admission admitted tools": mcp_admission_report.summary["admitted_tool_count"],
+                "mcp_admission_admitted_tools": mcp_admission_report.summary["admitted_tool_count"],
+                "mcp admission warning tools": mcp_admission_report.summary["warning_tool_count"],
+                "mcp_admission_warning_tools": mcp_admission_report.summary["warning_tool_count"],
+                "mcp admission pack path": mcp_admission_pack.markdown_path,
+                "mcp_admission_pack_path": mcp_admission_pack.markdown_path,
                 "prompt governance readiness": prompt_governance_report.readiness_status,
                 "prompt_governance_readiness": prompt_governance_report.readiness_status,
                 "prompt governance findings": prompt_governance_report.summary["finding_count"],

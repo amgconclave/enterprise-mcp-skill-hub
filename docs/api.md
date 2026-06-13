@@ -19,6 +19,8 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /sandbox/exceptions` - evaluates and submits a sandbox-denied or high-risk request for independent review.
 - `POST /sandbox/exceptions/{exception_id}/decision` - records an independent approve/deny decision without bypassing runtime enforcement.
 - `POST /sandbox/exceptions/pack` - writes `sandbox_exception_review_pack_latest.json` and `.md` under ignored local folder `data/sandbox_exceptions/`.
+- `GET /mcp/admission` - returns an advisory MCP tool admission gate across schema validity, conformance, sandbox preflight, state observations, and step verification.
+- `POST /mcp/admission-pack` - writes `mcp_tool_admission_pack_latest.json` and `.md` under ignored local folder `data/mcp_admission/`.
 - `GET /workflows/templates` - lists approved reusable workflow templates from `sample_data/workflow_templates.json` plus approved local review submissions.
 - `POST /workflows/templates/submit` - submits a new `WorkflowTemplate` for local review and stores it under `data/workflow_reviews/` with `in_review` status.
 - `GET /workflows/reviews` - lists submitted templates with review status, validation status, required role, sensitivity, missing skills, invalid skills, and policy warnings.
@@ -253,6 +255,17 @@ Invoke-RestMethod http://localhost:8000/sandbox/exceptions/pack -Headers $header
 ```
 
 The queue returns exception records, sandbox decisions, governance controls, audit evidence, and verification commands. The pack writes Markdown/JSON under ignored `data/sandbox_exceptions/`.
+
+## MCP Tool Admission
+
+Use the advisory admission gate before relying on promoted tools as default MCP inventory:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/mcp/admission -Headers $headers
+Invoke-RestMethod http://localhost:8000/mcp/admission-pack -Headers $headers -Method POST
+```
+
+The report records one row per registered skill with MCP exposure, manifest schema status, conformance status, sandbox preflight decision, endpoint policy, state observations, step verification proof, risk flags, and a recommended action. It uses local task-sandbox, state-observation, run-transparency, and step-verification patterns. The pack writes Markdown/JSON under ignored `data/mcp_admission/` and remains advisory; runtime enforcement still lives in policy, entitlement, and sandbox checks.
 
 ## Workflow Composition
 

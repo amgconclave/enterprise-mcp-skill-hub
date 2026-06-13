@@ -42,6 +42,7 @@ from app.models import (
     MarketplaceApprovalSubmitRequest,
     MarketplaceRolloutPackRequest,
     MarketplaceStageAdvanceRequest,
+    McpToolAdmissionPackRequest,
     PolicyInvocationContext,
     PolicyReplayPackRequest,
     PolicySimulationRequest,
@@ -114,6 +115,7 @@ view = st.sidebar.radio(
         "Policy Simulator",
         "Invocation Sandbox",
         "Sandbox Exceptions",
+        "MCP Admission",
         "Tenant Policy Sandbox",
         "Tenant RBAC / Entitlements",
         "Skill Marketplace",
@@ -511,6 +513,65 @@ elif view == "Sandbox Exceptions":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(queue.model_dump(mode="json"))
+
+elif view == "MCP Admission":
+    st.subheader("MCP Admission")
+    st.caption("Review MCP tool admission against schema, conformance, sandbox preflight, and trace evidence.")
+    report = run_async(state.mcp_admission.report("streamlit-mcp-admission-reviewer"))
+    col_ready, col_admit, col_warn, col_block = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_admit.metric("Admitted", report.summary["admitted_tool_count"])
+    col_warn.metric("Warnings", report.summary["warning_tool_count"])
+    col_block.metric("Blocked", report.summary["blocked_tool_count"])
+    tab_decisions, tab_observations, tab_export, tab_json = st.tabs(
+        ["Decisions", "Observations", "Export", "JSON"]
+    )
+    with tab_decisions:
+        st.dataframe(
+            [
+                {
+                    "skill": record.skill_id,
+                    "decision": record.decision,
+                    "risk": record.risk_label,
+                    "mcp_exposed": record.mcp_exposed,
+                    "schema_valid": record.schema_valid,
+                    "conformance": record.conformance_status,
+                    "risk_flags": ", ".join(record.risk_flags),
+                }
+                for record in report.records
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(report.reviewer_checklist, use_container_width=True, hide_index=True)
+    with tab_observations:
+        selected_record = st.selectbox(
+            "Admission record",
+            [record.skill_id for record in report.records],
+            key="mcp_admission_record",
+        )
+        record = next(item for item in report.records if item.skill_id == selected_record)
+        st.json(
+            {
+                "state_observations": record.state_observations,
+                "step_verifications": record.step_verifications,
+                "endpoint_policy": record.endpoint_policy,
+                "trace_ids": record.trace_ids,
+                "recommended_action": record.recommended_action,
+            }
+        )
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/mcp_admission/.")
+        if st.button("Export MCP Admission Pack", use_container_width=True):
+            export = run_async(
+                state.mcp_admission.pack(
+                    McpToolAdmissionPackRequest(actor="streamlit-mcp-admission-reviewer")
+                )
+            )
+            st.success("MCP admission pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Tenant Policy Sandbox":
     st.subheader("Tenant Policy Sandbox")

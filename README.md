@@ -44,6 +44,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Policy Replay Drift Pack for replaying historical and baseline policy decisions against current rules, surfacing drift or missing evidence, HITL approval queue rows, bounded review steps, audit events, and ignored `data/policy_replay/` artifacts.
 - Audit Integrity Pack for deterministic local hash-chain verification across audit events and skill invocations, with root hash, gap checks, replay commands, dashboard review, and ignored `data/audit_integrity/` artifacts.
 - Invocation Sandbox Policy Pack for mock tool payload limits, blocked action classes, risk labels, FastAPI/MCP endpoint policy, enforced denied invocations, and ignored `data/sandbox_policies/` artifacts.
+- MCP Tool Admission Pack for advisory schema, conformance, sandbox preflight, state observation, step verification, and trace evidence before tools become default agent inventory.
 - Prompt Governance + Injection Risk Pack for scanning MCP prompts/resources and ad hoc content for instruction overrides, safety bypasses, endpoint/tool abuse, secret exfiltration, approval requirements, remediation action-loop plans, audit events, and ignored `data/prompt_governance/` artifacts.
 - Privacy Retention + Redaction Pack for scanning invocation/audit payloads and ad hoc JSON for local PII patterns, redacted previews, retention actions, deletion candidates, audit events, and ignored `data/privacy_packs/` artifacts.
 - Supply Chain SBOM + License Governance Pack for local direct-dependency manifest hashes, license posture, pinning review, optional external-provider dependency gates, approval requirements, dashboard review, and ignored `data/supply_chain/` artifacts.
@@ -720,6 +721,19 @@ Get-ChildItem -Recurse -File data\sandbox_exceptions -ErrorAction SilentlyContin
 ```
 
 `GET /sandbox/exceptions` returns the review queue, governance policy, audit evidence, and verification commands. `POST /sandbox/exceptions` evaluates the request through the existing sandbox and stores the exact decision for review. `POST /sandbox/exceptions/{exception_id}/decision` records independent approval or denial, and `POST /sandbox/exceptions/pack` writes Markdown/JSON under ignored `data/sandbox_exceptions/`. Approved exceptions are evidence only; blocked action classes still cannot execute until the sandbox policy source is changed and verified.
+
+## MCP Tool Admission
+
+Review whether promoted skills are safe default MCP inventory:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/mcp/admission -Headers $headers
+Invoke-RestMethod http://localhost:8000/mcp/admission-pack -Method POST -Headers $headers
+Get-ChildItem -Recurse -File data\mcp_admission -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /mcp/admission` returns one admission record per registered skill with MCP exposure, schema validity, conformance status, sandbox preflight, endpoint policy, state observations, step verification, risk flags, trace ids, and a recommended action. `POST /mcp/admission-pack` writes `mcp_tool_admission_pack_latest.json` and `.md` under ignored `data/mcp_admission/`. The gate is advisory; runtime enforcement remains in policy, entitlement, and sandbox checks.
 
 ## Prompt Governance And Injection Risk
 

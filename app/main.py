@@ -98,6 +98,9 @@ from app.models import (
     MarketplaceRolloutPackRequest,
     MarketplaceRolloutPackResult,
     MarketplaceStageAdvanceRequest,
+    McpToolAdmissionPackRequest,
+    McpToolAdmissionPackResult,
+    McpToolAdmissionReport,
     McpToolDefinition,
     PolicyInvocationContext,
     PolicyReplayDriftReport,
@@ -365,6 +368,19 @@ def sandbox_exception_pack(
     _: str = Depends(require_api_key),
 ) -> SandboxExceptionPackResult:
     return state.sandbox_exceptions.pack(request or SandboxExceptionPackRequest())
+
+
+@app.get("/mcp/admission", response_model=McpToolAdmissionReport)
+async def mcp_tool_admission(_: str = Depends(require_api_key)) -> McpToolAdmissionReport:
+    return await state.mcp_admission.report("api-mcp-admission-reviewer")
+
+
+@app.post("/mcp/admission-pack", response_model=McpToolAdmissionPackResult)
+async def mcp_tool_admission_pack(
+    request: McpToolAdmissionPackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> McpToolAdmissionPackResult:
+    return await state.mcp_admission.pack(request or McpToolAdmissionPackRequest())
 
 
 @app.post("/tenants/policy-simulate", response_model=TenantPolicySimulationResult)
