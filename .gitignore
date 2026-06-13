@@ -27,6 +27,7 @@ data/config_hygiene/
 data/lineage/
 data/platform_packs/
 data/platform_operations/
+data/quarantine_packs/
 data/ownership_packs/
 data/review_sla/
 data/agent_collaboration/

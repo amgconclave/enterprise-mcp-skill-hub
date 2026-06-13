@@ -215,6 +215,12 @@ from app.models import (
     SkillOwnershipPackRequest,
     SkillOwnershipPackResult,
     SkillOwnershipRecord,
+    SkillQuarantineApplyRequest,
+    SkillQuarantineApplyResult,
+    SkillQuarantineDecisionRecord,
+    SkillQuarantinePackRequest,
+    SkillQuarantinePackResult,
+    SkillQuarantineReport,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
@@ -18864,6 +18870,7 @@ class DashboardSmokeService:
             {"id": "skill_lineage", "label": "Skill Lineage", "purpose": "Skill-to-manifest, prompt, resource, workflow, and policy traceability."},
             {"id": "platform_pack", "label": "Platform Pack", "purpose": "Governed workflow, HITL, provider, and tool evidence."},
             {"id": "platform_operations", "label": "Platform Operations", "purpose": "Operations drill across sandbox, workers, runs, policy, and repo automation."},
+            {"id": "skill_quarantine", "label": "Skill Quarantine", "purpose": "Runtime kill-switch, quarantine, and rollback evidence."},
             {"id": "skill_ownership", "label": "Skill Ownership", "purpose": "Owner roster, escalation routes, and handoff evidence."},
             {"id": "review_sla", "label": "Review SLA", "purpose": "Human-review queue SLA and escalation evidence."},
             {"id": "agent_collaboration", "label": "Agent Collaboration", "purpose": "Multi-agent handoffs, shared state, and tool governance."},
@@ -18938,6 +18945,9 @@ class DashboardSmokeService:
             self._endpoint_ref("platform_pack_export", "POST", "/platform/pack/export", "Writes Governed Skill Platform Pack artifacts."),
             self._endpoint_ref("platform_operations_drill", "GET", "/platform/operations-drill", "Platform operations state observation and bounded action loop."),
             self._endpoint_ref("platform_operations_pack", "POST", "/platform/operations-pack", "Writes Platform Operations Drill artifacts."),
+            self._endpoint_ref("skill_quarantine_report", "GET", "/quarantine/report", "Runtime skill quarantine and kill-switch report."),
+            self._endpoint_ref("skill_quarantine_pack", "POST", "/quarantine/pack", "Writes Runtime Skill Quarantine artifacts."),
+            self._endpoint_ref("skill_quarantine_apply", "POST", "/quarantine/apply", "Applies explicit runtime skill quarantine decisions."),
             self._endpoint_ref("skill_ownership", "GET", "/ownership/matrix", "Skill ownership matrix and escalation routes."),
             self._endpoint_ref("skill_ownership_pack", "POST", "/ownership/pack", "Writes Skill Ownership artifacts."),
             self._endpoint_ref("review_sla", "GET", "/reviews/sla", "Human-review SLA and escalation report."),
@@ -19027,6 +19037,7 @@ class DashboardSmokeService:
             self._artifact_tab("skill_lineage", "Skill Lineage", "Lineage Pack", "data/lineage/"),
             self._artifact_tab("platform_pack", "Platform Pack", "Platform Pack", "data/platform_packs/"),
             self._artifact_tab("platform_operations", "Platform Operations", "Drill Pack", "data/platform_operations/"),
+            self._artifact_tab("skill_quarantine", "Skill Quarantine", "Quarantine Pack", "data/quarantine_packs/"),
             self._artifact_tab("skill_ownership", "Skill Ownership", "Ownership Pack", "data/ownership_packs/"),
             self._artifact_tab("review_sla", "Review SLA", "SLA Pack", "data/review_sla/"),
             self._artifact_tab("agent_collaboration", "Agent Collaboration", "Collaboration Pack", "data/agent_collaboration/"),
@@ -22514,6 +22525,471 @@ class PlatformOperationsDrillService:
         return "\n".join(lines)
 
 
+class SkillQuarantineService:
+    REPORT_ID = "skill_quarantine_report_latest"
+    PACK_ID = "skill_quarantine_pack_latest"
+
+    def __init__(self, app_state: AppState, output_dir: Path | None = None) -> None:
+        self.app_state = app_state
+        self.output_dir = output_dir or Path("data") / "quarantine_packs"
+
+    def report(self, actor: str = "platform-sre") -> SkillQuarantineReport:
+        reliability = self.app_state.reliability.report()
+        slo = self.app_state.slo.report()
+        prompt = self.app_state.prompt_governance.report(actor=actor)
+        provider = self.app_state.provider_readiness.readiness(actor=actor)
+        reliability_by_skill = {record.skill_id: record for record in reliability.skills}
+        slo_by_skill = {record.skill_id: record for record in slo.skills}
+        decisions = [
+            self._decision_for_skill(
+                skill,
+                reliability_by_skill.get(skill.id),
+                slo_by_skill.get(skill.id),
+                prompt,
+                provider,
+            )
+            for skill in self.app_state.registry.list()
+        ]
+        recommended = [
+            record for record in decisions if record.decision == "quarantine_recommended"
+        ]
+        quarantined = [record for record in decisions if record.decision == "quarantined"]
+        monitored = [record for record in decisions if record.decision == "monitor"]
+        readiness_status: SecurityReadinessStatus = "ready"
+        if recommended:
+            readiness_status = "blocked"
+        elif quarantined or monitored:
+            readiness_status = "needs_review"
+        summary = {
+            "local_only": True,
+            "mock_provider": self.app_state.provider.name == "mock",
+            "skill_count": len(decisions),
+            "quarantine_recommended_count": len(recommended),
+            "quarantined_count": len(quarantined),
+            "monitor_count": len(monitored),
+            "mcp_exposed_quarantine_recommended_count": sum(
+                1 for record in recommended if record.mcp_exposed
+            ),
+            "human_review_required_count": sum(
+                1 for record in decisions if record.requires_human_review
+            ),
+            "artifact_directory": str(self.output_dir),
+        }
+        report = SkillQuarantineReport(
+            report_id=self.REPORT_ID,
+            generated_at=utc_now(),
+            readiness_status=readiness_status,
+            summary=summary,
+            architecture_patterns=[
+                "governance",
+                "human-in-the-loop",
+                "tool governance",
+                "durable workflows",
+                "handoffs",
+                "provider flexibility",
+            ],
+            decisions=decisions,
+            kill_switch_plan=self._kill_switch_plan(decisions),
+            human_review_queue=self._human_review_queue(decisions),
+            audit_evidence=self._audit_evidence(decisions),
+            local_proof_commands=self._local_proof_commands(),
+            limitations=self._limitations(),
+        )
+        self.app_state.audit.record(
+            "quarantine.report_generated",
+            "skill_quarantine_report",
+            self.REPORT_ID,
+            new_trace_id(),
+            actor,
+            {
+                "readiness_status": readiness_status,
+                "quarantine_recommended_count": len(recommended),
+                "quarantined_count": len(quarantined),
+                "monitor_count": len(monitored),
+            },
+        )
+        return report
+
+    def pack(
+        self,
+        request: SkillQuarantinePackRequest | None = None,
+    ) -> SkillQuarantinePackResult:
+        request = request or SkillQuarantinePackRequest()
+        report = self.report(actor=request.actor)
+        bundle = {
+            "pack_id": self.PACK_ID,
+            "generated_at": utc_now().isoformat(),
+            "actor": request.actor,
+            "readiness_status": report.readiness_status,
+            "quarantine_report": report.model_dump(mode="json"),
+            "architecture_patterns": report.architecture_patterns,
+            "decisions": [record.model_dump(mode="json") for record in report.decisions],
+            "kill_switch_plan": report.kill_switch_plan,
+            "human_review_queue": report.human_review_queue,
+            "audit_evidence": report.audit_evidence,
+            "local_proof_commands": report.local_proof_commands,
+            "limitations": report.limitations,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / f"{self.PACK_ID}.json"
+        markdown_path = self.output_dir / f"{self.PACK_ID}.md"
+        json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        markdown_path.write_text(self._markdown(bundle), encoding="utf-8")
+        self.app_state.audit.record(
+            "quarantine.pack_exported",
+            "skill_quarantine_pack",
+            self.PACK_ID,
+            new_trace_id(),
+            request.actor,
+            {
+                "readiness_status": report.readiness_status,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+                "quarantine_recommended_count": report.summary[
+                    "quarantine_recommended_count"
+                ],
+            },
+        )
+        return SkillQuarantinePackResult(
+            pack_id=self.PACK_ID,
+            generated_at=utc_now(),
+            readiness_status=report.readiness_status,
+            json_path=str(json_path.resolve()),
+            markdown_path=str(markdown_path.resolve()),
+            summary={
+                **report.summary,
+                "json_path": str(json_path),
+                "markdown_path": str(markdown_path),
+            },
+        )
+
+    def apply(
+        self,
+        request: SkillQuarantineApplyRequest | None = None,
+    ) -> SkillQuarantineApplyResult:
+        request = request or SkillQuarantineApplyRequest()
+        report = self.report(actor=request.actor)
+        recommended_ids = {
+            record.skill_id
+            for record in report.decisions
+            if record.decision == "quarantine_recommended"
+        }
+        requested_ids = set(request.skill_ids or sorted(recommended_ids))
+        applied: list[str] = []
+        skipped: list[str] = []
+        trace_ids: list[str] = []
+        for skill_id in sorted(requested_ids):
+            if request.require_recommendation and skill_id not in recommended_ids:
+                skipped.append(skill_id)
+                continue
+            try:
+                self.app_state.registry.set_status(skill_id, False, request.actor)
+            except KeyError:
+                skipped.append(skill_id)
+                continue
+            trace_id = new_trace_id()
+            self.app_state.audit.record(
+                "quarantine.skill_disabled",
+                "skill",
+                skill_id,
+                trace_id,
+                request.actor,
+                {
+                    "reason": request.reason,
+                    "require_recommendation": request.require_recommendation,
+                    "source_report_id": report.report_id,
+                },
+            )
+            applied.append(skill_id)
+            trace_ids.append(trace_id)
+        return SkillQuarantineApplyResult(
+            applied_at=utc_now(),
+            actor=request.actor,
+            applied_skill_ids=applied,
+            skipped_skill_ids=skipped,
+            audit_trace_ids=trace_ids,
+            summary={
+                "requested_count": len(requested_ids),
+                "applied_count": len(applied),
+                "skipped_count": len(skipped),
+                "source_report_readiness": report.readiness_status,
+                "source_quarantine_recommended_count": len(recommended_ids),
+            },
+        )
+
+    def _decision_for_skill(
+        self,
+        skill: SkillManifest,
+        reliability: SkillReliabilityRecord | None,
+        slo: SkillSloRecord | None,
+        prompt: PromptGovernanceReport,
+        provider: ProviderReadinessReport,
+    ) -> SkillQuarantineDecisionRecord:
+        evidence: list[JsonDict] = []
+        triggers: list[str] = []
+        severity = "low"
+        decision = "allow"
+        if not skill.enabled or skill.status == "disabled":
+            decision = "quarantined"
+            severity = "high"
+            triggers.append("lifecycle_disabled")
+            evidence.append(
+                {
+                    "source": "registry",
+                    "detail": "Skill is already disabled and hidden from MCP exposure.",
+                }
+            )
+        if slo and slo.release_gate == "block_release":
+            decision = "quarantine_recommended"
+            severity = "critical"
+            triggers.append("slo_release_gate_block")
+            evidence.append(
+                {
+                    "source": "slo",
+                    "release_gate": slo.release_gate,
+                    "error_budget_status": slo.error_budget_status,
+                    "p95_latency_ms": slo.p95_latency_ms,
+                    "trace_ids": slo.evidence_trace_ids,
+                }
+            )
+        elif slo and slo.release_gate == "needs_review" and decision == "allow":
+            decision = "monitor"
+            severity = "medium"
+            triggers.append("slo_needs_review")
+            evidence.append(
+                {
+                    "source": "slo",
+                    "release_gate": slo.release_gate,
+                    "recommended_action": slo.recommended_action,
+                }
+            )
+        if reliability and reliability.recommended_action in {
+            "temporarily_disable_and_run_conformance",
+            "route_to_fallback_until_breaker_closes",
+        }:
+            decision = "quarantine_recommended"
+            severity = "critical" if reliability.circuit_state == "open" else "high"
+            triggers.append("reliability_disable_recommendation")
+            evidence.append(
+                {
+                    "source": "reliability",
+                    "recommended_action": reliability.recommended_action,
+                    "reason": reliability.recommendation_reason,
+                    "failure_rate": reliability.failure_rate,
+                    "p95_latency_ms": reliability.p95_latency_ms,
+                    "trace_ids": reliability.audit_trace_ids,
+                }
+            )
+        if skill.provider != "mock" or provider.readiness_status != "ready":
+            if decision == "allow":
+                decision = "monitor"
+                severity = "medium"
+            triggers.append("provider_review")
+            evidence.append(
+                {
+                    "source": "provider_readiness",
+                    "current_provider": provider.current_provider["name"],
+                    "provider": skill.provider,
+                    "readiness_status": provider.readiness_status,
+                    "network_calls_performed": provider.summary["network_calls_performed"],
+                }
+            )
+        if prompt.summary.get("critical_count", 0) and decision != "quarantined":
+            if decision == "allow":
+                decision = "monitor"
+                severity = "medium"
+            triggers.append("prompt_governance_review")
+            evidence.append(
+                {
+                    "source": "prompt_governance",
+                    "critical_count": prompt.summary.get("critical_count", 0),
+                    "approval_required_count": prompt.summary.get(
+                        "approval_required_count",
+                        0,
+                    ),
+                }
+            )
+        return SkillQuarantineDecisionRecord(
+            skill_id=skill.id,
+            name=skill.name,
+            version=skill.version,
+            enabled=skill.enabled,
+            lifecycle_status=skill.status,
+            mcp_exposed=self.app_state.registry.is_mcp_exposed(skill),
+            decision=decision,
+            severity=severity,
+            trigger_sources=triggers or ["none"],
+            evidence=evidence,
+            kill_switch_actions=self._kill_switch_actions(skill, decision),
+            rollback_actions=self._rollback_actions(skill, decision),
+            requires_human_review=decision in {"monitor", "quarantine_recommended", "quarantined"},
+            owner=skill.owner,
+            escalation_channel=skill.escalation_channel,
+        )
+
+    def _kill_switch_actions(
+        self,
+        skill: SkillManifest,
+        decision: str,
+    ) -> list[str]:
+        if decision == "quarantine_recommended":
+            return [
+                f"POST /quarantine/apply with skill_ids ['{skill.id}'] after owner acknowledgement.",
+                f"PATCH /skills/{skill.id}/status with enabled=false for break-glass API parity.",
+                "Rerun eval, conformance, dashboard smoke, demo, and MCP inventory commands.",
+            ]
+        if decision == "quarantined":
+            return [
+                "Keep disabled until owner review clears SLO, reliability, and prompt evidence.",
+                "Confirm MCP tools inventory excludes the disabled skill.",
+            ]
+        if decision == "monitor":
+            return [
+                "Keep enabled but require owner review before release or tenant rollout.",
+                "Attach SLO, reliability, provider, and prompt evidence to the review queue.",
+            ]
+        return ["No kill-switch action required."]
+
+    def _rollback_actions(self, skill: SkillManifest, decision: str) -> list[str]:
+        if decision in {"quarantine_recommended", "quarantined"}:
+            return [
+                f"Validate `{skill.id}` manifest and rerun conformance before re-enable.",
+                "Run one canary invocation in local/mock mode.",
+                "Require owner approval, then PATCH status enabled=true or promote through the marketplace gate.",
+            ]
+        return ["Continue normal lifecycle and release checks."]
+
+    def _kill_switch_plan(self, decisions: list[SkillQuarantineDecisionRecord]) -> list[JsonDict]:
+        rows = []
+        for index, record in enumerate(
+            [row for row in decisions if row.decision != "allow"],
+            start=1,
+        ):
+            rows.append(
+                {
+                    "order": index,
+                    "skill_id": record.skill_id,
+                    "decision": record.decision,
+                    "severity": record.severity,
+                    "owner": record.owner,
+                    "endpoint": "POST /quarantine/apply",
+                    "actions": record.kill_switch_actions,
+                    "rollback_actions": record.rollback_actions,
+                }
+            )
+        return rows
+
+    def _human_review_queue(self, decisions: list[SkillQuarantineDecisionRecord]) -> list[JsonDict]:
+        return [
+            {
+                "queue_id": f"quarantine-{record.skill_id}",
+                "skill_id": record.skill_id,
+                "severity": record.severity,
+                "decision": record.decision,
+                "owner": record.owner,
+                "channel": record.escalation_channel,
+                "recommended_action": record.kill_switch_actions[0],
+                "evidence_sources": record.trigger_sources,
+            }
+            for record in decisions
+            if record.requires_human_review
+        ]
+
+    def _audit_evidence(self, decisions: list[SkillQuarantineDecisionRecord]) -> JsonDict:
+        relevant_skill_ids = {
+            record.skill_id for record in decisions if record.decision != "allow"
+        }
+        events = [
+            event.model_dump(mode="json")
+            for event in self.app_state.audit.events
+            if event.resource_id in relevant_skill_ids
+            or event.action.startswith(("quarantine.", "reliability.", "provider_readiness."))
+        ]
+        return {
+            "event_count": len(events),
+            "trace_ids": sorted({event["trace_id"] for event in events})[:20],
+            "events": events[-25:],
+        }
+
+    def _local_proof_commands(self) -> list[str]:
+        return [
+            "python -m pytest tests/test_quarantine.py -q",
+            "python -m pytest -q",
+            "python -m ruff check app tests dashboard",
+            "python -m app.evals.run_eval",
+            "python -m app.evals.run_conformance",
+            "python scripts\\dashboard_smoke.py",
+            "python -m app.demo",
+            "python -m app.mcp_server tools",
+            "Invoke-RestMethod http://localhost:8000/quarantine/report -Headers $headers",
+            "Invoke-RestMethod http://localhost:8000/quarantine/pack -Method POST -Headers $headers",
+            'rg "quarantine/report|quarantine/pack|Skill Quarantine|quarantine_packs" app dashboard docs README.md tests',
+            "Get-ChildItem -Recurse -File data\\quarantine_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime",
+        ]
+
+    def _limitations(self) -> list[str]:
+        return [
+            "The report is dry-run by default; skill state changes only through POST /quarantine/apply.",
+            "Quarantine evidence is deterministic local/mock state and does not call hosted LLM providers.",
+            "The apply endpoint disables skills in the in-process registry; production deployments should persist this in an audited database.",
+            "Generated quarantine artifacts are written under ignored data/quarantine_packs/.",
+        ]
+
+    def _markdown(self, bundle: JsonDict) -> str:
+        report = bundle["quarantine_report"]
+        lines = [
+            "# Runtime Skill Quarantine Pack",
+            "",
+            f"- Pack ID: `{bundle['pack_id']}`",
+            f"- Generated at: `{bundle['generated_at']}`",
+            f"- Actor: `{bundle['actor']}`",
+            f"- Readiness: `{bundle['readiness_status']}`",
+            f"- Quarantine recommended: `{report['summary']['quarantine_recommended_count']}`",
+            f"- Already quarantined: `{report['summary']['quarantined_count']}`",
+            "",
+            "## Architecture Patterns",
+            "",
+            *[f"- {pattern}" for pattern in bundle["architecture_patterns"]],
+            "",
+            "## Decisions",
+            "",
+            "| Skill | Decision | Severity | MCP | Triggers | Owner |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                f"| `{record['skill_id']}` | `{record['decision']}` | `{record['severity']}` | `{record['mcp_exposed']}` | {', '.join(record['trigger_sources'])} | `{record['owner']}` |"
+                for record in bundle["decisions"]
+            ],
+            "",
+            "## Kill Switch Plan",
+            "",
+        ]
+        if bundle["kill_switch_plan"]:
+            for item in bundle["kill_switch_plan"]:
+                lines.append(
+                    f"- {item['order']}. `{item['skill_id']}` `{item['severity']}` via `{item['endpoint']}`."
+                )
+        else:
+            lines.append("- No quarantine actions are currently recommended.")
+        lines.extend(
+            [
+                "",
+                "## Human Review Queue",
+                *[
+                    f"- `{item['severity']}` `{item['skill_id']}` owner `{item['owner']}`: {item['recommended_action']}"
+                    for item in bundle["human_review_queue"]
+                ],
+                "",
+                "## Local Proof Commands",
+                *[f"- `{command}`" for command in bundle["local_proof_commands"]],
+                "",
+                "## Limitations",
+                *[f"- {item}" for item in bundle["limitations"]],
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+
 class SkillOwnershipService:
     MATRIX_ID = "skill_ownership_matrix_latest"
     PACK_ID = "skill_ownership_pack_latest"
@@ -23815,6 +24291,15 @@ class ArtifactInventoryService:
                     "platform_operations_drill_pack_latest.md",
                 ],
                 "Operator drill across task sandbox, run transparency, repository automation dry-run, worker scale-out, policy replay, and step verification.",
+            ),
+            self._catalog_row(
+                "quarantine_packs",
+                "Runtime Skill Quarantine Pack",
+                Path("data") / "quarantine_packs",
+                "POST /quarantine/pack",
+                "Invoke-RestMethod http://localhost:8000/quarantine/pack -Method POST -Headers $headers",
+                ["skill_quarantine_pack_latest.json", "skill_quarantine_pack_latest.md"],
+                "Runtime kill-switch and quarantine evidence spanning SLO, reliability, prompt governance, provider posture, owner review, rollback, and MCP exposure.",
             ),
             self._catalog_row(
                 "ownership_packs",
@@ -26448,6 +26933,7 @@ class AppState:
     artifacts: ArtifactInventoryService = field(init=False)
     platform_pack: GovernedSkillPlatformPackService = field(init=False)
     platform_operations: PlatformOperationsDrillService = field(init=False)
+    quarantine: SkillQuarantineService = field(init=False)
     ownership: SkillOwnershipService = field(init=False)
     review_sla: ReviewSlaService = field(init=False)
     worker_scaleout: WorkerScaleOutService = field(init=False)
@@ -26523,6 +27009,7 @@ class AppState:
         self.runtime_demo = RuntimeDemoService(self)
         self.platform_pack = GovernedSkillPlatformPackService(self)
         self.platform_operations = PlatformOperationsDrillService(self)
+        self.quarantine = SkillQuarantineService(self)
         self.ownership = SkillOwnershipService(self)
         self.review_sla = ReviewSlaService(self)
         self.worker_scaleout = WorkerScaleOutService(self)

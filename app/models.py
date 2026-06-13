@@ -94,6 +94,8 @@ AgentCollaborationRole = Literal[
     "action_agent",
     "governance_reviewer",
 ]
+SkillQuarantineDecisionValue = Literal["allow", "monitor", "quarantine_recommended", "quarantined"]
+SkillQuarantineSeverity = Literal["low", "medium", "high", "critical"]
 
 
 class TokenUsage(BaseModel):
@@ -1512,6 +1514,67 @@ class PlatformOperationsDrillPackResult(BaseModel):
     readiness_status: SecurityReadinessStatus
     json_path: str
     markdown_path: str
+    summary: JsonDict
+
+
+class SkillQuarantineDecisionRecord(BaseModel):
+    skill_id: str
+    name: str
+    version: str
+    enabled: bool
+    lifecycle_status: SkillLifecycleStatus
+    mcp_exposed: bool
+    decision: SkillQuarantineDecisionValue
+    severity: SkillQuarantineSeverity
+    trigger_sources: list[str] = Field(default_factory=list)
+    evidence: list[JsonDict] = Field(default_factory=list)
+    kill_switch_actions: list[str] = Field(default_factory=list)
+    rollback_actions: list[str] = Field(default_factory=list)
+    requires_human_review: bool = False
+    owner: str = "platform-owner"
+    escalation_channel: str = "#mcp-skill-ops"
+
+
+class SkillQuarantineReport(BaseModel):
+    report_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    summary: JsonDict
+    architecture_patterns: list[str] = Field(default_factory=list)
+    decisions: list[SkillQuarantineDecisionRecord] = Field(default_factory=list)
+    kill_switch_plan: list[JsonDict] = Field(default_factory=list)
+    human_review_queue: list[JsonDict] = Field(default_factory=list)
+    audit_evidence: JsonDict = Field(default_factory=dict)
+    local_proof_commands: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SkillQuarantinePackRequest(BaseModel):
+    actor: str = "platform-sre"
+
+
+class SkillQuarantinePackResult(BaseModel):
+    pack_id: str
+    generated_at: datetime
+    readiness_status: SecurityReadinessStatus
+    json_path: str
+    markdown_path: str
+    summary: JsonDict
+
+
+class SkillQuarantineApplyRequest(BaseModel):
+    actor: str = "platform-sre"
+    skill_ids: list[str] = Field(default_factory=list)
+    reason: str = "Runtime quarantine applied from local kill-switch report."
+    require_recommendation: bool = True
+
+
+class SkillQuarantineApplyResult(BaseModel):
+    applied_at: datetime
+    actor: str
+    applied_skill_ids: list[str] = Field(default_factory=list)
+    skipped_skill_ids: list[str] = Field(default_factory=list)
+    audit_trace_ids: list[str] = Field(default_factory=list)
     summary: JsonDict
 
 

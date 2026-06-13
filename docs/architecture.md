@@ -35,6 +35,7 @@ Enterprise MCP Skill Hub is organized around governed reuse. Agents do not call 
 - `ConfigHygieneService` checks `.env.example`, `.gitignore`, current provider mode, optional hosted-provider credential presence, and redacted suspicious secret findings; it writes Config Hygiene + Secret Rotation artifacts under ignored `data/config_hygiene/`.
 - `SkillLineageService` maps each skill to manifest/schema fingerprints, MCP exposure, prompts, resources, workflow templates, policy controls, provider mode, and recent invocation IDs; it writes Skill Lineage artifacts under ignored `data/lineage/`.
 - `GovernedSkillPlatformPackService` aggregates durable workflows, human-in-the-loop review, governance/conformance, provider fallback, tool governance, cost/trace signals, and handoff readiness into a platform-owner report and writes artifacts under `data/platform_packs/`.
+- `SkillQuarantineService` builds dry-run runtime kill-switch decisions from SLO, reliability, prompt-governance, provider, owner, audit, and MCP exposure evidence; it can explicitly disable recommended skills and writes artifacts under `data/quarantine_packs/`.
 - `SkillOwnershipService` maps each reusable skill to manifest owner/team/channel metadata, support tier, risk tier, evidence refs, trace IDs, escalation routes, and handoff actions; it writes ownership artifacts under `data/ownership_packs/`.
 - `ReviewSlaService` normalizes workflow reviews, marketplace approvals, and sandbox exceptions into one human-review SLA queue with escalation policy, owner actions, trace evidence, and artifacts under `data/review_sla/`.
 - `WorkerScaleOutService` simulates local worker pools for governed skill execution, performs sandbox preflight before dispatch, records transparent run timelines, derives scale recommendations from capacity forecasts and run history, and writes Worker Scale-Out Runbook artifacts under `data/worker_runbooks/`.
@@ -189,6 +190,9 @@ The project keeps governance close to the skill runtime:
 - Cost Chargeback Packs are saved with `POST /usage/chargeback-pack` under ignored local folder `data/usage_packs/`.
 - Governed Skill Platform Pack reports are available at `GET /platform/pack`.
 - Governed Skill Platform Pack artifacts are saved with `POST /platform/pack/export` under ignored local folder `data/platform_packs/`.
+- Runtime Skill Quarantine reports are available at `GET /quarantine/report`.
+- Runtime Skill Quarantine packs are saved with `POST /quarantine/pack` under ignored local folder `data/quarantine_packs/`.
+- Explicit kill-switch application is available at `POST /quarantine/apply` and records audit trace IDs for disabled skills.
 - Agent Collaboration runs are available at `POST /agents/collaborate`.
 - Agent Collaboration Pack artifacts are saved with `POST /agents/collaboration-pack` under ignored local folder `data/agent_collaboration/`.
 - Enterprise readiness is available at `GET /enterprise/readiness-scorecard`.

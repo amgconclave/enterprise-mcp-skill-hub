@@ -53,6 +53,7 @@ from app.models import (
     SkillIncidentRunbookRequest,
     SkillLineagePackRequest,
     SkillOwnershipPackRequest,
+    SkillQuarantinePackRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
@@ -320,6 +321,10 @@ async def main() -> None:
     )
     platform_operations_pack = await state.platform_operations.pack(
         PlatformOperationsDrillRequest(actor="demo-platform-operator")
+    )
+    quarantine_report = state.quarantine.report(actor="demo-platform-sre")
+    quarantine_pack = state.quarantine.pack(
+        SkillQuarantinePackRequest(actor="demo-platform-sre")
     )
     audit_integrity = state.audit_integrity.report()
     audit_integrity_pack = state.audit_integrity.pack(
@@ -623,6 +628,16 @@ async def main() -> None:
                 "platform_operations_risk_count": platform_operations_drill.summary["risk_count"],
                 "platform operations pack path": platform_operations_pack.markdown_path,
                 "platform_operations_pack_path": platform_operations_pack.markdown_path,
+                "skill quarantine readiness": quarantine_report.readiness_status,
+                "skill_quarantine_readiness": quarantine_report.readiness_status,
+                "skill quarantine recommended": quarantine_report.summary[
+                    "quarantine_recommended_count"
+                ],
+                "skill_quarantine_recommended": quarantine_report.summary[
+                    "quarantine_recommended_count"
+                ],
+                "skill quarantine pack path": quarantine_pack.markdown_path,
+                "skill_quarantine_pack_path": quarantine_pack.markdown_path,
                 "skill ownership readiness": ownership_matrix.readiness_status,
                 "skill_ownership_readiness": ownership_matrix.readiness_status,
                 "skill ownership owners": ownership_matrix.summary["owner_count"],

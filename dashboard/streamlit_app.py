@@ -70,6 +70,8 @@ from app.models import (
     SkillLineagePackRequest,
     SkillManifest,
     SkillOwnershipPackRequest,
+    SkillQuarantineApplyRequest,
+    SkillQuarantinePackRequest,
     SkillReliabilityPackRequest,
     SkillSloPackRequest,
     SupplyChainPackRequest,
@@ -131,6 +133,7 @@ view = st.sidebar.radio(
         "Skill Lineage",
         "Platform Pack",
         "Platform Operations",
+        "Skill Quarantine",
         "Skill Ownership",
         "Review SLA",
         "Agent Collaboration",
@@ -1441,6 +1444,62 @@ elif view == "Platform Operations":
             st.json(export.model_dump(mode="json"))
     with tab_json:
         st.json(drill.model_dump(mode="json"))
+
+elif view == "Skill Quarantine":
+    st.subheader("Skill Quarantine")
+    st.caption("Runtime kill-switch report for SLO, reliability, prompt-governance, provider, and MCP exposure risks.")
+    report = state.quarantine.report(actor="streamlit-platform-sre")
+    col_ready, col_recommended, col_quarantined, col_review = st.columns(4)
+    col_ready.metric("Readiness", report.readiness_status.upper())
+    col_recommended.metric("Recommended", report.summary["quarantine_recommended_count"])
+    col_quarantined.metric("Quarantined", report.summary["quarantined_count"])
+    col_review.metric("Review queue", report.summary["human_review_required_count"])
+
+    tab_decisions, tab_plan, tab_review, tab_export, tab_apply, tab_json = st.tabs(
+        ["Decisions", "Kill Switch", "Review Queue", "Quarantine Pack", "Apply", "JSON"]
+    )
+    with tab_decisions:
+        st.dataframe(
+            [record.model_dump(mode="json") for record in report.decisions],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.json({"patterns": report.architecture_patterns})
+    with tab_plan:
+        st.dataframe(report.kill_switch_plan, use_container_width=True, hide_index=True)
+        st.json(report.audit_evidence)
+    with tab_review:
+        st.dataframe(report.human_review_queue, use_container_width=True, hide_index=True)
+    with tab_export:
+        st.caption("Writes Markdown and JSON under data/quarantine_packs/.")
+        actor = st.text_input("Quarantine pack actor", value="streamlit-platform-sre")
+        if st.button("Export Skill Quarantine Pack", use_container_width=True):
+            export = state.quarantine.pack(SkillQuarantinePackRequest(actor=actor))
+            st.success("Skill Quarantine Pack exported.")
+            st.json(export.model_dump(mode="json"))
+    with tab_apply:
+        recommended_ids = [
+            record.skill_id
+            for record in report.decisions
+            if record.decision == "quarantine_recommended"
+        ]
+        selected_ids = st.multiselect("Skills to disable", recommended_ids, default=recommended_ids)
+        reason = st.text_area(
+            "Reason",
+            value="Runtime quarantine applied from Streamlit kill-switch report.",
+        )
+        if st.button("Apply Quarantine", use_container_width=True):
+            result = state.quarantine.apply(
+                SkillQuarantineApplyRequest(
+                    actor="streamlit-platform-sre",
+                    skill_ids=selected_ids,
+                    reason=reason,
+                )
+            )
+            st.warning("Quarantine apply completed. Review the result before continuing.")
+            st.json(result.model_dump(mode="json"))
+    with tab_json:
+        st.json(report.model_dump(mode="json"))
 
 elif view == "Skill Ownership":
     st.subheader("Skill Ownership")

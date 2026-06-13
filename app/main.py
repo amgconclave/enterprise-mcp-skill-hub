@@ -178,6 +178,11 @@ from app.models import (
     SkillOwnershipMatrixResult,
     SkillOwnershipPackRequest,
     SkillOwnershipPackResult,
+    SkillQuarantineApplyRequest,
+    SkillQuarantineApplyResult,
+    SkillQuarantinePackRequest,
+    SkillQuarantinePackResult,
+    SkillQuarantineReport,
     SkillReliabilityPackRequest,
     SkillReliabilityPackResult,
     SkillReliabilityRecord,
@@ -794,6 +799,27 @@ def skill_ownership_pack(
     _: str = Depends(require_api_key),
 ) -> SkillOwnershipPackResult:
     return state.ownership.pack(request or SkillOwnershipPackRequest())
+
+
+@app.get("/quarantine/report", response_model=SkillQuarantineReport)
+def skill_quarantine_report(_: str = Depends(require_api_key)) -> SkillQuarantineReport:
+    return state.quarantine.report(actor="api-platform-sre")
+
+
+@app.post("/quarantine/pack", response_model=SkillQuarantinePackResult)
+def skill_quarantine_pack(
+    request: SkillQuarantinePackRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillQuarantinePackResult:
+    return state.quarantine.pack(request or SkillQuarantinePackRequest())
+
+
+@app.post("/quarantine/apply", response_model=SkillQuarantineApplyResult)
+def skill_quarantine_apply(
+    request: SkillQuarantineApplyRequest | None = None,
+    _: str = Depends(require_api_key),
+) -> SkillQuarantineApplyResult:
+    return state.quarantine.apply(request or SkillQuarantineApplyRequest())
 
 
 @app.get("/reviews/sla", response_model=ReviewSlaReport)

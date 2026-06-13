@@ -37,6 +37,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Skill Lineage Pack for mapping MCP-exposed skills to manifest/schema fingerprints, resources, prompts, workflows, policy controls, providers, recent invocations, reviewer actions, and ignored `data/lineage/` artifacts.
 - Governed Skill Platform Pack for platform-team evidence across durable workflows, human-in-the-loop review, governance, provider flexibility, tool governance, cost/trace tracking, handoffs, and ignored `data/platform_packs/` artifacts.
 - Platform Operations Drill Pack for operator state observation across sandbox policy, run transparency, repository automation dry-run, worker scale-out, policy replay, bounded action loops, step verification, and ignored `data/platform_operations/` artifacts.
+- Runtime Skill Quarantine Pack for SLO, reliability, prompt-governance, provider, owner-review, MCP exposure, kill-switch, rollback, and ignored `data/quarantine_packs/` artifacts.
 - Skill Ownership + Escalation Pack for manifest owner/team/channel metadata, support tiers, risk-aware escalation routes, handoff plans, and ignored `data/ownership_packs/` artifacts.
 - Human Review SLA Pack for workflow review, marketplace approval, and sandbox exception queues with SLA status, escalation owner, recommended action, trace evidence, and ignored `data/review_sla/` artifacts.
 - Agent Collaboration Pack for deterministic multi-agent conversation, shared state, governed handoffs, MCP tool governance, trace IDs, local token/cost tracking, and ignored `data/agent_collaboration/` artifacts.
@@ -64,7 +65,7 @@ The default mode is deterministic mock LLM execution, so a fresh clone works wit
 - Portfolio README Consistency Auditor + Final Handoff Pack for checking README/docs/API/demo/MCP claims against implemented endpoints, MCP tools/resources/prompts, scripts, generated artifacts, local/mock limits, and optional Azure/OpenAI notes, then writing ignored `data/final_handoff/` Markdown/JSON artifacts.
 - Optional enforced invocation for FastAPI and MCP calls, with denied attempts captured in audit and metrics.
 - Trace IDs, audit events, invocation history, deterministic replay, latency/token/cost metrics, policy simulation, golden eval scorecards, conformance reports, per-skill governance reports, security evidence bundles, local JSON snapshots, and API-key auth.
-- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Skill Lineage, Platform Pack, Platform Operations, Skill Ownership, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Policy Replay, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
+- Streamlit admin console for catalog, validation, promotion, invocation, policy simulation, tenant policy sandbox, Tenant RBAC / Entitlements, Skill Marketplace, Skill Usage Analytics, Skill Reliability, Skill SLO, Eval Regression Gate, Provider Readiness, Provider Failover, Config Hygiene, Skill Lineage, Platform Pack, Platform Operations, Skill Quarantine, Skill Ownership, Review SLA, Agent Collaboration, Agent Society Evaluation, Worker Scale-Out, Run Transparency, Policy Replay, Audit Integrity, Prompt Governance, Privacy Retention, Supply Chain, enterprise readiness, Portfolio Pack, Reviewer Quickstart, Artifact Inventory, launch checklist, CI Doctor / Audit Pack, UI Verification, Git Readiness, Repository Automation, Final Handoff, Release Pack, workflow composition, workflow review queue, demo agent, eval lab, conformance/replay, security evidence/audit, audit query/attestation, release preview/release notes, capacity forecast/guardrails, dependency map/blast-radius, skill incident drill/runbook, MCP inspector, governance reports, metrics, and audit.
 - Streamlit admin console includes a Skill Compatibility view for compatibility matrix, deprecated skill warnings, migration recommendations, and Compatibility Pack export.
 - Sample policy/product resources, workflow templates, sample skill manifests, tests, eval smoke command, Docker Compose, and GitHub Actions CI.
 
@@ -613,6 +614,24 @@ Get-ChildItem -Recurse -File data\platform_packs -ErrorAction SilentlyContinue |
 ```
 
 `GET /platform/pack` rolls up durable workflow templates, human-in-the-loop review state, governance/conformance posture, provider fallback readiness, MCP tool governance, estimated cost/trace signals, and handoff readiness into one platform-team report. `POST /platform/pack/export` writes `governed_skill_platform_pack_latest.json` and `.md` under ignored `data/platform_packs/`. The Streamlit dashboard has a `Platform Pack` view, and `python -m app.demo` prints platform pack readiness plus the artifact path.
+
+## Runtime Skill Quarantine Pack
+
+Prepare and optionally apply a local kill switch for risky MCP skills:
+
+```powershell
+$headers = @{ "X-API-Key" = "dev-local-token" }
+Invoke-RestMethod http://localhost:8000/quarantine/report -Headers $headers
+Invoke-RestMethod http://localhost:8000/quarantine/pack -Method POST -Headers $headers
+Invoke-RestMethod http://localhost:8000/quarantine/apply `
+  -Method POST `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"skill_ids":["search_knowledge_base"],"actor":"platform-sre","reason":"SLO kill-switch drill"}'
+Get-ChildItem -Recurse -File data\quarantine_packs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime
+```
+
+`GET /quarantine/report` combines SLO release gates, reliability recommendations, prompt-governance findings, provider posture, ownership metadata, and MCP exposure into per-skill allow/monitor/quarantine decisions. `POST /quarantine/pack` writes `skill_quarantine_pack_latest.json` and `.md` under ignored `data/quarantine_packs/`. `POST /quarantine/apply` is explicit and disables only requested or recommended skills in the local registry, recording audit trace IDs for rollback review. The Streamlit dashboard has a `Skill Quarantine` view, and `python -m app.demo` prints quarantine readiness plus the artifact path.
 
 ## Skill Ownership And Escalation Pack
 

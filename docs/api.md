@@ -87,6 +87,9 @@ Protected endpoints require `X-API-Key: dev-local-token` by default. `POST /auth
 - `POST /platform/pack/export` - writes the Governed Skill Platform Pack Markdown/JSON under ignored local folder `data/platform_packs/`.
 - `GET /platform/operations-drill` - returns a local platform operations drill with state observations across platform controls, worker scale-out, queue admission, run transparency, sandbox policy, policy replay, and repository automation dry-run.
 - `POST /platform/operations-pack` - writes the Platform Operations Drill Pack Markdown/JSON under ignored local folder `data/platform_operations/`.
+- `GET /quarantine/report` - returns runtime kill-switch decisions across SLO, reliability, prompt governance, provider posture, ownership, and MCP exposure.
+- `POST /quarantine/pack` - writes the Runtime Skill Quarantine Pack Markdown/JSON under ignored local folder `data/quarantine_packs/`.
+- `POST /quarantine/apply` - explicitly disables requested or report-recommended skills in the local registry and records audit trace IDs.
 - `GET /ownership/matrix` - returns the Skill Ownership matrix with owner/team/channel metadata, support tiers, risk-aware escalation routes, handoff plan, evidence refs, trace IDs, and review actions.
 - `POST /ownership/pack` - writes the Skill Ownership and Escalation Pack Markdown/JSON under ignored local folder `data/ownership_packs/`.
 - `GET /reviews/sla` - returns a Human Review SLA report across workflow reviews, marketplace approvals, and sandbox exceptions with SLA status, escalation level, owner, trace evidence, and recommended actions.
@@ -611,6 +614,14 @@ Invoke-RestMethod http://localhost:8000/providers/failover-pack `
 The failover drill uses static provider readiness plus promoted skill metadata to simulate OpenAI/Azure/provider outage, credential, quota, and budget failures. It returns per-scenario decisions, mock fallback selections, reviewer re-enable gates, trace IDs, replay commands, runbook steps, architecture patterns, local proof commands, and limitations. It performs zero provider network calls and keeps all hosted providers optional.
 
 The Provider Failover Drill Pack writes `provider_failover_drill_pack_latest.json` and `.md` under ignored `data/provider_failover/`. It is intended as provider-flexibility operational proof next to the static Provider Readiness + Fallback Pack.
+
+## Runtime Skill Quarantine
+
+`GET /quarantine/report` is a dry-run runtime kill-switch report. It reads local SLO release gates, reliability recommendations, prompt-governance findings, provider readiness, skill ownership metadata, and MCP exposure to classify each skill as `allow`, `monitor`, `quarantine_recommended`, or `quarantined`.
+
+`POST /quarantine/pack` writes `skill_quarantine_pack_latest.json` and `.md` under ignored `data/quarantine_packs/`. The pack includes per-skill evidence, a kill-switch plan, rollback actions, a human-review queue, audit trace evidence, proof commands, and local/mock limitations.
+
+`POST /quarantine/apply` is the only mutating quarantine endpoint. It disables requested skills in the local registry only when they are recommended by the current report unless `require_recommendation=false` is supplied. Each applied skill gets a `quarantine.skill_disabled` audit event with a trace ID.
 
 ## Config Hygiene And Secret Rotation
 
